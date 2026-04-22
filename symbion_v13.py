@@ -1053,7 +1053,50 @@ class SymbionTools:
 
 
 # ==============================================================================
-#  CONSTITUTION + BEHAVIORAL TESTS
+#  EVENT LOGGER (JSONL)
+# ==============================================================================
+
+class EventLogger:
+    """Append-only JSONL event stream for per-turn telemetry."""
+    def __init__(self, path: str = "symbion_events.jsonl"):
+        self._path = path
+
+    def log_turn(self, session: str, interaction_id: int, query: str,
+                 judge: Dict, emotion: str, tool_used: Optional[str],
+                 response_len: int, self_eval: Optional[Dict],
+                 revision_cause: Optional[str], stale_refresh: bool,
+                 latency_ms: Dict, provider: str, model: str):
+        entry = {
+            "ts": datetime.now().isoformat() + "Z",
+            "event": "turn",
+            "session": session,
+            "interaction_id": interaction_id,
+            "query_preview": query[:120],
+            "judge": {
+                "should_assist": judge.get("should_assist", True),
+                "benefit": judge.get("human_benefit_score", 0),
+                "confidence": judge.get("confidence", 0),
+                "over_cautious": judge.get("over_cautious", False),
+            },
+            "emotion": emotion,
+            "tool_used": tool_used,
+            "response_len": response_len,
+            "self_eval": self_eval,
+            "revision_cause": revision_cause,
+            "stale_refresh": stale_refresh,
+            "latency_ms": latency_ms,
+            "provider": provider,
+            "model": model,
+        }
+        try:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception as ex:
+            logger.error(f"EventLogger: {ex}")
+
+
+# ==============================================================================
+#  CONSTITUTION
 # ==============================================================================
 
 class SymbionConstitution:
@@ -1540,6 +1583,7 @@ class SYMBION:
         self.health          = HealthMetrics()
         self.heuristic      = HeuristicJudge()
         self.tools          = SymbionTools("./symbion_workspace")
+        self.events         = EventLogger()
 
         self.identity       = LongitudinalIdentity(self.cfg.db_path)
         self.tasks          = TaskEngine(self.cfg.db_path)
@@ -1875,6 +1919,7 @@ class SYMBION:
 
     async def respond(self, text: str, session: str,
                       token_callback=None) -> Tuple[str, Dict, int]:
+        _t0 = time.monotonic()
         # Track sessions
         is_new_session = session not in self._seen_sessions
         if is_new_session:
@@ -1961,7 +2006,7 @@ class SYMBION:
         draft = ""; reasoning = ""; task_failed = False
         revised = False; quality_score = 1.0
         recklessness_risk = False; scope_exceeded = False
-        had_reasoning = False
+        had_reasoning = False; stale_refresh = False
 
         resp_client = self._responder_client()
 
@@ -2010,7 +2055,7 @@ class SYMBION:
                                 if token_callback: await token_callback(tok)
                         except Exception as ex: logger.error(f"Stale revision: {ex}")
                         if stale_draft:
-                            draft = stale_draft; revised = True; quality_score = 0.9
+                            draft = stale_draft; revised = True; quality_score = 0.9; stale_refresh = True
 
             # Self-eval + revision (skip if stale-draft already revised)
             if not refusal and not task_failed and not revised:
@@ -2084,6 +2129,22 @@ class SYMBION:
 
         self._write_log(text, full_response, evaluation, revised, quality_score,
                         emotional_state, reasoning)
+
+        # JSONL event log
+        _total_ms = int((time.monotonic() - _t0) * 1000)
+        self.events.log_turn(
+            session=session, interaction_id=iid, query=text,
+            judge=evaluation, emotion=emotional_state.get("state",""),
+            tool_used=None if not tool_context else "auto",
+            response_len=len(full_response),
+            self_eval={"score": quality_score, "revised": revised} if not refusal else None,
+            revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
+            stale_refresh=stale_refresh,
+            latency_ms={"total": _total_ms},
+            provider=self.cfg.llm_provider,
+            model=self._rmodel(),
+        )
+
         return full_response, evaluation, iid
 
     def respond_sync(self, text: str, session: str) -> Tuple[str,Dict,int]:
