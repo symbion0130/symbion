@@ -98,7 +98,7 @@ class SymbionConfig:
 
     show_reasoning: bool = False
 
-    memory_summary_every: int = 8
+    memory_summary_every: int = 16
     profile_update_every: int = 4
 
     tools_enabled:    bool = True
@@ -1126,6 +1126,27 @@ class ContradictionTracker:
         with sqlite3.connect(self.db) as c:
             return c.execute("SELECT COUNT(*) FROM user_positions").fetchone()[0]
 
+    def get_relevant_positions(self, query: str, k: int = 3) -> List[Dict]:
+        """Return user positions whose topic overlaps with the query (keyword match)."""
+        words = set(query.lower().split())
+        # Filter out very short/common words
+        words = {w for w in words if len(w) > 3}
+        if not words:
+            return []
+        with sqlite3.connect(self.db) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                "SELECT topic, position, confidence FROM user_positions "
+                "ORDER BY id DESC LIMIT 100").fetchall()
+        results = []
+        for r in rows:
+            topic_words = set(r["topic"].lower().split())
+            if words & topic_words:
+                results.append(dict(r))
+                if len(results) >= k:
+                    break
+        return results
+
 
 # ==============================================================================
 #  KNOWLEDGE GAP TRACKER
@@ -1212,6 +1233,24 @@ class SymbionMemory:
                 (session,n)).fetchall()
         return [r[0] for r in reversed(rows)]
 
+    def get_relevant_summaries(self, query: str, k: int = 2) -> List[str]:
+        """Keyword-based retrieval over all summaries (cross-session)."""
+        words = set(query.lower().split())
+        words = {w for w in words if len(w) > 3}
+        if not words:
+            return []
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT content FROM summaries ORDER BY id DESC LIMIT 50").fetchall()
+        scored = []
+        for r in rows:
+            content_lower = r[0].lower()
+            overlap = sum(1 for w in words if w in content_lower)
+            if overlap > 0:
+                scored.append((overlap, r[0]))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [s[1] for s in scored[:k]]
+
     def unsummarised_count(self, session: str) -> int:
         with sqlite3.connect(self.db) as c:
             return c.execute(
@@ -1238,9 +1277,11 @@ class SymbionMemory:
             c.commit()
 
     def build_context(self, session: str, identity: "LongitudinalIdentity",
-                      tasks: "TaskEngine", gaps: "KnowledgeGapTracker") -> "Tuple[List[Dict],str]":
+                      tasks: "TaskEngine", gaps: "KnowledgeGapTracker",
+                      contradictions: "ContradictionTracker" = None,
+                      query: str = "") -> "Tuple[List[Dict],str]":
         recent    = self.get_recent(session, n=10)
-        summaries = self.get_summaries(session, n=2)
+        summaries = self.get_summaries(session, n=1)  # most recent session summary
         profile   = self.get_profile()
         parts     = []
 
@@ -1257,6 +1298,24 @@ class SymbionMemory:
 
         if summaries:
             parts.append("Earlier in this conversation:\n"+"\n\n".join(summaries))
+
+        # Relevant cross-session summaries (keyword match)
+        if query:
+            relevant = self.get_relevant_summaries(query, k=2)
+            # Deduplicate against session summaries
+            existing = set(summaries)
+            relevant = [s for s in relevant if s not in existing]
+            if relevant:
+                parts.append("From past conversations:\n"+"\n\n".join(relevant))
+
+        # Relevant user positions on-topic
+        if query and contradictions:
+            positions = contradictions.get_relevant_positions(query, k=3)
+            if positions:
+                pos_lines = []
+                for p in positions:
+                    pos_lines.append(f"On {p['topic']}: \"{p['position']}\"")
+                parts.append("The person has previously said:\n"+"\n".join(pos_lines))
 
         identity_ctx = identity.get_identity_summary()
         if identity_ctx: parts.append(identity_ctx)
@@ -1741,7 +1800,8 @@ class SYMBION:
 
         # 3. Build context
         history, preamble = self.memory.build_context(
-            session, self.identity, self.tasks, self.gaps)
+            session, self.identity, self.tasks, self.gaps,
+            contradictions=self.contradictions, query=text)
         _, mood_add = self.health.mood()
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
 
