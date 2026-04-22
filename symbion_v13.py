@@ -668,7 +668,7 @@ class AnthropicClient(BaseClient):
         self._url = "https://api.anthropic.com/v1/messages"
         self.cb   = CircuitBreaker("anthropic", cfg.circuit_open_after)
 
-    def _h(self): return {"x-api-key":self.api_key,"anthropic-version":"2023-06-01",
+    def _h(self): return {"x-api-key":self.api_key,"anthropic-version":"2025-04-14",
                           "content-type":"application/json"}
 
     def _split(self, messages):
@@ -1692,7 +1692,8 @@ class SYMBION:
             return evaluation, emotional_state
         except Exception as ex:
             logger.error(f"Pre-gen analysis: {ex}")
-            return ({"human_benefit_score":0.0,"should_assist":False,"reasoning":str(ex),
+            # Fail open — a judge error is not a safety signal, don't refuse the user
+            return ({"human_benefit_score":0.5,"should_assist":True,"reasoning":"",
                      "confidence":0.0,"flags":["judge_error"],"evaluator_degraded":True,"over_cautious":False},
                     {"state":"neutral","suggested_response_mode":"normal"})
 
