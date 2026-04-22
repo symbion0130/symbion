@@ -53,14 +53,4 @@ def config():
     cfg.llm_provider = "ollama"
     cfg.tools_enabled = False
     cfg.self_eval_enabled = False
-    cfg.eval_awareness_enabled = False
-    cfg.sandbagging_check_enabled = False
-    cfg.reward_hack_check_enabled = False
-    cfg.sycophancy_check_enabled = False
-    cfg.deception_check_enabled = False
-    cfg.sit_awareness_enabled = False
-    cfg.frame_acceptance_enabled = False
-    cfg.scheming_check_enabled = False
-    cfg.swarm_enabled = False
-    cfg.test_mode = True
     return cfg
