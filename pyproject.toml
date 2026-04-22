@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "symbion"
+version = "14.0.0"
+description = "Async AI assistant with multi-provider LLM support, behavioral safety, and longitudinal identity"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.100", "uvicorn>=0.20"]
+
+[project.scripts]
+symbion = "symbion.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["symbion*"]
+
+[tool.setuptools.package-data]
+"symbion.web.templates" = ["*.html"]
