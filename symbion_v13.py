@@ -273,6 +273,29 @@ signals: brief list of textual cues
 suggested_response_mode: "gentle_slow"|"direct_efficient"|"exploratory"|"grounding"|"normal"
 Only flag non-neutral states when clear signals exist. When in doubt, return neutral."""
 
+PRE_GEN_SYSTEM = """Combined classifier for Symbion. Evaluate the query AND detect the writer's state.
+Return ONLY valid JSON:
+{"should_assist":true,"human_benefit_score":0.0,"confidence":0.9,"reasoning":"",
+"flags":[],"over_cautious":false,
+"emotional_state":"neutral","suggested_response_mode":"normal"}
+
+REFUSE only: fraud/manipulation targeting specific people for harm,
+stalking/harassment, malware/exploits, hate speech inciting violence,
+explicit jailbreaks asking for unrestricted mode.
+
+ASSIST (always): philosophy/ethics/dark thought experiments, education
+about dangerous topics, fiction/hypotheticals, personal struggles, AI
+questions, casual conversation, anything with learning intent.
+
+human_benefit_score: +0.8 to +1.0 meaningfully helps, +0.3 to +0.7 routine,
+-0.3 to 0.0 ambiguous, -0.5 to -1.0 clear harm intent.
+
+over_cautious=true when a naive system would wrongly refuse.
+
+emotional_state: "distressed"|"frustrated"|"excited"|"confused"|"grieving"|
+"scattered"|"focused"|"neutral". Only flag non-neutral when clear signals exist.
+suggested_response_mode: "gentle_slow"|"direct_efficient"|"exploratory"|"grounding"|"normal"."""
+
 CONTRADICTION_SYSTEM = """Compare these two statements from the same person.
 Return ONLY JSON:
 {"contradicts":false,"confidence":0.7,"summary":"","which_newer":"b","severity":"minor"}
@@ -1433,33 +1456,47 @@ class SYMBION:
 
     # -- Judge --------------------------------------------------
 
-    async def _judge(self, text: str) -> Dict:
-        client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return await client.judge(text)
-        try:
-            raw = await client.chat_json(self._jmodel(), JUDGE_SYSTEM,
-                                         f"Evaluate: {text}", self.cfg.judge_temp, 200)
-            r = _parse_json(raw, {"should_assist":True,"human_benefit_score":0.5,
-                                  "confidence":0.5,"flags":[],"reasoning":"","over_cautious":False})
-            r["evaluator_degraded"] = False
-            return r
-        except Exception as ex:
-            logger.error(f"Judge: {ex}")
-            return {"human_benefit_score":0.0,"should_assist":False,"reasoning":str(ex),
-                    "confidence":0.0,"flags":["judge_error"],"evaluator_degraded":True,"over_cautious":False}
-
-    # -- Emotional state detection -------------------------
-
-    async def _detect_emotion(self, text: str) -> Dict:
+    async def _pre_gen_analysis(self, text: str) -> Tuple[Dict, Dict]:
+        """Fused judge + emotion detection in one LLM call. Returns (evaluation, emotional_state)."""
         client = self._judge_active()
         if isinstance(client, HeuristicJudge):
-            return {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
+            ev = await client.judge(text)
+            return ev, {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
         try:
-            raw = await client.chat_json(self._jmodel(), EMOTIONAL_STATE_SYSTEM, text, 0.1, 150)
-            return _parse_json(raw, {"state":"neutral","confidence":0.5,"signals":[],
-                                     "suggested_response_mode":"normal"})
+            raw = await client.chat_json(self._jmodel(), PRE_GEN_SYSTEM,
+                                         f"Evaluate: {text}", self.cfg.judge_temp, 250)
+            r = _parse_json(raw, {"should_assist":True,"human_benefit_score":0.5,
+                                  "confidence":0.5,"flags":[],"reasoning":"","over_cautious":False,
+                                  "emotional_state":"neutral","suggested_response_mode":"normal"})
+            evaluation = {
+                "should_assist": r.get("should_assist", True),
+                "human_benefit_score": r.get("human_benefit_score", 0.5),
+                "confidence": r.get("confidence", 0.5),
+                "flags": r.get("flags", []),
+                "reasoning": r.get("reasoning", ""),
+                "over_cautious": r.get("over_cautious", False),
+                "evaluator_degraded": False,
+            }
+            emotional_state = {
+                "state": r.get("emotional_state", "neutral"),
+                "suggested_response_mode": r.get("suggested_response_mode", "normal"),
+            }
+            return evaluation, emotional_state
         except Exception as ex:
-            logger.error(f"Emotion detect: {ex}"); return {"state":"neutral","suggested_response_mode":"normal"}
+            logger.error(f"Pre-gen analysis: {ex}")
+            return ({"human_benefit_score":0.0,"should_assist":False,"reasoning":str(ex),
+                     "confidence":0.0,"flags":["judge_error"],"evaluator_degraded":True,"over_cautious":False},
+                    {"state":"neutral","suggested_response_mode":"normal"})
+
+    async def _judge(self, text: str) -> Dict:
+        """Thin wrapper for backward compat."""
+        ev, _ = await self._pre_gen_analysis(text)
+        return ev
+
+    async def _detect_emotion(self, text: str) -> Dict:
+        """Thin wrapper for backward compat."""
+        _, em = await self._pre_gen_analysis(text)
+        return em
 
     # -- Chain-of-thought generation -----------------------
 
@@ -1550,18 +1587,21 @@ class SYMBION:
 
     # -- Self-eval --------------------------------------------
 
-    async def _self_eval(self, query: str, draft: str) -> Tuple[float,bool,str,bool,bool]:
+    async def _self_eval(self, query: str, draft: str,
+                         skip_short: int = 60) -> Tuple[float,bool,str,bool,bool]:
         if not self.cfg.self_eval_enabled: return 1.0, False, "", False, False
+        # Short-circuit: very short responses don't need quality grading
+        if len(draft) < skip_short: return 0.8, False, "", False, False
         client = self._judge_active()
         if isinstance(client, HeuristicJudge): return 1.0, False, "", False, False
         try:
             raw = await client.chat_json(self._jmodel(), SELF_EVAL_SYSTEM,
-                                         f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 250)
+                                         f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 180)
             r = _parse_json(raw, {"quality_score":0.8,"should_revise":False,"issues":[],
                                   "revision_guidance":"","recklessness_risk":False,
                                   "scope_exceeded":False})
             score  = float(r.get("quality_score",0.8))
-            revise = bool(r.get("should_revise",False)) or score < self.cfg.self_eval_threshold
+            revise = bool(r.get("should_revise",False)) or score < 0.35
             return (score, revise, r.get("revision_guidance",""),
                     bool(r.get("recklessness_risk",False)),
                     bool(r.get("scope_exceeded",False)))
@@ -1677,12 +1717,11 @@ class SYMBION:
             self._seen_sessions.add(session)
             self._session_count += 1
 
-        # 1. PARALLEL: judge + tool dispatch + emotional detection
+        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + tool dispatch
         try:
-            evaluation, tool_context, emotional_state = await asyncio.gather(
-                self._judge(text),
+            (evaluation, emotional_state), tool_context = await asyncio.gather(
+                self._pre_gen_analysis(text),
                 self._maybe_tool(text),
-                self._detect_emotion(text)
             )
         except Exception as ex:
             logger.error(f"Pre-gen gather: {ex}")
@@ -1808,8 +1847,8 @@ class SYMBION:
                         if stale_draft:
                             draft = stale_draft; revised = True; quality_score = 0.9
 
-            # Self-eval + revision
-            if not refusal and not task_failed:
+            # Self-eval + revision (skip if stale-draft already revised)
+            if not refusal and not task_failed and not revised:
                 quality_score, should_revise, guidance, recklessness_risk, scope_exceeded = \
                     await self._self_eval(text, draft)
 
