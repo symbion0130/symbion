@@ -684,7 +684,11 @@ class AnthropicClient(BaseClient):
                 r = await c.post(self._url, headers=self._h(), json={
                     "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,
                     "system":system,"messages":[{"role":"user","content":user}]})
-                r.raise_for_status()
+                if r.status_code != 200:
+                    body = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
+                    msg = body.get("error",{}).get("message", r.text[:200])
+                    logger.error(f"Anthropic {r.status_code}: {msg}")
+                    raise RuntimeError(f"Anthropic API {r.status_code}: {msg}")
                 return r.json()["content"][0]["text"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
@@ -705,7 +709,14 @@ class AnthropicClient(BaseClient):
             async with c.stream("POST", self._url, headers=self._h(), json={
                 "model":model or self.model,"max_tokens":cfg.max_tokens,"temperature":cfg.temperature,
                 "system":system or SYMBION_PERSONA,"messages":msgs,"stream":True}) as resp:
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    try:
+                        msg = json.loads(body).get("error",{}).get("message", body[:200].decode())
+                    except Exception:
+                        msg = body[:200].decode(errors="replace")
+                    raise RuntimeError(f"Anthropic API {resp.status_code}: {msg}")
+
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "): continue
                     data = line[6:]
