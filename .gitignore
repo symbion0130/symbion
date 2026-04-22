@@ -1,0 +1,51 @@
+# Environment
+.env
+*.txt
+venv/
+__pycache__/
+*.pyc
+
+# Node (not part of Symbion)
+node_modules/
+node.exe
+npm
+npm.cmd
+npm.ps1
+npx
+npx.cmd
+npx.ps1
+corepack
+corepack.cmd
+nodevars.bat
+
+# Data files
+*.db
+*.db.bak
+*.db.v13.bak
+*.log
+
+# Backups
+*.orig
+*.bak
+
+# IDE / tools
+.claude/
+fix_*.py
+fix_*.ps1
+install_tools.bat
+
+# Old versions (kept for reference but not tracked)
+symbion_v3.py
+symbion_v4.py
+symbion_v6.py
+symbion_v7.py
+symbion_v8.py
+symbion_v9.py
+symbion_v10.py
+symbion_v11.py
+symbion_v11_claude_code_prompt.md
+symbion_v12.py
+_append_v11.py
+_append_v11b.py
+symbion_agent.py
+symbion_core.py
