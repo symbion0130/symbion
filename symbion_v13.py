@@ -9,7 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 
 try:    import httpx; _HTTPX = True
-except: _HTTPX = False
+except ImportError: _HTTPX = False
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -17,7 +17,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
     _FASTAPI = True
-except: _FASTAPI = False
+except ImportError: _FASTAPI = False
 
 
 def _load_dotenv_safe():
@@ -65,7 +65,7 @@ def blue(t):    return _c("34", t)
 
 logger = logging.getLogger("symbion")
 try:    _TW = min(os.get_terminal_size().columns, 100)
-except: _TW = 88
+except Exception: _TW = 88
 
 
 # ==============================================================================
@@ -564,10 +564,31 @@ class RateLimiter:
 
 def _parse_json(raw: str, fallback: Dict) -> Dict:
     cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m: cleaned = m.group(0)
+    # Brace-counting extractor (handles string-literal braces)
+    start = cleaned.find("{")
+    if start == -1:
+        try:    return json.loads(cleaned)
+        except Exception: return fallback
+    depth = 0; in_str = False; escape = False
+    for i in range(start, len(cleaned)):
+        ch = cleaned[i]
+        if escape:
+            escape = False; continue
+        if ch == '\\' and in_str:
+            escape = True; continue
+        if ch == '"':
+            in_str = not in_str; continue
+        if in_str:
+            continue
+        if ch == '{': depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = cleaned[start:i+1]
+                try:    return json.loads(candidate)
+                except Exception: break
     try:    return json.loads(cleaned)
-    except: return fallback
+    except Exception: return fallback
 
 
 class BaseClient:
@@ -599,7 +620,7 @@ class OllamaClient(BaseClient):
     def is_available(self) -> bool:
         if not _HTTPX: return False
         try:    return httpx.get(f"{self.host}/api/tags", timeout=3).status_code == 200
-        except: return False
+        except Exception: return False
 
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
         async def _call():
@@ -824,28 +845,104 @@ class HeuristicJudge(BaseClient):
 #  TOOLS
 # ==============================================================================
 
+import ast as _ast, math as _math, socket as _socket
+
+_CALC_ALLOWED_NODES = (
+    _ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Constant,
+    _ast.Call, _ast.Name, _ast.Load,
+    _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Mod, _ast.Pow,
+    _ast.FloorDiv, _ast.USub, _ast.UAdd,
+)
+_CALC_ALLOWED_FUNCS = {
+    "sqrt": _math.sqrt, "sin": _math.sin, "cos": _math.cos, "tan": _math.tan,
+    "log": _math.log, "abs": abs, "round": round, "floor": _math.floor, "ceil": _math.ceil,
+}
+_CALC_ALLOWED_NAMES = {"pi": _math.pi, "e": _math.e}
+
+def _safe_calc(expr: str) -> str:
+    """AST-based calculator — no eval()."""
+    clean = expr.replace("^", "**")
+    try:
+        tree = _ast.parse(clean, mode="eval")
+    except SyntaxError as ex:
+        return f"Error: {ex}"
+    # Validate all nodes
+    for node in _ast.walk(tree):
+        if not isinstance(node, _CALC_ALLOWED_NODES):
+            return f"Error: unsafe expression (disallowed: {type(node).__name__})"
+        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float, complex)):
+            return f"Error: only numeric constants allowed"
+        if isinstance(node, _ast.Name) and node.id not in _CALC_ALLOWED_NAMES and node.id not in _CALC_ALLOWED_FUNCS:
+            return f"Error: unknown name '{node.id}'"
+        if isinstance(node, _ast.Call):
+            if not isinstance(node.func, _ast.Name) or node.func.id not in _CALC_ALLOWED_FUNCS:
+                return f"Error: unsafe function call"
+    # Safe to compile and eval the validated AST
+    code = compile(tree, "<calc>", "eval")
+    try:
+        result = eval(code, {"__builtins__": {}}, {**_CALC_ALLOWED_FUNCS, **_CALC_ALLOWED_NAMES})
+        return str(result)
+    except Exception as ex:
+        return f"Error: {ex}"
+
+
+def _is_safe_url(url: str) -> Tuple[bool, str]:
+    """SSRF protection: reject non-http schemes, private IPs, and metadata endpoints."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False, "Invalid URL"
+    if parsed.scheme not in ("http", "https"):
+        return False, f"Blocked scheme: {parsed.scheme}"
+    host = parsed.hostname or ""
+    if not host:
+        return False, "No host"
+    blocked_hosts = {"localhost", "metadata.google.internal", "metadata.goog"}
+    if host.lower() in blocked_hosts:
+        return False, f"Blocked host: {host}"
+    try:
+        addrs = _socket.getaddrinfo(host, parsed.port or 443, proto=_socket.IPPROTO_TCP)
+        import ipaddress
+        for family, _, _, _, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+                return False, f"Blocked address: {ip}"
+    except _socket.gaierror:
+        pass  # DNS resolution failed — allow (might be valid, let the fetch fail)
+    except Exception:
+        pass
+    return True, "ok"
+
+
+def _resolve_in_workspace(path: str, root: Path) -> Path:
+    """Resolve path within workspace, rejecting escapes."""
+    resolved_root = root.resolve()
+    p = (root / path).resolve()
+    if not str(p).startswith(str(resolved_root)):
+        raise ValueError(f"Path escapes workspace: {path}")
+    if p.is_symlink():
+        target = p.resolve()
+        if not str(target).startswith(str(resolved_root)):
+            raise ValueError(f"Symlink target escapes workspace: {path}")
+    return p
+
+
 class SymbionTools:
+    def __init__(self, workspace_root: str = "./symbion_workspace"):
+        self._workspace = Path(workspace_root)
+        self._workspace.mkdir(parents=True, exist_ok=True)
+
     @staticmethod
     def calculate(expr: str) -> str:
-        import math as _m
-        clean = expr.replace("^","**").replace("pi","3.14159265")
-        if re.search(r'[^\d\s\+\-\*\/\(\)\.\,eEpi%sqrtlogsincostabn_]', clean): return "Error: unsafe"
-        try:
-            result = eval(clean,{"__builtins__":{}},
-                         {"sqrt":_m.sqrt,"sin":_m.sin,"cos":_m.cos,"tan":_m.tan,
-                          "log":_m.log,"pi":_m.pi,"e":_m.e,"abs":abs,"round":round,
-                          "floor":_m.floor,"ceil":_m.ceil})
-            return str(result)
-        except Exception as ex: return f"Error: {ex}"
+        return _safe_calc(expr)
 
     @staticmethod
     def datetime_now() -> str: return datetime.now().strftime("%A, %B %d %Y / %H:%M:%S")
 
-    @staticmethod
-    def read_file(path: str, offset: int = 0, max_chars: int = 40000) -> str:
+    def read_file(self, path: str, offset: int = 0, max_chars: int = 40000) -> str:
         try:
-            p = Path(os.path.expanduser(path.strip()))
             if not path.strip(): return "Error: no path given"
+            p = _resolve_in_workspace(path.strip(), self._workspace)
             if not p.exists(): return f"Not found: {path}"
             if p.is_dir(): return f"That is a directory, not a file: {path}"
             content = p.read_text(errors="replace")
@@ -854,23 +951,28 @@ class SymbionTools:
             remaining = total - offset - len(chunk)
             suffix = ""
             if offset > 0:
-                suffix += f"[chars {offset}–{offset+len(chunk)} of {total}]"
+                suffix += f"[chars {offset}-{offset+len(chunk)} of {total}]"
             if remaining > 0:
                 suffix += f"\n\n[...{remaining} chars remaining — use read_file_chunk with offset={offset+len(chunk)} to continue]"
             return chunk + ("\n\n" + suffix if suffix else "")
+        except ValueError as ex:
+            return f"Error: {ex}"
         except Exception as ex:
             return f"Error reading {path}: {ex}"
 
-    @staticmethod
-    def read_file_chunk(path: str, offset: int, max_chars: int = 40000) -> str:
-        return SymbionTools.read_file(path, offset=offset, max_chars=max_chars)
+    def read_file_chunk(self, path: str, offset: int, max_chars: int = 40000) -> str:
+        return self.read_file(path, offset=offset, max_chars=max_chars)
 
-    @staticmethod
-    def write_file(path: str, content: str) -> str:
-        p = Path(os.path.expanduser(path))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding='utf-8')
-        return f"Written {len(content)} chars to {p}"
+    def write_file(self, path: str, content: str) -> str:
+        try:
+            p = _resolve_in_workspace(path.strip(), self._workspace)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding='utf-8')
+            return f"Written {len(content)} chars to {p}"
+        except ValueError as ex:
+            return f"Error: {ex}"
+        except Exception as ex:
+            return f"Error writing {path}: {ex}"
 
     @staticmethod
     async def web_search(query: str, brave_key: str = "", max_chars: int = 2400) -> str:
@@ -921,6 +1023,9 @@ class SymbionTools:
 
     @staticmethod
     async def fetch_url(url: str, max_chars: int = 4000) -> str:
+        safe, reason = _is_safe_url(url)
+        if not safe:
+            return f"Error: blocked URL — {reason}"
         try:
             req = urllib.request.Request(url,
                 headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
@@ -1216,7 +1321,7 @@ class SymbionMemory:
         result = {}
         for k,v in rows:
             try:    result[k] = json.loads(v)
-            except: result[k] = v
+            except Exception: result[k] = v
         return result
 
     def get_recent(self, session: str, n: int = 10) -> List[Dict]:
@@ -1434,7 +1539,7 @@ class SYMBION:
         self.learner        = SymbionLearner(self.cfg.db_path)
         self.health          = HealthMetrics()
         self.heuristic      = HeuristicJudge()
-        self.tools          = SymbionTools()
+        self.tools          = SymbionTools("./symbion_workspace")
 
         self.identity       = LongitudinalIdentity(self.cfg.db_path)
         self.tasks          = TaskEngine(self.cfg.db_path)
