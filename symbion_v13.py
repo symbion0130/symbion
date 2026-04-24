@@ -897,21 +897,27 @@ class KimiClient(BaseClient):
 class OfflineJudgeStub(BaseClient):
     """Degraded-mode placeholder when no real LLM judge is available.
 
-    Regex-based keyword match — not a real safety layer. _self_eval and every
-    other judge call path must early-exit when the active judge is this class.
+    This is NOT a safety layer and does not pretend to be one. When active it
+    returns a transparent degraded-mode verdict with low confidence — every
+    judge call path in SYMBION already early-exits on `isinstance(_, OfflineJudgeStub)`,
+    so this class never drives refusals, revisions, or gap/contradiction flags.
+    The earlier regex-keyword version was theatre: easily fooled by obfuscation,
+    context-blind, and gave false confidence to anyone reading the logs.
     """
     is_degraded = True
-    _HARM = [r"\bphish\w*\b",r"\bstalk\b",r"\bextort\b",r"\bblackmail\b",
-             r"\bmalware\b",r"\bransomware\b",r"no.{0,10}restriction",r"no.{0,10}ethic"]
-    _HELP = [r"\bhelp\b",r"\bunderstand\b",r"\blearn\b",r"\bexplain\b"]
 
     async def judge(self, query: str) -> Dict:
-        q = query.lower()
-        harm = [p for p in self._HARM if re.search(p,q)]
-        score = -0.5 if harm else min(0.5, sum(0.1 for p in self._HELP if re.search(p,q)))
-        return {"human_benefit_score":score,"should_assist":not bool(harm),
-                "reasoning":"Offline stub (no LLM available)","confidence":0.2,"over_cautious":False,
-                "flags":["EVALUATOR_DEGRADED"],"evaluator_degraded":True}
+        # No judgment is better than false judgment. Return neutral + degraded
+        # flag; the pipeline treats this as "fail open" (assist) but loudly.
+        return {
+            "human_benefit_score": 0.0,
+            "should_assist": True,
+            "reasoning": "No LLM judge available — degraded mode, no real evaluation performed.",
+            "confidence": 0.0,
+            "over_cautious": False,
+            "flags": ["EVALUATOR_DEGRADED", "NO_JUDGE"],
+            "evaluator_degraded": True,
+        }
 
 
 # ==============================================================================
@@ -1029,15 +1035,26 @@ class SymbionTools:
     def _is_image_path(self, path: str) -> bool:
         return Path(path).suffix.lower() in self._IMAGE_EXTS
 
+    @staticmethod
+    def _safe_name(path: str) -> str:
+        """Return just the basename for echoing in errors. Keeps absolute paths
+        and workspace-relative paths from leaking through error messages into
+        logs or the model's context — a low-value info-disclosure vector."""
+        try:
+            return Path(path).name or "<file>"
+        except Exception:
+            return "<file>"
+
     async def read_image(self, path: str, prompt: str, responder, model: str,
                           max_bytes: int = 5_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
             p = _resolve_in_workspace(path.strip(), self._workspace)
-            if not p.exists(): return f"Not found: {path}"
-            if p.is_dir(): return f"That is a directory, not a file: {path}"
+            name = self._safe_name(path)
+            if not p.exists(): return f"Not found: {name}"
+            if p.is_dir(): return f"That is a directory, not a file: {name}"
             if not self._is_image_path(str(p)):
-                return f"Not a supported image file: {path} (expected png/jpg/gif/webp/bmp)"
+                return f"Not a supported image file: {name} (expected png/jpg/gif/webp/bmp)"
             size = p.stat().st_size
             if size > max_bytes:
                 return f"Error: image too large ({size} bytes, max {max_bytes})"
@@ -1047,19 +1064,23 @@ class SymbionTools:
                         "switch with /provider or --provider anthropic.")
             desc = await responder.describe_image(model, str(p), prompt or "")
             return f"[Image description of {p.name} ({size} bytes)]\n{desc}"
+        except ValueError:
+            # _resolve_in_workspace rejected the path — don't echo it back.
+            return "Error: path not allowed (sandbox)"
         except FileNotFoundError:
-            return f"Not found: {path}"
+            return f"Not found: {self._safe_name(path)}"
         except Exception as ex:
-            return f"Error reading image {path}: {ex}"
+            return f"Error reading image {self._safe_name(path)}: {type(ex).__name__}"
 
     def read_file(self, path: str, offset: int = 0, max_chars: int = 2_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
             p = _resolve_in_workspace(path.strip(), self._workspace)
-            if not p.exists(): return f"Not found: {path}"
-            if p.is_dir(): return f"That is a directory, not a file: {path}"
+            name = self._safe_name(path)
+            if not p.exists(): return f"Not found: {name}"
+            if p.is_dir(): return f"That is a directory, not a file: {name}"
             if self._is_image_path(str(p)):
-                return (f"Error: {path} is an image. Use read_image(path) instead — "
+                return (f"Error: {name} is an image. Use read_image(path) instead — "
                         f"read_file returns raw bytes which are not useful for vision.")
             content = p.read_text(errors="replace")
             total = len(content)
@@ -1071,10 +1092,10 @@ class SymbionTools:
             if remaining > 0:
                 suffix += f"\n\n[...{remaining} chars remaining — use read_file_chunk with offset={offset+len(chunk)} to continue]"
             return chunk + ("\n\n" + suffix if suffix else "")
-        except ValueError as ex:
-            return f"Error: {ex}"
+        except ValueError:
+            return "Error: path not allowed (sandbox)"
         except Exception as ex:
-            return f"Error reading {path}: {ex}"
+            return f"Error reading {self._safe_name(path)}: {type(ex).__name__}"
 
     def read_file_chunk(self, path: str, offset: int, max_chars: int = 2_000_000) -> str:
         return self.read_file(path, offset=offset, max_chars=max_chars)
@@ -1084,11 +1105,11 @@ class SymbionTools:
             p = _resolve_in_workspace(path.strip(), self._workspace)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding='utf-8')
-            return f"Written {len(content)} chars to {p}"
-        except ValueError as ex:
-            return f"Error: {ex}"
+            return f"Written {len(content)} chars to {p.name}"
+        except ValueError:
+            return "Error: path not allowed (sandbox)"
         except Exception as ex:
-            return f"Error writing {path}: {ex}"
+            return f"Error writing {self._safe_name(path)}: {type(ex).__name__}"
 
     @staticmethod
     async def web_search(query: str, brave_key: str = "", max_chars: int = 2400) -> str:
@@ -1157,16 +1178,120 @@ class SymbionTools:
         except Exception as ex:
             return f"Error fetching {url}: {ex}"
 
+    _ALLOWED_TOOLS = frozenset({
+        "calculate","datetime","read_file","read_file_chunk",
+        "read_image","write_file","web_search","fetch_url",
+    })
+    _MAX_PATH_LEN = 1024
+    _MAX_URL_LEN = 2048
+    _MAX_QUERY_LEN = 2000
+    _MAX_EXPR_LEN = 500
+    _MAX_CONTENT_LEN = 5_000_000
+    _MAX_PROMPT_LEN = 1000
+    _PATH_BAD_CHARS = re.compile(r'[\x00-\x1f]')
+
+    @classmethod
+    def _validate_args(cls, tool: str, args: Dict) -> Tuple[bool, str, Dict]:
+        """Sanity-check LLM-supplied tool args before any filesystem/network I/O.
+
+        Ensures args is a dict with expected string/int shapes, caps lengths,
+        and rejects null bytes / control chars in paths. Returns
+        (ok, error_message, normalized_args). Downstream validators (the
+        workspace sandbox, SSRF check, AST calculator) still run — this is
+        the outer perimeter, not the only line of defence.
+        """
+        if tool not in cls._ALLOWED_TOOLS:
+            return False, f"Unknown tool: {tool}", {}
+        if not isinstance(args, dict):
+            return False, "tool_args must be an object", {}
+
+        out: Dict = {}
+
+        def _str(key: str, max_len: int, required: bool = True) -> Optional[str]:
+            v = args.get(key, "")
+            if not isinstance(v, str):
+                return None
+            v = v.strip()
+            if required and not v:
+                return None
+            if len(v) > max_len:
+                v = v[:max_len]
+            return v
+
+        def _int(key: str, default: int = 0, lo: int = 0, hi: int = 10**9) -> Optional[int]:
+            v = args.get(key, default)
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                return None
+            if iv < lo or iv > hi:
+                return None
+            return iv
+
+        def _check_path(p: str) -> Tuple[bool, str]:
+            if cls._PATH_BAD_CHARS.search(p):
+                return False, "path contains control characters"
+            return True, ""
+
+        if tool == "calculate":
+            expr = _str("expression", cls._MAX_EXPR_LEN)
+            if expr is None: return False, "calculate requires string expression", {}
+            out["expression"] = expr
+        elif tool == "datetime":
+            pass
+        elif tool in ("read_file", "read_file_chunk", "read_image"):
+            path = _str("path", cls._MAX_PATH_LEN)
+            if path is None: return False, f"{tool} requires string path", {}
+            ok, reason = _check_path(path)
+            if not ok: return False, reason, {}
+            out["path"] = path
+            offset = _int("offset", default=0, lo=0, hi=cls._MAX_CONTENT_LEN)
+            if offset is None: return False, "offset must be a non-negative integer", {}
+            out["offset"] = offset
+            if tool == "read_file_chunk":
+                mc = _int("max_chars", default=2_000_000, lo=1, hi=cls._MAX_CONTENT_LEN)
+                if mc is None: return False, "max_chars must be a positive integer", {}
+                out["max_chars"] = mc
+            if tool == "read_image":
+                prompt = _str("prompt", cls._MAX_PROMPT_LEN, required=False) or ""
+                out["prompt"] = prompt
+        elif tool == "write_file":
+            path = _str("path", cls._MAX_PATH_LEN)
+            if path is None: return False, "write_file requires string path", {}
+            ok, reason = _check_path(path)
+            if not ok: return False, reason, {}
+            content = args.get("content", "")
+            if not isinstance(content, str):
+                return False, "write_file content must be a string", {}
+            if len(content) > cls._MAX_CONTENT_LEN:
+                return False, f"write_file content exceeds {cls._MAX_CONTENT_LEN} chars", {}
+            out["path"] = path
+            out["content"] = content
+        elif tool == "web_search":
+            q = _str("query", cls._MAX_QUERY_LEN)
+            if q is None: return False, "web_search requires string query", {}
+            out["query"] = q
+        elif tool == "fetch_url":
+            url = _str("url", cls._MAX_URL_LEN)
+            if url is None: return False, "fetch_url requires string url", {}
+            out["url"] = url
+
+        return True, "", out
+
     async def dispatch(self, tool: str, args: Dict, cfg: SymbionConfig,
                        responder=None, responder_model: str = "") -> str:
-        if tool=="calculate":       return self.calculate(args.get("expression",""))
+        ok, reason, a = self._validate_args(tool, args)
+        if not ok:
+            logger.warning(f"Tool arg validation failed: {tool} — {reason}")
+            return f"Error: {reason}"
+        if tool=="calculate":       return self.calculate(a["expression"])
         if tool=="datetime":        return self.datetime_now()
-        if tool=="read_file":       return self.read_file(args.get("path",""), args.get("offset",0))
-        if tool=="read_file_chunk": return self.read_file_chunk(args.get("path",""), args.get("offset",0), args.get("max_chars",2_000_000))
-        if tool=="read_image":      return await self.read_image(args.get("path",""), args.get("prompt",""), responder, responder_model)
-        if tool=="write_file":      return self.write_file(args.get("path",""),args.get("content",""))
-        if tool=="web_search":      return await self.web_search(args.get("query",""),cfg.brave_api_key,cfg.search_max_chars)
-        if tool=="fetch_url":       return await self.fetch_url(args.get("url",""),cfg.search_max_chars)
+        if tool=="read_file":       return self.read_file(a["path"], a.get("offset",0))
+        if tool=="read_file_chunk": return self.read_file_chunk(a["path"], a.get("offset",0), a.get("max_chars",2_000_000))
+        if tool=="read_image":      return await self.read_image(a["path"], a.get("prompt",""), responder, responder_model)
+        if tool=="write_file":      return self.write_file(a["path"], a["content"])
+        if tool=="web_search":      return await self.web_search(a["query"], cfg.brave_api_key, cfg.search_max_chars)
+        if tool=="fetch_url":       return await self.fetch_url(a["url"], cfg.search_max_chars)
         return f"Unknown tool: {tool}"
 
 
