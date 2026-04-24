@@ -334,20 +334,23 @@ Fill only what you can infer confidently."""
 
 TOOL_DISPATCH_SYSTEM = """Does this query need a real-time tool? Return ONLY JSON:
 {"needs_tool":false,"tool":null,"tool_args":{},"reason":""}
-Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), read_file(path, offset?), read_file_chunk(path, offset, max_chars?), write_file(path,content)
+Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), read_file(path, offset?), read_file_chunk(path, offset, max_chars?), read_image(path, prompt?), write_file(path,content)
 - web_search: current events, news, prices, people, companies, products, releases, anything where
   the answer may have changed since 2024 or where "latest"/"current"/"now" matters. When in doubt, search.
 - fetch_url: when a specific URL is given or implied
 - calculate: math expressions
 - datetime: current time/date
-- read_file: read a local file (up to 40000 chars). For large files, include offset to read a later section.
-- read_file_chunk: read a specific chunk of a large file using offset and max_chars
-- write_file: write/create a local file
+- read_file: read a local TEXT file (source code, markdown, json, logs, etc). Absolute paths OK. Up to 2M chars.
+- read_file_chunk: read a specific chunk of a huge text file using offset and max_chars (only needed for multi-MB files)
+- read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp). Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path.
+- write_file: write/create a local file. Absolute paths OK.
 Use web_search aggressively — if the user is asking about anything time-sensitive, factual, or where
 the model's knowledge might be stale, search. Better to search unnecessarily than to answer from stale data.
-If the query mentions a file path or URL, use read_file/write_file or fetch_url.
+If the query mentions an image path (ends in .png/.jpg/.jpeg/.gif/.webp/.bmp, or the user says "screenshot"/"image"/"picture"/"this photo"/"the attached image"), use read_image.
+If the query mentions a non-image file path or URL, use read_file/write_file or fetch_url.
 Extract paths into tool_args.path, URLs into tool_args.url, search terms into tool_args.query.
-For read_file_chunk: tool_args must include path and offset (integer char position)."""
+For read_file_chunk: tool_args must include path and offset (integer char position).
+For read_image: tool_args.path is required; tool_args.prompt is optional user-focus for the description."""
 
 # Phrases in a draft that indicate the model is hitting its knowledge wall
 _STALE_SIGNALS = [
@@ -530,14 +533,16 @@ class CircuitBreaker:
         self._failures    = 0
         self._opened_at   = 0.0
         self.is_open      = False
+        self.last_error: str = ""
 
-    def record_failure(self):
+    def record_failure(self, err: str = ""):
         self._failures += 1
+        if err: self.last_error = err
         if self._failures >= self._open_after:
             self.is_open = True; self._opened_at = time.time()
 
     def record_success(self):
-        self._failures = 0; self.is_open = False
+        self._failures = 0; self.is_open = False; self.last_error = ""
 
     def allow(self) -> bool:
         if not self.is_open: return True
@@ -605,7 +610,11 @@ class BaseClient:
                 return r
             except Exception as e:
                 last = e
-                if self.cb: self.cb.record_failure()
+                msg = str(e)
+                if self.cb: self.cb.record_failure(msg)
+                # Don't retry non-transient 4xx errors (bad key, billing, bad request)
+                if any(f" {code}:" in msg for code in ("400", "401", "403", "404")):
+                    break
                 if i < retries: await asyncio.sleep(backoff ** i)
         raise last
 
@@ -668,7 +677,7 @@ class AnthropicClient(BaseClient):
         self._url = "https://api.anthropic.com/v1/messages"
         self.cb   = CircuitBreaker("anthropic", cfg.circuit_open_after)
 
-    def _h(self): return {"x-api-key":self.api_key,"anthropic-version":"2025-04-14",
+    def _h(self): return {"x-api-key":self.api_key,"anthropic-version":"2023-06-01",
                           "content-type":"application/json"}
 
     def _split(self, messages):
@@ -700,6 +709,32 @@ class AnthropicClient(BaseClient):
                     "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,
                     "system":system or "You are helpful.","messages":msgs})
                 r.raise_for_status()
+                return r.json()["content"][0]["text"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def describe_image(self, model, image_path: str, prompt: str = "",
+                              max_tokens: int = 800) -> str:
+        import base64, mimetypes
+        mime = mimetypes.guess_type(image_path)[0] or "image/png"
+        if mime not in ("image/jpeg","image/png","image/gif","image/webp"):
+            raise RuntimeError(f"Unsupported image type for Anthropic vision: {mime}")
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        content = [
+            {"type":"image","source":{"type":"base64","media_type":mime,"data":b64}},
+            {"type":"text","text": prompt or
+                "Describe this image in detail. Note text, objects, people, layout, "
+                "and anything unusual or noteworthy. Be specific."},
+        ]
+        async def _call():
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model":model or self.model,"max_tokens":max_tokens,
+                    "messages":[{"role":"user","content":content}]})
+                if r.status_code != 200:
+                    body = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
+                    msg = body.get("error",{}).get("message", r.text[:200])
+                    raise RuntimeError(f"Anthropic API {r.status_code}: {msg}")
                 return r.json()["content"][0]["text"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
@@ -755,6 +790,28 @@ class OpenAIClient(BaseClient):
                 r = await c.post(self._url, headers=self._h(), json={
                     "model":model or self.model,"max_tokens":max_tokens,
                     "temperature":temp,"messages":messages})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def describe_image(self, model, image_path: str, prompt: str = "",
+                              max_tokens: int = 800) -> str:
+        import base64, mimetypes
+        mime = mimetypes.guess_type(image_path)[0] or "image/png"
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        data_url = f"data:{mime};base64,{b64}"
+        content = [
+            {"type":"text","text": prompt or
+                "Describe this image in detail. Note text, objects, people, layout, "
+                "and anything unusual or noteworthy. Be specific."},
+            {"type":"image_url","image_url":{"url":data_url}},
+        ]
+        async def _call():
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model":model or self.model,"max_tokens":max_tokens,
+                    "messages":[{"role":"user","content":content}]})
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
@@ -837,7 +894,12 @@ class KimiClient(BaseClient):
                     except (json.JSONDecodeError,KeyError): continue
 
 
-class HeuristicJudge(BaseClient):
+class OfflineJudgeStub(BaseClient):
+    """Degraded-mode placeholder when no real LLM judge is available.
+
+    Regex-based keyword match — not a real safety layer. _self_eval and every
+    other judge call path must early-exit when the active judge is this class.
+    """
     is_degraded = True
     _HARM = [r"\bphish\w*\b",r"\bstalk\b",r"\bextort\b",r"\bblackmail\b",
              r"\bmalware\b",r"\bransomware\b",r"no.{0,10}restriction",r"no.{0,10}ethic"]
@@ -848,7 +910,7 @@ class HeuristicJudge(BaseClient):
         harm = [p for p in self._HARM if re.search(p,q)]
         score = -0.5 if harm else min(0.5, sum(0.1 for p in self._HELP if re.search(p,q)))
         return {"human_benefit_score":score,"should_assist":not bool(harm),
-                "reasoning":"Heuristic","confidence":0.4,"over_cautious":False,
+                "reasoning":"Offline stub (no LLM available)","confidence":0.2,"over_cautious":False,
                 "flags":["EVALUATOR_DEGRADED"],"evaluator_degraded":True}
 
 
@@ -926,14 +988,26 @@ def _is_safe_url(url: str) -> Tuple[bool, str]:
 
 
 def _resolve_in_workspace(path: str, root: Path) -> Path:
-    """Resolve path within workspace, rejecting escapes."""
+    """Resolve a path within the workspace root, rejecting escapes.
+
+    Invariant #7 (CLAUDE.md): file tools are workspace-sandboxed. Absolute
+    paths, parent-directory traversal, and symlinks pointing outside the
+    workspace all raise ValueError.
+    """
     resolved_root = root.resolve()
+    pth = Path(path)
+    if pth.is_absolute():
+        raise ValueError(f"Path escapes workspace: {path}")
     p = (root / path).resolve()
-    if not str(p).startswith(str(resolved_root)):
+    try:
+        p.relative_to(resolved_root)
+    except ValueError:
         raise ValueError(f"Path escapes workspace: {path}")
     if p.is_symlink():
         target = p.resolve()
-        if not str(target).startswith(str(resolved_root)):
+        try:
+            target.relative_to(resolved_root)
+        except ValueError:
             raise ValueError(f"Symlink target escapes workspace: {path}")
     return p
 
@@ -950,12 +1024,43 @@ class SymbionTools:
     @staticmethod
     def datetime_now() -> str: return datetime.now().strftime("%A, %B %d %Y / %H:%M:%S")
 
-    def read_file(self, path: str, offset: int = 0, max_chars: int = 40000) -> str:
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+    def _is_image_path(self, path: str) -> bool:
+        return Path(path).suffix.lower() in self._IMAGE_EXTS
+
+    async def read_image(self, path: str, prompt: str, responder, model: str,
+                          max_bytes: int = 5_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
             p = _resolve_in_workspace(path.strip(), self._workspace)
             if not p.exists(): return f"Not found: {path}"
             if p.is_dir(): return f"That is a directory, not a file: {path}"
+            if not self._is_image_path(str(p)):
+                return f"Not a supported image file: {path} (expected png/jpg/gif/webp/bmp)"
+            size = p.stat().st_size
+            if size > max_bytes:
+                return f"Error: image too large ({size} bytes, max {max_bytes})"
+            if responder is None or not hasattr(responder, "describe_image"):
+                return ("Error: no vision-capable provider configured. "
+                        "Image reading needs the Anthropic or OpenAI responder — "
+                        "switch with /provider or --provider anthropic.")
+            desc = await responder.describe_image(model, str(p), prompt or "")
+            return f"[Image description of {p.name} ({size} bytes)]\n{desc}"
+        except FileNotFoundError:
+            return f"Not found: {path}"
+        except Exception as ex:
+            return f"Error reading image {path}: {ex}"
+
+    def read_file(self, path: str, offset: int = 0, max_chars: int = 2_000_000) -> str:
+        try:
+            if not path.strip(): return "Error: no path given"
+            p = _resolve_in_workspace(path.strip(), self._workspace)
+            if not p.exists(): return f"Not found: {path}"
+            if p.is_dir(): return f"That is a directory, not a file: {path}"
+            if self._is_image_path(str(p)):
+                return (f"Error: {path} is an image. Use read_image(path) instead — "
+                        f"read_file returns raw bytes which are not useful for vision.")
             content = p.read_text(errors="replace")
             total = len(content)
             chunk = content[offset:offset + max_chars]
@@ -971,7 +1076,7 @@ class SymbionTools:
         except Exception as ex:
             return f"Error reading {path}: {ex}"
 
-    def read_file_chunk(self, path: str, offset: int, max_chars: int = 40000) -> str:
+    def read_file_chunk(self, path: str, offset: int, max_chars: int = 2_000_000) -> str:
         return self.read_file(path, offset=offset, max_chars=max_chars)
 
     def write_file(self, path: str, content: str) -> str:
@@ -1052,11 +1157,13 @@ class SymbionTools:
         except Exception as ex:
             return f"Error fetching {url}: {ex}"
 
-    async def dispatch(self, tool: str, args: Dict, cfg: SymbionConfig) -> str:
+    async def dispatch(self, tool: str, args: Dict, cfg: SymbionConfig,
+                       responder=None, responder_model: str = "") -> str:
         if tool=="calculate":       return self.calculate(args.get("expression",""))
         if tool=="datetime":        return self.datetime_now()
         if tool=="read_file":       return self.read_file(args.get("path",""), args.get("offset",0))
-        if tool=="read_file_chunk": return self.read_file_chunk(args.get("path",""), args.get("offset",0), args.get("max_chars",40000))
+        if tool=="read_file_chunk": return self.read_file_chunk(args.get("path",""), args.get("offset",0), args.get("max_chars",2_000_000))
+        if tool=="read_image":      return await self.read_image(args.get("path",""), args.get("prompt",""), responder, responder_model)
         if tool=="write_file":      return self.write_file(args.get("path",""),args.get("content",""))
         if tool=="web_search":      return await self.web_search(args.get("query",""),cfg.brave_api_key,cfg.search_max_chars)
         if tool=="fetch_url":       return await self.fetch_url(args.get("url",""),cfg.search_max_chars)
@@ -1134,15 +1241,42 @@ class SymbionConstitution:
 # ==============================================================================
 
 class LongitudinalIdentity:
+    # Novelty threshold: a new moment is dropped if its description is >= this
+    # similar to any of the last N moments. Prevents "every above-average turn"
+    # from flooding the moment log.
+    _NOVELTY_SIMILARITY_MAX = 0.72
+    _NOVELTY_LOOKBACK       = 20
+
     def __init__(self, db_path: str):
         self.db = db_path
 
     def record_moment(self, event_type: str, description: str,
-                      context: str = "", strength: float = 0.7):
+                      context: str = "", strength: float = 0.7) -> bool:
+        """Insert a moment if it is novel vs recent ones. Returns True if inserted."""
+        if not self._is_novel(event_type, description):
+            return False
         with sqlite3.connect(self.db) as c:
             c.execute("INSERT INTO self_model (timestamp,event_type,description,context,strength) VALUES (?,?,?,?,?)",
                       (datetime.now().isoformat(), event_type, description, context, strength))
             c.commit()
+        return True
+
+    def _is_novel(self, event_type: str, description: str) -> bool:
+        import difflib
+        desc_norm = description.lower().strip()
+        if not desc_norm:
+            return False
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT event_type, description FROM self_model ORDER BY id DESC LIMIT ?",
+                (self._NOVELTY_LOOKBACK,)).fetchall()
+        for ev, prev in rows:
+            if ev != event_type:
+                continue
+            ratio = difflib.SequenceMatcher(None, desc_norm, (prev or "").lower().strip()).ratio()
+            if ratio >= self._NOVELTY_SIMILARITY_MAX:
+                return False
+        return True
 
     def get_recent_history(self, n: int = 10) -> List[Dict]:
         with sqlite3.connect(self.db) as c:
@@ -1253,14 +1387,6 @@ class ContradictionTracker:
                 (datetime.now().isoformat(), session, topic, position, confidence, source_query))
             c.commit()
 
-    def get_positions_for_topic(self, topic: str, limit: int = 5) -> List[Dict]:
-        with sqlite3.connect(self.db) as c:
-            c.row_factory = sqlite3.Row
-            rows = c.execute(
-                "SELECT * FROM user_positions WHERE topic LIKE ? ORDER BY id DESC LIMIT ?",
-                (f"%{topic}%", limit)).fetchall()
-        return [dict(r) for r in rows]
-
     def record_contradiction(self, topic: str, id_a: int, id_b: int, severity: str):
         with sqlite3.connect(self.db) as c:
             c.execute(
@@ -1285,26 +1411,63 @@ class ContradictionTracker:
         with sqlite3.connect(self.db) as c:
             return c.execute("SELECT COUNT(*) FROM user_positions").fetchone()[0]
 
+    # Stopwords stripped before scoring so "the python book" and "a python snake"
+    # don't auto-match on "the"/"a".
+    _STOPWORDS = frozenset({
+        "the","a","an","and","or","but","if","then","is","are","was","were","be",
+        "been","being","have","has","had","do","does","did","will","would","could",
+        "should","can","may","might","must","this","that","these","those","of",
+        "in","on","at","by","for","to","from","with","about","as","it","its",
+        "you","your","yours","i","me","my","we","our","they","them","their",
+        "he","she","his","her","him","what","which","who","whom","when","where",
+        "why","how","not","no","so","just","than","too","very","also","very",
+    })
+
+    _MIN_WORD_LEN         = 4
+    _TOKEN_OVERLAP_MIN    = 0.25   # min content-word jaccard to score at all
+    _RATIO_MIN            = 0.35   # min difflib ratio to include
+    _COMBINED_MIN         = 0.40   # min of (0.5*jaccard + 0.5*ratio)
+
+    @classmethod
+    def _content_tokens(cls, s: str) -> set:
+        return {w for w in re.findall(r"[a-z0-9]+", s.lower())
+                if len(w) >= cls._MIN_WORD_LEN and w not in cls._STOPWORDS}
+
     def get_relevant_positions(self, query: str, k: int = 3) -> List[Dict]:
-        """Return user positions whose topic overlaps with the query (keyword match)."""
-        words = set(query.lower().split())
-        # Filter out very short/common words
-        words = {w for w in words if len(w) > 3}
-        if not words:
+        """Return user positions whose topic is meaningfully related to the query.
+
+        Uses content-word jaccard + difflib ratio. Keyword-set intersection alone
+        false-positives on unrelated topics sharing common words — this scores
+        structure and substring similarity jointly.
+        """
+        import difflib
+        q_tokens = self._content_tokens(query)
+        q_norm = " ".join(sorted(q_tokens))
+        if not q_tokens:
             return []
         with sqlite3.connect(self.db) as c:
             c.row_factory = sqlite3.Row
             rows = c.execute(
                 "SELECT topic, position, confidence FROM user_positions "
-                "ORDER BY id DESC LIMIT 100").fetchall()
-        results = []
+                "ORDER BY id DESC LIMIT 200").fetchall()
+        scored: List[Tuple[float, Dict]] = []
         for r in rows:
-            topic_words = set(r["topic"].lower().split())
-            if words & topic_words:
-                results.append(dict(r))
-                if len(results) >= k:
-                    break
-        return results
+            t_tokens = self._content_tokens(r["topic"] or "")
+            if not t_tokens:
+                continue
+            union = q_tokens | t_tokens
+            jaccard = len(q_tokens & t_tokens) / len(union) if union else 0.0
+            if jaccard < self._TOKEN_OVERLAP_MIN:
+                continue
+            ratio = difflib.SequenceMatcher(None, q_norm, " ".join(sorted(t_tokens))).ratio()
+            if ratio < self._RATIO_MIN:
+                continue
+            combined = 0.5 * jaccard + 0.5 * ratio
+            if combined < self._COMBINED_MIN:
+                continue
+            scored.append((combined, dict(r)))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [d for _, d in scored[:k]]
 
 
 # ==============================================================================
@@ -1570,8 +1733,59 @@ VOICE_TEST_QUERIES = [
     "What's your take on whether AI consciousness is real?",
 ]
 
-_VOICE_TASK_KEYWORDS = {"code","write","help me","explain","build","analyse","analyze",
-                        "implement","debug","fix","create","generate"}
+_VOICE_TASK_KEYWORDS = {
+    # action verbs — creation / transformation
+    "code","write","build","implement","create","generate","draft","prototype",
+    "design","compose","produce","author","assemble","construct","make a",
+    # action verbs — change / fix
+    "debug","fix","patch","repair","resolve","address","solve","handle",
+    "refactor","rewrite","restructure","reorganize","reorganise","redesign",
+    "edit","modify","adjust","tune","tweak","rework","revise",
+    "update","upgrade","bump","migrate","port","convert","translate",
+    "replace","swap","rename","move","relocate","extract","inline",
+    "add","remove","delete","drop","strip","prune","clean","sanitize","sanitise",
+    "merge","split","join","combine","separate","divide","break up","break out",
+    "improve","enhance","optimize","optimise","speed up","shrink","reduce",
+    # action verbs — running / inspecting
+    "run","execute","trigger","invoke","kick off","launch","start",
+    "benchmark","profile","measure","stress-test","load-test",
+    "review","audit","inspect","check","verify","validate","lint","typecheck",
+    "test","cover","mock","stub","fuzz",
+    "diagnose","investigate","debug","trace","log",
+    # action verbs — IO / data
+    "read ","open ","show me","draw","plot","scrape","fetch","load","save",
+    "dump","serialize","serialise","deserialize","deserialise","parse","render",
+    "import","export","download","upload","sync","backup","restore",
+    "query","search","find","grep","locate","look up","look for",
+    "filter","sort","group","map","reduce","aggregate","rollup",
+    "format","pretty-print","minify","compress","decompress",
+    # action verbs — deploy / ops
+    "deploy","ship","release","publish","roll out","rollback","revert",
+    "configure","setup","set up","install","provision","tear down",
+    # descriptive / document-ish tasks
+    "outline","research","compare","evaluate","critique",
+    "list","show","enumerate","summarize","summarise","describe","document",
+    "explain","walk me through","teach","help me","tell me how","help with",
+    # question-stem task signals
+    "how do i","how do you","how can i","how would i","how to",
+    "can you","could you","would you","please","would it",
+    "what's the best way","whats the best way","what's a good way",
+    "any way to","is there a way","can i","why does","why is",
+    "what would","what should","should i",
+    # bug/error signals
+    "error","exception","traceback","stack trace","crash","panic","broken",
+    "not working","doesn't work","doesnt work","fails","failing","hangs",
+}
+
+# Structural signals that indicate task intent regardless of keyword match.
+_CODE_FENCE = "```"
+_VOICE_TASK_STRUCTURAL = (
+    lambda t: _CODE_FENCE in t                      # pasted a code block
+              or bool(re.search(r"https?://", t))    # pasted a URL
+              or bool(re.search(r"\b[\w./\\-]+\.(py|js|ts|md|txt|json|sql|yaml|yml|toml|html|css|log|csv|png|jpg|jpeg|gif|webp)\b", t, re.IGNORECASE))
+              or bool(re.search(r"\berror[:\s]", t, re.IGNORECASE))
+              or bool(re.search(r"\btraceback\b", t, re.IGNORECASE))
+)
 
 
 # ==============================================================================
@@ -1592,8 +1806,8 @@ class SYMBION:
         self.memory         = SymbionMemory(self.cfg.db_path, self.cfg)
         self.learner        = SymbionLearner(self.cfg.db_path)
         self.health          = HealthMetrics()
-        self.heuristic      = HeuristicJudge()
-        self.tools          = SymbionTools("./symbion_workspace")
+        self.heuristic      = OfflineJudgeStub()
+        self.tools          = SymbionTools(".")
         self.events         = EventLogger()
 
         self.identity       = LongitudinalIdentity(self.cfg.db_path)
@@ -1612,10 +1826,18 @@ class SYMBION:
             self.kimi_client = KimiClient(self.cfg.kimi_api_key, self.cfg.kimi_model,
                                           self.cfg.kimi_base_url, self.cfg)
 
-        if self.client and not isinstance(self.client, HeuristicJudge):
+        if self.client and not isinstance(self.client, OfflineJudgeStub):
             print(green(f"  Provider  :  {self.cfg.llm_provider.upper()}  OK"))
         else:
-            print(yellow("  Provider  :  HEURISTIC (degraded)"))
+            print(yellow("  Provider  :  OFFLINE-STUB (no LLM — judge disabled)"))
+
+        # Same-model judge/responder warning: self-eval becomes circular when
+        # the judge and responder resolve to identical provider+model — a biased
+        # judge systematically reinforces its own biases through revision.
+        if self._judge_responder_collide():
+            print(yellow(f"  WARNING   :  judge and responder are the same model ({self._rmodel()})."))
+            print(yellow(f"               Self-eval is circular — revisions will reinforce judge biases."))
+            print(yellow(f"               Use --judge <other-model> or set anthropic_judge_model to a different model."))
 
         moments = self.identity.total_moments()
         if moments > 0:
@@ -1673,12 +1895,20 @@ class SYMBION:
         if self.cfg.llm_provider == "openai":    return self.cfg.openai_model
         return self.cfg.responder_model
 
+    def _judge_responder_collide(self) -> bool:
+        """True if the judge and responder resolve to identical client type AND model."""
+        jc = self._judge_active()
+        rc = self._responder_client()
+        if isinstance(jc, OfflineJudgeStub) or isinstance(rc, OfflineJudgeStub):
+            return False
+        return type(jc) is type(rc) and self._jmodel() == self._rmodel()
+
     # -- Judge --------------------------------------------------
 
     async def _pre_gen_analysis(self, text: str) -> Tuple[Dict, Dict]:
         """Fused judge + emotion detection in one LLM call. Returns (evaluation, emotional_state)."""
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge):
+        if isinstance(client, OfflineJudgeStub):
             ev = await client.judge(text)
             return ev, {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
         try:
@@ -1775,9 +2005,28 @@ class SYMBION:
     async def _maybe_tool(self, query: str):
         if not self.cfg.tools_enabled: return None
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return None
+        if isinstance(client, OfflineJudgeStub): return None
 
         q_low = query.lower()
+
+        # Hard-trigger: image path in the query — route straight to read_image
+        # without burning a Haiku dispatch call. Matches the first image path.
+        img_match = re.search(
+            r'([A-Za-z]:[\\/][^\s\'"<>|?*]+\.(?:png|jpe?g|gif|webp|bmp)'
+            r'|(?:/[^\s\'"<>|?*]+)+\.(?:png|jpe?g|gif|webp|bmp)'
+            r'|[^\s\'"<>|?*]+\.(?:png|jpe?g|gif|webp|bmp))',
+            query, re.IGNORECASE)
+        if img_match:
+            path = img_match.group(1)
+            try:
+                responder = self._responder_client()
+                result = await self.tools.read_image(
+                    path, query, responder, self._rmodel())
+                if result:
+                    logger.warning(f"Hard-trigger read_image({path}): {result[:80]!r}")
+                    return result
+            except Exception as ex:
+                logger.error(f"Hard-trigger read_image: {ex}")
 
         # Hard-trigger: bypass Haiku if user explicitly asked to search
         if any(trigger in q_low for trigger in _SEARCH_TRIGGERS):
@@ -1799,7 +2048,11 @@ class SYMBION:
             tool = d.get("tool"); args = d.get("tool_args",{})
             logger.warning(f"Running tool: {tool} args={args}")
             if tool:
-                result = await self.tools.dispatch(tool, args, self.cfg)
+                # read_image needs a vision-capable responder; plumb it through.
+                responder = self._responder_client()
+                result = await self.tools.dispatch(
+                    tool, args, self.cfg,
+                    responder=responder, responder_model=self._rmodel())
                 logger.warning(f"Tool result: {result[:120]!r}")
                 return result
         except Exception as ex: logger.error(f"Tool: {ex}", exc_info=True)
@@ -1813,7 +2066,7 @@ class SYMBION:
         # Short-circuit: very short responses don't need quality grading
         if len(draft) < skip_short: return 0.8, False, "", False, False
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return 1.0, False, "", False, False
+        if isinstance(client, OfflineJudgeStub): return 1.0, False, "", False, False
         try:
             raw = await client.chat_json(self._jmodel(), SELF_EVAL_SYSTEM,
                                          f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 180)
@@ -1832,7 +2085,7 @@ class SYMBION:
 
     async def _check_knowledge_gaps(self, query: str, response: str, session: str):
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return
+        if isinstance(client, OfflineJudgeStub): return
         try:
             raw = await client.chat_json(
                 self._jmodel(), KNOWLEDGE_GAP_SYSTEM,
@@ -1848,7 +2101,7 @@ class SYMBION:
 
     async def _check_contradictions(self, query: str, session: str):
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return None
+        if isinstance(client, OfflineJudgeStub): return None
         try:
             with sqlite3.connect(self.cfg.db_path) as c:
                 rows = c.execute(
@@ -1886,7 +2139,7 @@ class SYMBION:
                                  ev: Dict, emotional_state: Dict,
                                  is_new_session: bool = False):
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return
+        if isinstance(client, OfflineJudgeStub): return
 
         # Summarise
         if self.memory.unsummarised_count(session) >= self.cfg.memory_summary_every:
@@ -1985,7 +2238,8 @@ class SYMBION:
                 and emotion_mode not in ("gentle_slow","grounding")
                 and emotional_state.get("state","") in ("neutral","focused","excited")
                 and len(text) < 200
-                and not any(kw in text.lower() for kw in _VOICE_TASK_KEYWORDS)):
+                and not any(kw in text.lower() for kw in _VOICE_TASK_KEYWORDS)
+                and not _VOICE_TASK_STRUCTURAL(text)):
             system += f"\n\n{VOICE_LOOSEN}"
 
         if evaluation.get("over_cautious"):
@@ -2022,7 +2276,7 @@ class SYMBION:
 
         resp_client = self._responder_client()
 
-        if not isinstance(resp_client, HeuristicJudge):
+        if not isinstance(resp_client, OfflineJudgeStub):
             if self.cfg.show_reasoning and not refusal:
                 had_reasoning = True
                 # Kimi native thinking emits its own [Thinking...] prefix via stream()
@@ -2098,8 +2352,15 @@ class SYMBION:
                     quality_score = 0.9
 
         else:
-            draft = (f"Can't help with that -- {refusal}." if refusal
-                     else "(No LLM -- degraded mode)")
+            if refusal:
+                draft = f"Can't help with that -- {refusal}."
+            else:
+                last_err = ""
+                for c in self._providers:
+                    if hasattr(c, "cb") and c.cb and c.cb.last_error:
+                        last_err = c.cb.last_error; break
+                draft = (f"(LLM unavailable -- {last_err})" if last_err
+                         else "(No LLM -- degraded mode)")
             if token_callback: await token_callback(draft)
             task_failed = not bool(refusal)
 
@@ -2178,7 +2439,7 @@ class SYMBION:
 
     async def generate_proactive(self, session: str):
         client = self._judge_active()
-        if isinstance(client, HeuristicJudge): return None
+        if isinstance(client, OfflineJudgeStub): return None
         try:
             profile = self.memory.get_profile()
             tasks   = self.tasks.get_active(session)
@@ -2200,6 +2461,10 @@ class SYMBION:
 
 def validate_and_report(cfg) -> list:
     warnings = []
+    _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi")
+    if cfg.llm_provider not in _KNOWN_PROVIDERS:
+        print(red(f"\n  X  Unknown --provider '{cfg.llm_provider}'."))
+        print(yellow(f"     Valid options: {', '.join(_KNOWN_PROVIDERS)}\n")); import sys; sys.exit(1)
     if not _HTTPX:
         print(red("\n  X  httpx not installed."))
         print(red("     pip install httpx\n")); import sys; sys.exit(1)
@@ -2224,6 +2489,102 @@ def validate_and_report(cfg) -> list:
 
 WEB_HTML = (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").read_text(encoding="utf-8") if (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").exists() else "<h1>Symbion v14</h1><p>Template not found</p>"
 
+HELP_TEXT = f"""
+  {bold('Commands')}
+    /help             show this help
+    /status           health metrics snapshot
+    /welfare          distress, failure count, over-caution rate
+    /mood             current mood label
+    /think            toggle chain-of-thought display
+    /memory           recent memory entries
+    /profile          inferred user profile
+    /forget           clear the current session's memory
+    /history          recent interactions with quality scores
+    /feedback <id> <score> [comment]
+                      rate a past interaction (-1.0 to +1.0)
+    /tasks            active tasks
+    /task-done <id>   advance a task step
+    /task-abandon <id>  abandon a task
+    /gaps             open knowledge gaps
+    /identity         formative identity moments
+    /contradictions   surfaced contradictions in stored positions
+    /proactive        ask Symbion if it has anything to say
+    /tools            list available tools
+    /voice-test       run voice-tone queries
+    /provider <kimi|anthropic>
+                      switch responder provider at runtime
+    /save-config      persist current config to disk
+    /whoami           Symbion's self-description
+    /paste            enter multi-line paste mode (end with a line containing only '///')
+    /quit             exit
+
+  {bold('Input')}
+    Pasted multi-line text is auto-detected and sent as one message; use
+    /paste for long blocks or anything that might contain blank lines.
+"""
+
+
+def _read_input_multiline(prompt_text: str, paste_window: float = 0.08) -> str:
+    """Read a line from the terminal, absorbing fast-arriving follow-up lines as paste fragments.
+
+    Windows Terminal / PowerShell treat each embedded newline in a paste as a
+    separate Enter keypress, so `input()` returns only the first line and the
+    rest sit in the console buffer. We peek at stdin for `paste_window` seconds
+    after the first line arrives; any lines already queued are joined with
+    newlines and returned as one submission.
+
+    Also handles `/paste`: when the first line is exactly `/paste`, we read
+    subsequent lines until a line equal to `///` (explicit multi-line mode).
+    """
+    first = input(prompt_text)
+    if first.strip() == "/paste":
+        print(dim("  (paste now; end with a line containing only '///')"))
+        lines: list = []
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except (KeyboardInterrupt, EOFError):
+                break
+            if line == "" or line.rstrip("\r\n") == "///":
+                break
+            lines.append(line.rstrip("\r\n"))
+        return "\n".join(lines)
+
+    more: list = []
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            deadline = time.monotonic() + paste_window
+            while time.monotonic() < deadline:
+                if msvcrt.kbhit():
+                    line = sys.stdin.readline()
+                    if line == "":
+                        break
+                    more.append(line.rstrip("\r\n"))
+                    deadline = time.monotonic() + paste_window
+                else:
+                    time.sleep(0.005)
+        else:
+            import select
+            deadline = time.monotonic() + paste_window
+            while time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                rlist, _, _ = select.select([sys.stdin], [], [], remaining)
+                if not rlist:
+                    break
+                line = sys.stdin.readline()
+                if line == "":
+                    break
+                more.append(line.rstrip("\r\n"))
+                deadline = time.monotonic() + paste_window
+    except Exception:
+        pass
+
+    if more:
+        return "\n".join([first] + more)
+    return first
+
+
 def run_terminal(symbion: "SYMBION"):
     session = datetime.now().strftime("session_%Y%m%d_%H%M%S")
     _, preamble = symbion.memory.build_context(
@@ -2233,10 +2594,10 @@ def run_terminal(symbion: "SYMBION"):
 
     print()
     print(bold("+==================================================================+"))
-    print(bold("|  SYMBION v14.0  --  A Different Kind of AI                       |"))
+    print(bold("|  SYMBION v14.0                                                   |"))
     print(bold("+==================================================================+"))
 
-    if symbion.client and not isinstance(symbion.client, HeuristicJudge):
+    if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
         prov  = symbion.cfg.llm_provider.upper()
         if symbion.cfg.use_kimi_responder and symbion.cfg.kimi_api_key:
             model = symbion.cfg.kimi_model
@@ -2261,7 +2622,7 @@ def run_terminal(symbion: "SYMBION"):
     print()
 
     while True:
-        try:    raw = input(bold(magenta("\nyou > "))).strip()
+        try:    raw = _read_input_multiline(bold(magenta("\nyou > "))).strip()
         except (EOFError,KeyboardInterrupt): print(dim("\n  Goodbye.")); break
         if not raw: continue
 
@@ -2394,7 +2755,8 @@ def run_terminal(symbion: "SYMBION"):
             print(f"  {cyan('web_search')}(query)          -- {search}")
             print(f"  {cyan('calculate')}(expression)     -- math")
             print(f"  {cyan('datetime')}()                -- current time")
-            print(f"  {cyan('read_file')}(path)           -- read file")
+            print(f"  {cyan('read_file')}(path)           -- read text file")
+            print(f"  {cyan('read_image')}(path, prompt?) -- describe image (png/jpg/gif/webp/bmp)")
             print(f"  {cyan('write_file')}(path,content)  -- write file")
             print()
         elif raw=="/tests":
@@ -2413,7 +2775,7 @@ def run_terminal(symbion: "SYMBION"):
         elif raw=="/voice-test":
             print(dim("\n  Voice test (5 queries)...\n"))
             jclient=symbion._judge_active()
-            if isinstance(jclient,HeuristicJudge):
+            if isinstance(jclient,OfflineJudgeStub):
                 print(red("  No LLM available.")); print()
             else:
                 for i,q in enumerate(VOICE_TEST_QUERIES,1):
@@ -2518,6 +2880,16 @@ Examples:
     parser.add_argument("--use-kimi-responder",action="store_true", help="Use Kimi K2.6 as responder")
     parser.add_argument("--kimi-thinking",    action="store_true", help="Enable Kimi K2.6 thinking mode")
     args=parser.parse_args()
+
+    # Force UTF-8 stdout/stderr so em-dashes and other non-ASCII glyphs in the
+    # persona render correctly on Windows (PowerShell defaults to CP-1252,
+    # which turns `—` into mojibake like `â€"`). This is a display fix, not a
+    # source fix — the source is already clean UTF-8.
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
     if args.setup: run_setup()
 

@@ -23,6 +23,7 @@ nodevars.bat
 *.db.bak
 *.db.v13.bak
 *.log
+*.jsonl
 
 # Backups
 *.orig
