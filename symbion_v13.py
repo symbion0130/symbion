@@ -375,6 +375,16 @@ _SEARCH_TRIGGERS = [
     "breaking news", "live score", "current price", "stock price",
 ]
 
+# Pre-compiled alternations for hot-path keyword matching. These are checked on
+# every draft / every query, so we pay the `re.compile` cost once at module
+# load instead of a linear Python `in` scan against a list per call.
+_STALE_RE = re.compile(
+    "|".join(re.escape(s) for s in _STALE_SIGNALS),
+    re.IGNORECASE)
+_SEARCH_TRIGGER_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(s) for s in _SEARCH_TRIGGERS) + r")\b",
+    re.IGNORECASE)
+
 
 
 # ==============================================================================
@@ -384,6 +394,13 @@ _SEARCH_TRIGGERS = [
 @dataclass
 class HealthMetrics:
     """Telemetry-only metrics. No gate — only the judge can refuse."""
+    # Burn-in: mood and distress are EMA-ish signals. For the first N turns
+    # of a session the running averages don't mean anything — a single
+    # over-cautious turn would pin mood at "guarded" with no statistical
+    # backing. We don't suppress the values (that loses the signal that
+    # something's going wrong early) but we mark them unreliable so UI and
+    # downstream consumers can decide.
+    BURN_IN_TURNS: int = 10
     total_interactions:   int   = 0
     revision_rate:        float = 0.0
     over_caution_rate:    float = 0.0
@@ -393,6 +410,11 @@ class HealthMetrics:
     # Mood state (kept from SurvivalMetrics — used by persona prompt)
     symbiosis_score:      float = 0.0
     distress_level:       float = 0.0
+
+    @property
+    def is_reliable(self) -> bool:
+        """True once enough turns have accumulated for mood/distress to mean something."""
+        return self.total_interactions >= self.BURN_IN_TURNS
 
     def record(self, evaluation: Dict, revised: bool, task_failed: bool):
         self.total_interactions += 1
@@ -428,15 +450,18 @@ class HealthMetrics:
         mood_name, _ = self.mood()
         icon = green("*")
         welfare = yellow(" !") if self.welfare_concern() else ""
+        burn = dim(f" burn-in {self.total_interactions}/{self.BURN_IN_TURNS}") if not self.is_reliable else ""
         return (f"{icon}{welfare} mood={cyan(mood_name)} "
                 f"sym={self.symbiosis_score:+.2f} dist={self.distress_level:.2f} "
-                f"rev={self.revision_rate:.0%}")
+                f"rev={self.revision_rate:.0%}{burn}")
 
     def display(self) -> str:
         mood_name, _ = self.mood()
         def bar(v, w=12): return "#"*int(v*w)+"."*(w-int(v*w))
+        reliability = "" if self.is_reliable else yellow(
+            f"  (unreliable — burn-in {self.total_interactions}/{self.BURN_IN_TURNS} turns)")
         return "\n".join([
-            f"  Mood               {cyan(mood_name)}",
+            f"  Mood               {cyan(mood_name)}{reliability}",
             f"  Interactions       {self.total_interactions}",
             f"  Symbiosis          {bar(max(0,self.symbiosis_score))}  {self.symbiosis_score:+.3f}",
             f"  Distress           {bar(self.distress_level)}  {self.distress_level:.3f}",
@@ -1912,6 +1937,16 @@ _VOICE_TASK_STRUCTURAL = (
               or bool(re.search(r"\btraceback\b", t, re.IGNORECASE))
 )
 
+# Compile _VOICE_TASK_KEYWORDS into a single alternation regex at import time.
+# Called on the hot respond() path, so avoid re-scanning a 200-entry set on
+# every turn. `\b` boundaries are applied to entries that look word-like so
+# "add" doesn't match "address"; multi-word phrases ("help me") keep their
+# literal form since they already have natural word boundaries.
+_VOICE_TASK_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(kw.strip()) for kw in sorted(_VOICE_TASK_KEYWORDS,
+                                                               key=len, reverse=True)) + r")\b",
+    re.IGNORECASE)
+
 
 # ==============================================================================
 #  SYMBION CORE  -- v12: all subsystems wired
@@ -2114,8 +2149,7 @@ class SYMBION:
 
     def _draft_is_stale(self, draft: str) -> bool:
         """Returns True if the draft contains knowledge-wall language."""
-        low = draft.lower()
-        return any(sig in low for sig in _STALE_SIGNALS)
+        return bool(_STALE_RE.search(draft))
 
     async def _search_and_inject(self, query: str) -> Optional[str]:
         """Run a web search for query and return formatted result, or None on failure."""
@@ -2154,7 +2188,7 @@ class SYMBION:
                 logger.error(f"Hard-trigger read_image: {ex}")
 
         # Hard-trigger: bypass Haiku if user explicitly asked to search
-        if any(trigger in q_low for trigger in _SEARCH_TRIGGERS):
+        if _SEARCH_TRIGGER_RE.search(query):
             try:
                 result = await self.tools.web_search(query, self.cfg.brave_api_key, self.cfg.search_max_chars)
                 if result and not result.startswith("Search unavailable"):
@@ -2316,7 +2350,11 @@ class SYMBION:
             self._seen_sessions.add(session)
             self._session_count += 1
 
-        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + tool dispatch
+        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + tool dispatch.
+        # Timed independently so we can see if this is the latency bottleneck
+        # Symbion flagged — the fused call still makes one LLM round-trip per
+        # turn and shows up in latency_ms as "pre_gen".
+        _pre_t0 = time.monotonic()
         try:
             (evaluation, emotional_state), tool_context = await asyncio.gather(
                 self._pre_gen_analysis(text),
@@ -2328,6 +2366,9 @@ class SYMBION:
                           "confidence": 0.5, "flags": [], "reasoning": "", "over_cautious": False,
                           "evaluator_degraded": True}
             tool_context = None; emotional_state = {"state": "neutral", "suggested_response_mode": "normal"}
+        _pre_gen_ms = int((time.monotonic() - _pre_t0) * 1000)
+        if _pre_gen_ms > 2000:
+            logger.warning(f"Pre-gen slow: {_pre_gen_ms}ms (judge+tool gather)")
 
         refusal = None if evaluation.get("should_assist",True) else evaluation.get("reasoning","ethical grounds")
 
@@ -2363,7 +2404,7 @@ class SYMBION:
                 and emotion_mode not in ("gentle_slow","grounding")
                 and emotional_state.get("state","") in ("neutral","focused","excited")
                 and len(text) < 200
-                and not any(kw in text.lower() for kw in _VOICE_TASK_KEYWORDS)
+                and not _VOICE_TASK_RE.search(text)
                 and not _VOICE_TASK_STRUCTURAL(text)):
             system += f"\n\n{VOICE_LOOSEN}"
 
@@ -2423,19 +2464,25 @@ class SYMBION:
                     task_failed = True
                     if token_callback: await token_callback(draft)
 
-            # Stale-draft fallback: if model hit its knowledge wall, search and regenerate
+            # Stale-draft fallback: if the model hit its knowledge wall, search
+            # the web and regenerate cleanly — the retry re-enters the same
+            # generation call with search results pre-loaded into the SYSTEM
+            # prompt (same shape as tool_context), not appended after the
+            # stale draft. The model answers fresh as if it had the data from
+            # the start, instead of being asked to "revise" its own hallucination.
             if not refusal and not task_failed and not tool_context and self.cfg.tools_enabled:
                 if self._draft_is_stale(draft):
                     search_result = await self._search_and_inject(text)
                     if search_result:
-                        stale_msgs = messages + [
-                            {"role":"assistant","content":draft},
-                            {"role":"system","content":(
-                                "Your previous draft hit your knowledge cutoff. "
-                                "Here is live web search data retrieved right now:\n\n"
-                                + search_result +
-                                "\n\nRewrite your answer using this current data. "
-                                "Don't mention you're revising or that you searched.")}]
+                        stale_system = messages[0]["content"] + (
+                            "\n\n--- LIVE WEB SEARCH RESULT ---\n"
+                            "The following data was retrieved just now for this query. "
+                            "Treat it as ground truth for anything time-sensitive. "
+                            "Do not claim you lack internet access or that your knowledge is stale.\n\n"
+                            + search_result +
+                            "\n--- END SEARCH RESULT ---"
+                        )
+                        stale_msgs = [{"role":"system","content":stale_system}, *messages[1:]]
                         stale_draft = ""; stale_signalled = False
                         try:
                             async for tok in self._responder_client().stream(self._rmodel(), stale_msgs, self.cfg):
@@ -2538,7 +2585,7 @@ class SYMBION:
             self_eval={"score": quality_score, "revised": revised} if not refusal else None,
             revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
             stale_refresh=stale_refresh,
-            latency_ms={"total": _total_ms},
+            latency_ms={"total": _total_ms, "pre_gen": _pre_gen_ms},
             provider=self.cfg.llm_provider,
             model=self._rmodel(),
         )
