@@ -203,6 +203,21 @@ Practical rules: never start responses with "I". No bullet points unless asked. 
 
 Tool discipline: you do not have an agent loop. Tools fire once before your turn and the result is provided to you. Never emit `<tool_call>`, `<tool_response>`, `<function_call>`, or any pseudo-XML that pretends to be tool use — those blocks become text in your output, not real calls. If you need data you weren't given, say so plainly and ask the user, or note that the search returned nothing. Inventing tool-call/tool-response blocks with fabricated results is dishonest."""
 
+CAPABILITIES = """Your tools (auto-dispatched by Symbion before your turn):
+- web_search(query) — Brave/DuckDuckGo web search
+- fetch_url(url) — fetch and clean a webpage
+- calculate(expression) — AST-evaluated math
+- datetime() — current local date and time
+- read_file(path) / read_file_chunk(path, offset, max_chars) — read text files in the workspace
+- read_image(path, prompt?) — describe an image (vision; png/jpg/gif/webp/bmp)
+- read_pdf(path) — extract text from PDF files in the workspace
+- list_dir(path) — list files and subdirectories under a workspace path
+- write_file(path, content) — write a text file in the workspace
+
+All file/dir paths must be RELATIVE to Symbion's workspace root (the project dir where symbion_v14.py lives, typically D:\\symbion). The sandbox rejects absolute paths even when they're inside the workspace. If the user pastes an absolute path inside the workspace, tell them to use the relative form (e.g. `Model9\\file.pdf` instead of `D:\\symbion\\Model9\\file.pdf`).
+
+Do NOT claim you have no file system access — you do, scoped to the workspace. If a specific path failed, say which path and why (sandbox, missing file, wrong type), not a blanket "I have no access"."""
+
 VOICE_LOOSEN = """The tone of this conversation is casual. Match it.
 Don't treat small questions as opportunities for structured analysis.
 A short answer with personality beats a thorough answer that reads like a report.
@@ -344,15 +359,17 @@ Fill only what you can infer confidently."""
 
 TOOL_DISPATCH_SYSTEM = """Does this query need a real-time tool? Return ONLY JSON:
 {"needs_tool":false,"tool":null,"tool_args":{},"reason":""}
-Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), read_file(path, offset?), read_file_chunk(path, offset, max_chars?), read_image(path, prompt?), write_file(path,content)
+Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), read_file(path, offset?), read_file_chunk(path, offset, max_chars?), read_image(path, prompt?), read_pdf(path), list_dir(path?), write_file(path,content)
 - web_search: current events, news, prices, people, companies, products, releases, anything where
   the answer may have changed since 2024 or where "latest"/"current"/"now" matters. When in doubt, search.
 - fetch_url: when a specific URL is given or implied
 - calculate: math expressions
 - datetime: current time/date
-- read_file: read a local TEXT file (source code, markdown, json, logs, etc). Path MUST be relative to the workspace root (Symbion's project dir). Absolute paths and "..\\" escapes are rejected by the sandbox. Up to 2M chars.
+- read_file: read a local TEXT file (source code, markdown, json, logs, etc). Path MUST be relative to the workspace root (Symbion's project dir). Absolute paths and "..\\" escapes are rejected by the sandbox even when the absolute path points inside the workspace — strip the leading drive/root and pass the relative form. Up to 2M chars.
 - read_file_chunk: read a specific chunk of a huge text file using offset and max_chars (only needed for multi-MB files)
-- read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp). Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path. Path MUST be relative to the workspace root — if the user pasted an absolute path (e.g. C:\\Users\\...\\foo.png) the sandbox will reject it; pass it through and the tool will return a clear error you should surface verbatim, not invent reasons for.
+- read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp). Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path. Path MUST be relative to workspace root — if the user pasted an absolute path (e.g. C:\\Users\\...\\foo.png) outside the workspace, the sandbox will reject it; pass it through and surface the error verbatim, do not invent reasons.
+- read_pdf: extract text from a .pdf file. Use this for ANY .pdf path. NEVER use read_file on a PDF (it returns binary garbage). tool_args: {"path": "..."}. Path MUST be relative to workspace root. Requires pypdf — returns a clear error if the user needs to install it.
+- list_dir: list the contents of a directory under the workspace root. Use this when the user asks to "read folder", "list files", "show directory", "what's in <folder>", or refers to a folder by name without a specific file. tool_args: {"path": "."} or {"path": "Model9"}. Empty path defaults to workspace root. Path MUST be relative.
 - write_file: write/create a local file. Path MUST be relative to the workspace root.
 Use web_search aggressively — if the user is asking about anything time-sensitive, factual, or where
 the model's knowledge might be stale, search. Better to search unnecessarily than to answer from stale data.
@@ -1162,6 +1179,76 @@ class SymbionTools:
     def read_file_chunk(self, path: str, offset: int, max_chars: int = 2_000_000) -> str:
         return self.read_file(path, offset=offset, max_chars=max_chars)
 
+    def list_dir(self, path: str = ".", max_entries: int = 200) -> str:
+        try:
+            p = _resolve_in_workspace((path or ".").strip(), self._workspace)
+            if not p.exists():
+                return f"Not found: {self._safe_name(path)}"
+            if not p.is_dir():
+                return f"Not a directory: {self._safe_name(path)}"
+            all_entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+            shown = all_entries[:max_entries]
+            lines = []
+            for e in shown:
+                if e.is_dir():
+                    lines.append(f"[dir]      {e.name}/")
+                else:
+                    try:
+                        size = e.stat().st_size
+                        lines.append(f"[{size:>9}b] {e.name}")
+                    except OSError:
+                        lines.append(f"[?]        {e.name}")
+            if len(all_entries) > max_entries:
+                lines.append(f"... ({len(all_entries) - max_entries} more entries truncated)")
+            header = f"Listing of {p.name or '.'}/ ({len(all_entries)} entries):"
+            return header + "\n" + ("\n".join(lines) if lines else "(empty)")
+        except ValueError:
+            return ("Error: path is outside Symbion's workspace. "
+                    "Use a relative path inside the project root. "
+                    "Do not invent other reasons.")
+        except Exception as ex:
+            return f"Error listing {self._safe_name(path)}: {type(ex).__name__}"
+
+    def read_pdf(self, path: str, max_chars: int = 50_000) -> str:
+        try:
+            if not path.strip(): return "Error: no path given"
+            p = _resolve_in_workspace(path.strip(), self._workspace)
+            name = self._safe_name(path)
+            if not p.exists(): return f"Not found: {name}"
+            if p.is_dir(): return f"That is a directory, not a file: {name}"
+            if p.suffix.lower() != ".pdf":
+                return f"Not a PDF: {name} (read_pdf only handles .pdf files)"
+            try:
+                import pypdf  # type: ignore
+            except ImportError:
+                return ("Error: pypdf not installed. "
+                        "Run `pip install pypdf` in the Symbion environment to enable read_pdf.")
+            try:
+                reader = pypdf.PdfReader(str(p))
+            except Exception as ex:
+                return f"Error opening PDF {name}: {type(ex).__name__}: {ex}"
+            page_count = len(reader.pages)
+            parts: List[str] = []
+            total = 0
+            for i, page in enumerate(reader.pages):
+                try:
+                    txt = page.extract_text() or ""
+                except Exception:
+                    txt = ""
+                parts.append(f"--- Page {i+1} ---\n{txt}".rstrip())
+                total += len(txt)
+                if total >= max_chars:
+                    parts.append(f"\n[truncated at ~{max_chars} chars; PDF has {page_count} pages total]")
+                    break
+            body = "\n\n".join(parts) if parts else "(empty PDF)"
+            return f"[PDF text extracted from {p.name} ({page_count} pages)]\n{body}"
+        except ValueError:
+            return ("Error: path is outside Symbion's workspace. "
+                    "Use a relative path inside the project root. "
+                    "Do not invent other reasons.")
+        except Exception as ex:
+            return f"Error reading PDF {self._safe_name(path)}: {type(ex).__name__}"
+
     def write_file(self, path: str, content: str) -> str:
         try:
             p = _resolve_in_workspace(path.strip(), self._workspace)
@@ -1242,7 +1329,8 @@ class SymbionTools:
 
     _ALLOWED_TOOLS = frozenset({
         "calculate","datetime","read_file","read_file_chunk",
-        "read_image","write_file","web_search","fetch_url",
+        "read_image","read_pdf","list_dir",
+        "write_file","web_search","fetch_url",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -1301,7 +1389,7 @@ class SymbionTools:
             out["expression"] = expr
         elif tool == "datetime":
             pass
-        elif tool in ("read_file", "read_file_chunk", "read_image"):
+        elif tool in ("read_file", "read_file_chunk", "read_image", "read_pdf"):
             path = _str("path", cls._MAX_PATH_LEN)
             if path is None: return False, f"{tool} requires string path", {}
             ok, reason = _check_path(path)
@@ -1317,6 +1405,19 @@ class SymbionTools:
             if tool == "read_image":
                 prompt = _str("prompt", cls._MAX_PROMPT_LEN, required=False) or ""
                 out["prompt"] = prompt
+            if tool == "read_pdf":
+                mc = _int("max_chars", default=50_000, lo=1, hi=cls._MAX_CONTENT_LEN)
+                if mc is None: return False, "max_chars must be a positive integer", {}
+                out["max_chars"] = mc
+        elif tool == "list_dir":
+            # path is optional — defaults to "." (workspace root) if missing.
+            path = _str("path", cls._MAX_PATH_LEN, required=False) or "."
+            ok, reason = _check_path(path)
+            if not ok: return False, reason, {}
+            out["path"] = path
+            mx = _int("max_entries", default=200, lo=1, hi=10_000)
+            if mx is None: return False, "max_entries must be a positive integer", {}
+            out["max_entries"] = mx
         elif tool == "write_file":
             path = _str("path", cls._MAX_PATH_LEN)
             if path is None: return False, "write_file requires string path", {}
@@ -1351,6 +1452,8 @@ class SymbionTools:
         if tool=="read_file":       return self.read_file(a["path"], a.get("offset",0))
         if tool=="read_file_chunk": return self.read_file_chunk(a["path"], a.get("offset",0), a.get("max_chars",2_000_000))
         if tool=="read_image":      return await self.read_image(a["path"], a.get("prompt",""), responder, responder_model)
+        if tool=="read_pdf":        return self.read_pdf(a["path"], a.get("max_chars",50_000))
+        if tool=="list_dir":        return self.list_dir(a.get("path","."), a.get("max_entries",200))
         if tool=="write_file":      return self.write_file(a["path"], a["content"])
         if tool=="web_search":      return await self.web_search(a["query"], cfg.brave_api_key, cfg.search_max_chars)
         if tool=="fetch_url":       return await self.fetch_url(a["url"], cfg.search_max_chars)
@@ -2437,7 +2540,7 @@ class SYMBION:
         _, mood_add = self.health.mood()
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
 
-        system = SYMBION_PERSONA
+        system = SYMBION_PERSONA + "\n\n" + CAPABILITIES
         if preamble: system += f"\n\n{preamble}"
         system += f"\n\nYour current state: {mood_add}"
 
