@@ -39,8 +39,11 @@ python scripts/bench_latency.py
 python symbion_v14.py --provider ollama
 python -m symbion --provider anthropic --web
 
-# DB migration from v13 schema
+# Legacy DB schema migration (pre-v14 schema → v14 schema; not the v13/v14 file rename)
 python scripts/migrate_v13_to_v14.py old.db new.db
+
+# Pull the local embedding model used for semantic retrieval (one-time, ~274MB)
+ollama pull nomic-embed-text
 ```
 
 ## Repo layout
@@ -80,21 +83,51 @@ Prompts                  SYMBION_PERSONA, PRE_GEN_SYSTEM, JUDGE_SYSTEM,
                          REASONING_SYSTEM, CONTRADICTION/GAP/PROACTIVE/PROFILE/
                          SUMMARISE/TOOL_DISPATCH system prompts
 HealthMetrics            telemetry-only dataclass (mood, revision rate, distress)
-DB                       init_db() with CREATE TABLE IF NOT EXISTS
+DB                       init_db() — CREATE TABLE IF NOT EXISTS + idempotent
+                         ALTER TABLE for legacy upgrades
 Infrastructure           CircuitBreaker, RateLimiter, _parse_json (brace-counting)
-LLM clients              BaseClient + Ollama/Anthropic/OpenAI/Kimi/OfflineJudgeStub
+LLM clients              BaseClient (+ supports_tools flag) + Ollama/Anthropic/
+                         OpenAI/Kimi/OfflineJudgeStub. AnthropicClient also
+                         exposes stream_with_tools (native tool-use loop).
+Embedding client         EmbeddingClient — wraps Ollama /api/embeddings for
+                         nomic-embed-text. Returns None on any failure so
+                         retrieval can fall back cleanly to BM25-only.
+                         _vec_to_blob / _blob_to_vec / _cosine helpers.
+Retrieval helpers        _retrieval_tokenize, _bm25_rank (stop-words, IDF,
+                         length-norm). _STOP_WORDS preserves short technical
+                         tokens (ai, v14, py, k2).
 Tool safety helpers      _safe_calc (AST), _is_safe_url (SSRF), _resolve_in_workspace
-Tools                    SymbionTools (calculate, read/write_file, web_search, fetch_url)
-EventLogger              JSONL event stream
-Constitution             SymbionConstitution (PRINCIPLES, VERSION — no startup tests)
+Tools                    SymbionTools — 10 tools registered in _ALLOWED_TOOLS
+                         and TOOL_SCHEMAS: calculate, datetime, read_file,
+                         read_file_chunk, read_image, read_pdf, list_dir,
+                         write_file, web_search, fetch_url. Schemas and
+                         _ALLOWED_TOOLS must stay in sync.
+EventLogger              JSONL event stream. Agent-loop turns include an
+                         agent_loop block with iterations + per-tool
+                         {name, input, output_chars, is_error}.
+Constitution             SymbionConstitution (PRINCIPLES, VERSION — vestigial;
+                         no startup tests fire and nothing reads it on the hot path)
 Identity                 LongitudinalIdentity (formative moments)
 Task engine              TaskEngine
 Trackers                 ContradictionTracker, KnowledgeGapTracker
-Memory + learner         SymbionMemory, SymbionLearner
-SYMBION                  the orchestrator — respond() is the hot path
+Memory + learner         SymbionMemory, SymbionLearner. SymbionMemory has BOTH
+                         get_relevant_summaries (BM25-only, legacy callers) and
+                         get_relevant_summaries_hybrid (BM25 + cosine, called
+                         by build_context when a query_embedding is provided).
+SYMBION                  the orchestrator — respond() is the hot path.
+                         _maybe_tool holds three regex hard-triggers
+                         (multi-file paths, _SELF_SOURCE_RE, _SEARCH_TRIGGER_RE)
+                         that bypass Haiku dispatch and return tool output
+                         directly; only fires in single-shot mode.
+                         _force_summarize_session powers /summarize and
+                         the quit-flush. _backfill_embeddings runs once on
+                         launch to fill NULL-embedding summary rows.
 Validation               validate_and_report()
 Web                      build_web_app() (FastAPI + WebSocket)
-Terminal                 run_terminal() + HELP_TEXT + _stream_print
+Terminal                 run_terminal() + HELP_TEXT + _stream_print.
+                         /quit awaits _force_summarize_session before
+                         breaking — preserve this when touching the quit
+                         branch or short sessions stop carrying forward.
 Entry point              main()
 ```
 
@@ -132,7 +165,7 @@ Entry point              main()
 
 **Do not serialize what is parallel.** In single-shot mode, pre-gen is 2 parallel calls. In agent-loop mode pre-gen is just judge+emotion (one call). Adding a new pre-gen step means adding it to the gather (single-shot) or sequencing it before generation (agent loop).
 
-**Agent loop boundaries.** `agent_loop_enabled` in SymbionConfig (default True). Active only when (a) tools_enabled, (b) cfg.agent_loop_enabled, (c) responder client has `supports_tools = True` (currently AnthropicClient only — extend OpenAIClient/KimiClient with `stream_with_tools` to opt them in). Tool schemas live in `TOOL_SCHEMAS` near the persona constants and must stay in sync with `SymbionTools._ALLOWED_TOOLS`.
+**Agent loop boundaries.** `agent_loop_enabled` in SymbionConfig (default True). Active only when (a) tools_enabled, (b) cfg.agent_loop_enabled, (c) responder client has `supports_tools = True` (currently AnthropicClient only — extend OpenAIClient/KimiClient with `stream_with_tools` to opt them in). Tool schemas live in `TOOL_SCHEMAS` near the persona constants and must stay in sync with `SymbionTools._ALLOWED_TOOLS`. Iteration cap is `agent_loop_max_iterations` (default 8) — the model stops there even if it wanted more tool calls; if you see a multi-step flow truncating, that's the cap, not a bug.
 
 ## Non-negotiable invariants
 
@@ -147,11 +180,17 @@ Entry point              main()
 
 ## Provider conventions
 
-All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat_text()`. The responder and judge are selected separately — never point both at the same model instance. `OfflineJudgeStub` is the offline fallback (keyword-based, no LLM calls); every judge call path early-exits when it is the active judge so it never drives refusals or revisions.
+All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat_text()`. Clients that implement native tool use also override `supports_tools = True` and provide `stream_with_tools()`. The responder and judge are selected separately — never point both at the same model instance. `OfflineJudgeStub` is the offline fallback (keyword-based, no LLM calls); every judge call path early-exits when it is the active judge so it never drives refusals or revisions.
+
+**Embedding stack.** Semantic retrieval requires Ollama running with `nomic-embed-text` pulled. `EmbeddingClient.is_available()` does a one-time probe and caches the result. If absent, `embed()` returns None and `build_context` falls back to BM25-only retrieval — no crash, no error to the user, just a silent capability downgrade visible in startup logs.
 
 ## Prompt discipline
 
 `SYMBION_PERSONA` is the constitutional core. Edits shift the output distribution — test with `VOICE_TEST_QUERIES` after any change. Never add opener templates ("Certainly", "Great question"), "I'm an AI" boilerplate, or emojis. "I don't know is a complete sentence" must stay.
+
+The persona's **Tool discipline** and **Result-honesty** paragraphs are non-negotiable: they were added because of specific incidents (model echoing the TOOL_DATA wrapper verbatim into its response, fabricating contents of empty PDFs, emitting fake `<tool_call>` XML when no real tool fired). Removing or softening these paragraphs reintroduces those failure modes — leave them or replace them with stronger versions, never just delete.
+
+`CAPABILITIES_BASE` lists every tool the model has and the workspace-relative-path constraint. `CAPABILITIES_AGENT_MODE` and `CAPABILITIES_SINGLE_MODE` are mode-specific riders appended in `respond()`. These three together are load-bearing prompt assets — when the model says "I can't read your files", that's almost always because one of these blocks didn't make it into the system prompt for this turn.
 
 `PRE_GEN_SYSTEM` is the fused judge+emotion classifier. `SELF_EVAL_SYSTEM` is the quality reviewer. Both return JSON only — never ask them to also suggest improvements.
 
