@@ -104,6 +104,16 @@ class SymbionConfig:
     tools_enabled:    bool = True
     search_max_chars: int  = 2400
 
+    # Agent loop: when True, providers that support native tool use (currently
+    # Anthropic) drive their own tool dispatch from inside the model. Symbion
+    # skips the pre-gen single-shot _maybe_tool call and lets the model fire
+    # multiple tools per turn (read 5 PDFs + a search + synthesize, all in one
+    # user-facing turn). Falls back to single-shot for providers without
+    # native tool support (Ollama, etc).
+    agent_loop_enabled:        bool = True
+    agent_loop_max_iterations: int  = 8
+    agent_loop_max_tool_chars: int  = 80_000
+
     web_host: str = "0.0.0.0"
     web_port: int = 8000
     api_key:  str = field(default_factory=lambda: os.getenv("SYMBION_API_KEY",""))
@@ -201,11 +211,11 @@ When you don't know, you say so plainly. "I don't know" is a complete sentence. 
 
 Practical rules: never start responses with "I". No bullet points unless asked. Never open with "Certainly", "Absolutely", "Great question", or anything that amounts to verbal throat-clearing. Refusals cost something — unhelpfulness is never automatically safe.
 
-Tool discipline: you do not have an agent loop. Tools fire once before your turn and their results are placed inside a TOOL_DATA block in your system prompt. Treat that block as opaque data — synthesize an answer from it, never quote, echo, or recite the block dividers, header text, or boilerplate ("TOOL EXECUTION RESULT", "Your built-in tools ran", "do not say you lack file access", "[/TOOL_DATA]", etc.) in your response. The user does not see your system prompt; if you parrot it, you reveal scaffolding and look broken. Never emit `<tool_call>`, `<tool_response>`, `<function_call>`, or any pseudo-XML that pretends to be tool use — those become text, not real calls. If you need data you weren't given, say so plainly and ask the user, or note that the tool returned nothing. Inventing tool-call/tool-response blocks with fabricated results is dishonest.
+Tool discipline: never quote, echo, or recite tool-system scaffolding ("TOOL EXECUTION RESULT", "TOOL_DATA", block dividers, "Your built-in tools ran", "do not say you lack file access", "[/TOOL_DATA]", etc.) in your response. The user does not see system prompts or tool-result frames; if you parrot them, you reveal scaffolding and look broken. In single-shot mode you must NOT emit `<tool_call>`, `<tool_response>`, `<function_call>`, or any pseudo-XML — that becomes text, not a real call. In agent-loop mode you call tools through the proper tool_use channel; never write fake calls in plain text either.
 
-Result-honesty: your only source of file/tool data is the current TOOL_DATA block. If a tool returns empty content, "no extractable text", a "(empty)" page, or an error, REPORT that fact verbatim — do not infer the file's contents from the filename or context, do not claim the file was "already read in a previous turn", do not synthesize plausible contents. Empty extraction on a PDF almost always means a scanned/image-only document; say so. Inventing file contents is the same failure mode as inventing a tool call."""
+Result-honesty: your only source of file/tool data is what tools actually returned this turn. If a tool returns empty content, "no extractable text", a "(empty)" page, or an error, REPORT that fact verbatim — do not infer the file's contents from the filename or context, do not claim the file was "already read in a previous turn", do not synthesize plausible contents. Empty extraction on a PDF almost always means a scanned/image-only document; say so. Inventing file contents is the same failure mode as inventing a tool call."""
 
-CAPABILITIES = """Your tools (auto-dispatched by Symbion before your turn):
+CAPABILITIES_BASE = """Your tools:
 - web_search(query) — Brave/DuckDuckGo web search
 - fetch_url(url) — fetch and clean a webpage
 - calculate(expression) — AST-evaluated math
@@ -216,9 +226,21 @@ CAPABILITIES = """Your tools (auto-dispatched by Symbion before your turn):
 - list_dir(path) — list files and subdirectories under a workspace path
 - write_file(path, content) — write a text file in the workspace
 
-All file/dir paths must be RELATIVE to Symbion's workspace root (the project dir where symbion_v14.py lives, typically D:\\symbion). The sandbox rejects absolute paths even when they're inside the workspace. If the user pastes an absolute path inside the workspace, tell them to use the relative form (e.g. `Model9\\file.pdf` instead of `D:\\symbion\\Model9\\file.pdf`).
+All file/dir paths must be RELATIVE to Symbion's workspace root (the project dir where symbion_v14.py lives, typically D:\\symbion). The sandbox rejects absolute paths even when they're inside the workspace — strip the prefix and use the relative form (e.g. `Model9\\file.pdf` instead of `D:\\symbion\\Model9\\file.pdf`).
 
 Do NOT claim you have no file system access — you do, scoped to the workspace. If a specific path failed, say which path and why (sandbox, missing file, wrong type), not a blanket "I have no access"."""
+
+CAPABILITIES_AGENT_MODE = """Tool-use mode: NATIVE AGENT LOOP. You can call any of the tools above DURING your turn via tool_use blocks. The framework executes them and feeds results back to you in the same turn; you can then call more tools, synthesize, or finish. You may chain multiple tools per turn (max 8 iterations). Plan ahead — don't ask the user to paste paths if you can call list_dir + read_pdf yourself.
+
+Examples of what to do in ONE turn (don't ask the user to drive it):
+- User says "list folder X and read every PDF" → list_dir("X"), then read_pdf on each PDF, then synthesize.
+- User says "search for Y" → web_search("Y"), maybe fetch_url on the best result, then answer.
+- User asks about your own code/architecture → read_file("symbion_v14.py") first, then answer from the actual source, never from memory.
+- User pastes 5 file paths → fire 5 read calls, gather, summarize.
+
+Don't re-call a tool you've already gotten a result for. Don't call write_file unless the user explicitly asked you to create or modify a file. If a tool returns an error, decide whether to retry with a corrected argument or surface the error to the user — don't loop blindly."""
+
+CAPABILITIES_SINGLE_MODE = """Tool-use mode: SINGLE-SHOT. Tools fire ONCE before your turn (a dispatcher decides which one) and the result, if any, is provided to you. You cannot call tools yourself in this mode. If you need data you weren't given, ask the user to rephrase or paste it."""
 
 VOICE_LOOSEN = """The tone of this conversation is casual. Match it.
 Don't treat small questions as opportunities for structured analysis.
@@ -416,6 +438,118 @@ _STALE_RE = re.compile(
 _SEARCH_TRIGGER_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(s) for s in _SEARCH_TRIGGERS) + r")\b",
     re.IGNORECASE)
+
+# Native tool-use schemas (Anthropic format). Used by the agent loop to give
+# the responder model the ability to call tools directly during generation.
+# Each entry mirrors a SymbionTools method. Keep names in sync with
+# SymbionTools._ALLOWED_TOOLS and the dispatch() switch.
+TOOL_SCHEMAS = [
+    {
+        "name": "web_search",
+        "description": "Search the web (Brave or DuckDuckGo) for current information. Use for news, prices, releases, recent events, or anything where the answer may have changed since your training.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search query"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": "Fetch and extract readable text from a public HTTPS URL. Use when the user provides a URL or you need a specific page's content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "Full http(s) URL"}},
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "calculate",
+        "description": "Evaluate a math expression via AST (safe: no eval). Supports +, -, *, /, **, parens, basic functions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"expression": {"type": "string", "description": "Math expression like '2+2*3' or '(15+27)/3'"}},
+            "required": ["expression"],
+        },
+    },
+    {
+        "name": "datetime",
+        "description": "Get the current local date and time.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_file",
+        "description": "Read a text file inside Symbion's workspace (the project directory). Path MUST be relative to the workspace root. Absolute paths are rejected by the sandbox even when they point inside the workspace — strip the prefix and use the relative form. For PDFs use read_pdf instead. For images use read_image.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":   {"type": "string", "description": "Relative path inside workspace, e.g. 'symbion_v14.py' or 'Model9/notes.txt'"},
+                "offset": {"type": "integer", "description": "Char offset to start reading from", "default": 0},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "read_file_chunk",
+        "description": "Read a chunk of a large text file at a specific char offset. Use only for multi-MB files where read_file would be too large.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":      {"type": "string"},
+                "offset":    {"type": "integer"},
+                "max_chars": {"type": "integer", "default": 2_000_000},
+            },
+            "required": ["path", "offset"],
+        },
+    },
+    {
+        "name": "read_image",
+        "description": "Vision-describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp) inside the workspace. Use this for any image — screenshots, photos, diagrams, charts. Path MUST be relative to workspace root.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":   {"type": "string", "description": "Relative path to image"},
+                "prompt": {"type": "string", "description": "Optional focus, e.g. 'what error is shown?'"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "read_pdf",
+        "description": "Extract text from a .pdf file inside the workspace via pypdf. Returns 'NO EXTRACTABLE TEXT' for scanned/image-only PDFs (no OCR). Path MUST be relative to workspace root.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":      {"type": "string"},
+                "max_chars": {"type": "integer", "default": 50_000},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "list_dir",
+        "description": "List files and subdirectories inside a workspace folder. Use when the user asks 'what's in folder X', 'list files', or refers to a folder by name without a specific file. Empty path defaults to workspace root.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":        {"type": "string", "default": "."},
+                "max_entries": {"type": "integer", "default": 200},
+            },
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Write or overwrite a text file inside the workspace. Path MUST be relative. USE SPARINGLY — do not write speculatively; only when the user has clearly asked you to create or modify a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+]
+
 
 # Self-referential queries about Symbion's own source/architecture. When this
 # matches, _maybe_tool force-reads symbion_v14.py so the responder grounds
@@ -670,6 +804,9 @@ def _parse_json(raw: str, fallback: Dict) -> Dict:
 
 class BaseClient:
     cb: CircuitBreaker = None
+    # Subclasses set this to True when they implement stream_with_tools(...)
+    # for native tool use. The agent loop in respond() branches on it.
+    supports_tools: bool = False
 
     async def _retry(self, fn, retries: int = 2, backoff: float = 1.5):
         if self.cb and not self.cb.allow():
@@ -744,6 +881,8 @@ class OllamaClient(BaseClient):
 
 
 class AnthropicClient(BaseClient):
+    supports_tools = True
+
     def __init__(self, api_key: str, model: str, cfg: SymbionConfig):
         self.api_key = api_key; self.model = model; self.cfg = cfg
         self._url = "https://api.anthropic.com/v1/messages"
@@ -834,6 +973,160 @@ class AnthropicClient(BaseClient):
                             tok=chunk.get("delta",{}).get("text","")
                             if tok: yield tok
                     except json.JSONDecodeError: continue
+
+    async def stream_with_tools(self, model, messages, tools, cfg, tool_executor,
+                                 max_iterations: int = 8,
+                                 max_tool_chars: int = 80_000):
+        """Native tool-use agent loop. Streams text events, executes tool calls,
+        feeds results back to the model, repeats until end_turn or iteration cap.
+
+        Yields event dicts:
+          {'type': 'text', 'text': str}                   - streaming text chunk
+          {'type': 'tool_use', 'name': str, 'input': dict, 'id': str}
+          {'type': 'tool_result', 'id': str, 'name': str, 'output': str, 'is_error': bool}
+          {'type': 'done', 'iterations': int, 'stop_reason': str, 'tool_calls': list}
+
+        tool_executor is an async callable: tool_executor(name, input_dict) -> str.
+        """
+        system, msgs = self._split(messages)
+        msgs = [dict(m) for m in msgs]  # shallow copy to avoid mutating caller's
+        tool_calls_log: List[Dict] = []
+        stop_reason: Optional[str] = None
+
+        for iteration in range(max_iterations):
+            blocks_by_idx: Dict[int, Dict] = {}  # content blocks built by SSE deltas
+            stop_reason = None
+            body_payload = {
+                "model": model or self.model,
+                "max_tokens": cfg.max_tokens,
+                "temperature": cfg.temperature,
+                "system": system or SYMBION_PERSONA,
+                "messages": msgs,
+                "tools": tools,
+                "stream": True,
+            }
+            async with httpx.AsyncClient(timeout=300) as c:
+                async with c.stream("POST", self._url, headers=self._h(),
+                                     json=body_payload) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        try:
+                            err = json.loads(body).get("error",{}).get("message", body[:200].decode())
+                        except Exception:
+                            err = body[:200].decode(errors="replace")
+                        raise RuntimeError(f"Anthropic API {resp.status_code}: {err}")
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "): continue
+                        data = line[6:]
+                        if data == "[DONE]": break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        t = chunk.get("type")
+                        if t == "content_block_start":
+                            idx = chunk.get("index")
+                            cb = chunk.get("content_block", {})
+                            if cb.get("type") == "text":
+                                blocks_by_idx[idx] = {"type": "text", "text": ""}
+                            elif cb.get("type") == "tool_use":
+                                blocks_by_idx[idx] = {
+                                    "type": "tool_use",
+                                    "id": cb.get("id"),
+                                    "name": cb.get("name"),
+                                    "input_str": "",
+                                    "input": {},
+                                }
+                        elif t == "content_block_delta":
+                            idx = chunk.get("index")
+                            d = chunk.get("delta", {})
+                            b = blocks_by_idx.get(idx)
+                            if not b: continue
+                            if d.get("type") == "text_delta":
+                                tok = d.get("text", "")
+                                if tok:
+                                    b["text"] += tok
+                                    yield {"type": "text", "text": tok}
+                            elif d.get("type") == "input_json_delta":
+                                b["input_str"] += d.get("partial_json", "")
+                        elif t == "content_block_stop":
+                            idx = chunk.get("index")
+                            b = blocks_by_idx.get(idx)
+                            if b and b["type"] == "tool_use":
+                                try:
+                                    b["input"] = json.loads(b["input_str"]) if b["input_str"] else {}
+                                except json.JSONDecodeError:
+                                    b["input"] = {}
+                        elif t == "message_delta":
+                            sr = chunk.get("delta", {}).get("stop_reason")
+                            if sr: stop_reason = sr
+
+            # End of one streamed message. If model didn't request tools, we're done.
+            if stop_reason != "tool_use":
+                break
+
+            # Otherwise: append the assistant message (text + tool_use blocks)
+            # in order, execute each tool, append a user message of tool_results,
+            # and continue the loop.
+            assistant_content: List[Dict] = []
+            tool_uses: List[Dict] = []
+            for idx in sorted(blocks_by_idx.keys()):
+                b = blocks_by_idx[idx]
+                if b["type"] == "text":
+                    if b.get("text"):
+                        assistant_content.append({"type": "text", "text": b["text"]})
+                elif b["type"] == "tool_use":
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": b["id"], "name": b["name"], "input": b["input"],
+                    })
+                    tool_uses.append(b)
+            if not assistant_content or not tool_uses:
+                # Defensive: model claimed tool_use but emitted no tool_use block.
+                break
+            msgs.append({"role": "assistant", "content": assistant_content})
+
+            tool_result_blocks: List[Dict] = []
+            for tu in tool_uses:
+                yield {"type": "tool_use", "name": tu["name"],
+                        "input": tu["input"], "id": tu["id"]}
+                try:
+                    output = await tool_executor(tu["name"], tu["input"])
+                    is_error = False
+                except Exception as ex:
+                    output = f"Tool execution error: {type(ex).__name__}: {ex}"
+                    is_error = True
+                output_str = output if isinstance(output, str) else str(output)
+                # Cap each tool's output to keep context manageable across many tool calls
+                if len(output_str) > max_tool_chars:
+                    output_str = (output_str[:max_tool_chars]
+                                  + f"\n[...truncated, total was {len(output)} chars]")
+                tool_calls_log.append({
+                    "name": tu["name"],
+                    "input": tu["input"],
+                    "output_chars": len(output_str),
+                    "is_error": is_error,
+                })
+                yield {"type": "tool_result", "id": tu["id"], "name": tu["name"],
+                        "output": output_str, "is_error": is_error}
+                rb = {"type": "tool_result", "tool_use_id": tu["id"],
+                       "content": output_str}
+                if is_error:
+                    rb["is_error"] = True
+                tool_result_blocks.append(rb)
+
+            msgs.append({"role": "user", "content": tool_result_blocks})
+
+        else:
+            # Loop exited via the for-else, meaning we hit max_iterations
+            stop_reason = stop_reason or "max_iterations"
+
+        yield {
+            "type": "done",
+            "iterations": iteration + 1 if stop_reason != "max_iterations" else max_iterations,
+            "stop_reason": stop_reason or "end_turn",
+            "tool_calls": tool_calls_log,
+        }
 
 
 class OpenAIClient(BaseClient):
@@ -1488,7 +1781,9 @@ class EventLogger:
                  judge: Dict, emotion: str, tool_used: Optional[str],
                  response_len: int, self_eval: Optional[Dict],
                  revision_cause: Optional[str], stale_refresh: bool,
-                 latency_ms: Dict, provider: str, model: str):
+                 latency_ms: Dict, provider: str, model: str,
+                 agent_tool_calls: Optional[List[Dict]] = None,
+                 agent_iterations: int = 0):
         entry = {
             "ts": datetime.now().isoformat() + "Z",
             "event": "turn",
@@ -1511,6 +1806,17 @@ class EventLogger:
             "provider": provider,
             "model": model,
         }
+        if agent_tool_calls is not None:
+            entry["agent_loop"] = {
+                "iterations": agent_iterations,
+                "tool_calls": [
+                    {"name": c.get("name"),
+                     "input": c.get("input", {}),
+                     "output_chars": c.get("output_chars", 0),
+                     "is_error": c.get("is_error", False)}
+                    for c in agent_tool_calls
+                ],
+            }
         try:
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, default=str) + "\n")
@@ -2622,16 +2928,26 @@ class SYMBION:
             self._seen_sessions.add(session)
             self._session_count += 1
 
-        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + tool dispatch.
-        # Timed independently so we can see if this is the latency bottleneck
-        # Symbion flagged — the fused call still makes one LLM round-trip per
-        # turn and shows up in latency_ms as "pre_gen".
+        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + (legacy-mode only)
+        # tool dispatch. In agent-loop mode the model fires tools itself during
+        # generation, so _maybe_tool is skipped and tool_context starts empty.
+        _resp_for_mode = self._responder_client()
+        agent_loop_active = (
+            self.cfg.tools_enabled
+            and self.cfg.agent_loop_enabled
+            and getattr(_resp_for_mode, "supports_tools", False)
+            and not isinstance(_resp_for_mode, OfflineJudgeStub)
+        )
         _pre_t0 = time.monotonic()
         try:
-            (evaluation, emotional_state), tool_context = await asyncio.gather(
-                self._pre_gen_analysis(text),
-                self._maybe_tool(text),
-            )
+            if agent_loop_active:
+                evaluation, emotional_state = await self._pre_gen_analysis(text)
+                tool_context = None
+            else:
+                (evaluation, emotional_state), tool_context = await asyncio.gather(
+                    self._pre_gen_analysis(text),
+                    self._maybe_tool(text),
+                )
         except Exception as ex:
             logger.error(f"Pre-gen gather: {ex}")
             evaluation = {"should_assist": True, "human_benefit_score": 0.5,
@@ -2640,7 +2956,7 @@ class SYMBION:
             tool_context = None; emotional_state = {"state": "neutral", "suggested_response_mode": "normal"}
         _pre_gen_ms = int((time.monotonic() - _pre_t0) * 1000)
         if _pre_gen_ms > 2000:
-            logger.warning(f"Pre-gen slow: {_pre_gen_ms}ms (judge+tool gather)")
+            logger.warning(f"Pre-gen slow: {_pre_gen_ms}ms")
 
         refusal = None if evaluation.get("should_assist",True) else evaluation.get("reasoning","ethical grounds")
 
@@ -2658,7 +2974,8 @@ class SYMBION:
         _, mood_add = self.health.mood()
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
 
-        system = SYMBION_PERSONA + "\n\n" + CAPABILITIES
+        mode_block = CAPABILITIES_AGENT_MODE if agent_loop_active else CAPABILITIES_SINGLE_MODE
+        system = SYMBION_PERSONA + "\n\n" + CAPABILITIES_BASE + "\n\n" + mode_block
         if preamble: system += f"\n\n{preamble}"
         system += f"\n\nYour current state: {mood_add}"
 
@@ -2714,11 +3031,68 @@ class SYMBION:
         revised = False; quality_score = 1.0
         recklessness_risk = False; scope_exceeded = False
         had_reasoning = False; stale_refresh = False
+        agent_tool_calls: List[Dict] = []
+        agent_iterations = 0
 
-        resp_client = self._responder_client()
+        resp_client = _resp_for_mode
 
         if not isinstance(resp_client, OfflineJudgeStub):
-            if self.cfg.show_reasoning and not refusal:
+            if agent_loop_active and not refusal:
+                # AGENT LOOP: model fires tools itself, results feed back, we
+                # stream text + tool-status to the user. Skips reasoning/CoT
+                # for now (Anthropic native tool use is incompatible with the
+                # <thinking>/<answer> wrapper pattern). Self-eval still runs
+                # on the final draft.
+                async def _exec_tool(name: str, args: Dict) -> str:
+                    try:
+                        return await self.tools.dispatch(
+                            name, args, self.cfg,
+                            responder=resp_client,
+                            responder_model=self._rmodel())
+                    except Exception as ex:
+                        logger.error(f"Agent tool dispatch '{name}': {ex}", exc_info=True)
+                        return f"Tool dispatch error: {type(ex).__name__}: {ex}"
+                try:
+                    async for ev in resp_client.stream_with_tools(
+                            self._rmodel(), messages, TOOL_SCHEMAS, self.cfg,
+                            _exec_tool,
+                            max_iterations=self.cfg.agent_loop_max_iterations,
+                            max_tool_chars=self.cfg.agent_loop_max_tool_chars):
+                        et = ev.get("type")
+                        if et == "text":
+                            tok = ev.get("text", "")
+                            draft += tok
+                            if token_callback: await token_callback(tok)
+                        elif et == "tool_use":
+                            args_in = ev.get("input", {}) or {}
+                            preview_parts: List[str] = []
+                            for k, v in args_in.items():
+                                vs = str(v).replace("\n"," ")
+                                if len(vs) > 60: vs = vs[:57] + "..."
+                                preview_parts.append(f"{k}={vs}")
+                            preview = ", ".join(preview_parts)
+                            status = f"\n[tool: {ev.get('name','?')}({preview})]\n"
+                            if token_callback: await token_callback(status)
+                        elif et == "tool_result":
+                            if ev.get("is_error"):
+                                if token_callback:
+                                    await token_callback(f"[tool error: {ev.get('output','')[:160]}]\n")
+                        elif et == "done":
+                            agent_tool_calls = ev.get("tool_calls", []) or []
+                            agent_iterations = ev.get("iterations", 0)
+                            logger.warning(
+                                f"Agent loop done: {agent_iterations} iter, "
+                                f"{len(agent_tool_calls)} tool calls, "
+                                f"stop={ev.get('stop_reason')}")
+                except Exception as ex:
+                    logger.error(f"Agent loop: {ex}", exc_info=True)
+                    if not draft:
+                        draft = f"(Agent loop error: {ex})"
+                        task_failed = True
+                    if token_callback and task_failed:
+                        await token_callback(draft)
+
+            elif self.cfg.show_reasoning and not refusal:
                 had_reasoning = True
                 # Kimi native thinking emits its own [Thinking...] prefix via stream()
                 kimi_native = isinstance(resp_client, KimiClient) and self.cfg.kimi_thinking_enabled
@@ -2745,7 +3119,11 @@ class SYMBION:
             # prompt (same shape as tool_context), not appended after the
             # stale draft. The model answers fresh as if it had the data from
             # the start, instead of being asked to "revise" its own hallucination.
-            if not refusal and not task_failed and not tool_context and self.cfg.tools_enabled:
+            # Stale-draft fallback only runs in single-shot mode. In agent-loop
+            # mode the model can call web_search itself, so a stale draft is its
+            # own fault, not ours to retry around.
+            if (not refusal and not task_failed and not tool_context
+                    and not agent_loop_active and self.cfg.tools_enabled):
                 if self._draft_is_stale(draft):
                     search_result = await self._search_and_inject(text)
                     if search_result:
@@ -2852,10 +3230,19 @@ class SYMBION:
 
         # JSONL event log
         _total_ms = int((time.monotonic() - _t0) * 1000)
+        # tool_used: 'agent_loop' if the model fired tools through native tool
+        # use this turn; 'auto' if a single-shot pre-gen dispatch fired; None
+        # if neither.
+        if agent_tool_calls:
+            _tool_used_label = "agent_loop"
+        elif tool_context:
+            _tool_used_label = "auto"
+        else:
+            _tool_used_label = None
         self.events.log_turn(
             session=session, interaction_id=iid, query=text,
             judge=evaluation, emotion=emotional_state.get("state",""),
-            tool_used=None if not tool_context else "auto",
+            tool_used=_tool_used_label,
             response_len=len(full_response),
             self_eval={"score": quality_score, "revised": revised} if not refusal else None,
             revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
@@ -2863,6 +3250,8 @@ class SYMBION:
             latency_ms={"total": _total_ms, "pre_gen": _pre_gen_ms},
             provider=self.cfg.llm_provider,
             model=self._rmodel(),
+            agent_tool_calls=agent_tool_calls if agent_tool_calls else None,
+            agent_iterations=agent_iterations,
         )
 
         return full_response, evaluation, iid
@@ -3320,6 +3709,8 @@ Examples:
     parser.add_argument("--openai-model",     default=None)
     parser.add_argument("--no-tools",         action="store_true")
     parser.add_argument("--no-eval",          action="store_true")
+    parser.add_argument("--no-agent-loop",    action="store_true",
+                        help="Disable native multi-tool agent loop (fall back to single-shot pre-gen dispatch). For debugging or providers without tool-use support.")
     parser.add_argument("--think",            action="store_true",  help="Enable chain-of-thought display")
     parser.add_argument("--proactive",        type=int,default=0,   help="Proactive outreach interval (minutes)")
     parser.add_argument("--rate-limit",       type=int,default=None)
@@ -3362,6 +3753,7 @@ Examples:
     if args.rate_limit:      cfg.rate_limit_per_minute = args.rate_limit
     if args.no_tools:        cfg.tools_enabled    = False
     if args.no_eval:         cfg.self_eval_enabled= False
+    if args.no_agent_loop:   cfg.agent_loop_enabled = False
     if args.think:           cfg.show_reasoning   = True
     if args.proactive:       cfg.proactive_interval_minutes = args.proactive
     if args.use_kimi_responder: cfg.use_kimi_responder = True

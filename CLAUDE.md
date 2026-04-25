@@ -101,24 +101,38 @@ Entry point              main()
 ## The respond() pipeline (critical path)
 
 ```
-1. Pre-gen parallel — asyncio.gather() runs:
-     _pre_gen_analysis (fused judge + emotion in one LLM call),
-     _maybe_tool (tool dispatch)
+1. Pre-gen — _pre_gen_analysis (fused judge + emotion in one LLM call).
+   In single-shot mode this runs in parallel with _maybe_tool via gather;
+   in agent-loop mode (default for Anthropic responder) tool dispatch is
+   skipped here because the model fires tools itself during generation.
 2. Contradiction check
-3. System prompt assembly — persona + mood + emotion_mode + voice_loosen
-     + tool results + contradiction notice + over-caution override
-4. Generation — stream tokens via responder client
-5. Stale-draft fallback — if model hit knowledge wall, web-search and regenerate
-     (marks stale_refresh=True, sets revised=True, skips self-eval)
-6. Self-eval + revision — only if not already revised by stale-draft,
-     not a refusal, threshold < 0.35. Single revision max.
+3. System prompt assembly — persona + CAPABILITIES_BASE +
+     (CAPABILITIES_AGENT_MODE | CAPABILITIES_SINGLE_MODE) + mood +
+     emotion_mode + voice_loosen + tool results (single-shot only) +
+     contradiction notice + over-caution override
+4. Generation — branches on agent_loop_active:
+     - Agent loop: AnthropicClient.stream_with_tools drives a multi-iteration
+       loop. Model emits tool_use blocks, framework executes via SymbionTools
+       .dispatch, results return as tool_result, model continues until
+       end_turn or max_iterations (default 8). Text streams to user; tool
+       calls show as `[tool: name(args)]` status.
+     - Single-shot: existing resp_client.stream() path. Optional CoT wrap
+       via _generate_with_reasoning.
+5. Stale-draft fallback — single-shot only. In agent loop the model can
+   call web_search itself, so stale drafts are no longer the framework's
+   problem to retry around.
+6. Self-eval + revision — same in both modes. Single revision max.
 7. Background tasks (fire-and-forget) — summarise, profile update,
      knowledge gap check, identity moment recording
 8. Health + learn — HealthMetrics.record(), SymbionLearner.record()
-9. Event log — EventLogger.log_turn() (JSONL), _write_log() (legacy)
+9. Event log — EventLogger.log_turn() (JSONL), _write_log() (legacy).
+   Agent-loop turns include an `agent_loop` block with iterations and
+   per-tool {name, input, output_chars, is_error}.
 ```
 
-**Do not serialize what is parallel.** Pre-gen is 2 parallel calls; adding a new pre-gen step means adding it to the gather, not sequencing it.
+**Do not serialize what is parallel.** In single-shot mode, pre-gen is 2 parallel calls. In agent-loop mode pre-gen is just judge+emotion (one call). Adding a new pre-gen step means adding it to the gather (single-shot) or sequencing it before generation (agent loop).
+
+**Agent loop boundaries.** `agent_loop_enabled` in SymbionConfig (default True). Active only when (a) tools_enabled, (b) cfg.agent_loop_enabled, (c) responder client has `supports_tools = True` (currently AnthropicClient only — extend OpenAIClient/KimiClient with `stream_with_tools` to opt them in). Tool schemas live in `TOOL_SCHEMAS` near the persona constants and must stay in sync with `SymbionTools._ALLOWED_TOOLS`.
 
 ## Non-negotiable invariants
 
