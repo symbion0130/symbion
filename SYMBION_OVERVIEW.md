@@ -12,8 +12,8 @@ Symbion is a **single-file async Python AI assistant** that wraps a frontier LLM
 
 ## Current state (as of April 2026)
 
-- **Stable working version:** `symbion_v13.py` — ~2,593 lines, single file.
-- **Previous version:** `symbion_v12.py` — ~3,820 lines. v13 is a deliberate **simplification** of v12, not an expansion.
+- **Stable working version:** `symbion_v14.py` — ~3,120 lines, single file. Cloned forward from `symbion_v13.py`; behaviorally identical at the v13→v14 cutover.
+- **Frozen snapshots:** `symbion_v13.py` (last v13 state, kept for diffing), `symbion_v12.py` — ~3,820 lines. v13 was a deliberate **simplification** of v12, not an expansion.
 
 ### The v12 → v13 design shift
 
@@ -31,7 +31,8 @@ This is a philosophical shift worth understanding: v11 and v12 leaned into layer
 ## Repo layout
 
 ```
-symbion_v13.py              # current stable, single file
+symbion_v14.py              # current stable, single file (active)
+symbion_v13.py              # frozen snapshot, kept for diffing
 symbion_v12.py              # prior version, kept for reference
 CLAUDE.md                   # Claude Code project context (invariants, conventions)
 symbion.json                # config (no secrets)
@@ -41,13 +42,13 @@ symbion_transparency.log    # per-interaction audit log
 symbion_workspace/          # sandbox dir for the tools module
 ```
 
-The **single-file constraint is load-bearing**. Symbion is deliberately one `.py` file so it can be dropped into any environment and run with `python symbion_v13.py`. Do not split into modules without explicit approval.
+The **single-file constraint is load-bearing**. Symbion is deliberately one `.py` file so it can be dropped into any environment and run with `python symbion_v14.py`. Do not split into modules without explicit approval.
 
 ---
 
 ## v13 architecture at a glance
 
-A single `SYMBION` core object composes these subsystems (see lines ~1587+ of `symbion_v13.py`):
+A single `SYMBION` core object composes these subsystems (see lines ~1587+ of `symbion_v14.py`):
 
 | Subsystem | Class | Role |
 |---|---|---|
@@ -118,8 +119,8 @@ Keeping scope honest:
 **Before any change:**
 
 ```bash
-wc -l symbion_v13.py
-grep -nE "^class |^def |^async def " symbion_v13.py | head -60
+wc -l symbion_v14.py
+grep -nE "^class |^def |^async def " symbion_v14.py | head -60
 ```
 
 That gives the map. Then read the section being edited *and its neighbors* — Symbion's subsystems couple through shared state on `SYMBION`, shared DB tables, and `HealthMetrics`.
@@ -154,4 +155,4 @@ If the user asks for a "random rundown," you now have enough to give one. The sh
 3. What's load-bearing (async, single-file, behavioral-proxy framing, judge authority).
 4. Where the edges are (no swarm, no activation access, not a moral patient).
 
-If the user asks for specific work, read `symbion_v13.py` directly before proposing changes. This doc summarizes; the code is the truth.
+If the user asks for specific work, read `symbion_v14.py` directly before proposing changes. This doc summarizes; the code is the truth.

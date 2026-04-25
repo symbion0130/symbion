@@ -36,7 +36,7 @@ python -m symbion --provider anthropic --web
 
 Or run the single file directly:
 ```bash
-python symbion_v13.py --provider anthropic
+python symbion_v14.py --provider anthropic
 ```
 
 ## Architecture
@@ -54,7 +54,7 @@ v14 removed the probe layer (11 LLM-grading-LLM subsystems) that ran in v11-v13.
 
 ## Configuration
 
-Source of truth: `symbion_v13.py`, class `SymbionConfig`. Key fields:
+Source of truth: `symbion_v14.py`, class `SymbionConfig`. Key fields:
 
 - `llm_provider`: "ollama" | "anthropic" | "openai" | "kimi"
 - `self_eval_enabled` / `self_eval_threshold`: quality gating

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Symbion is
 
-Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~2580 lines, `symbion_v13.py`).
+Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~3120 lines, `symbion_v14.py`).
 
-**Only edit `symbion_v13.py`.** `symbion_v3.py`..`symbion_v12.py` and `symbion_v13.py.orig` are historical/pre-refactor snapshots kept for diffing — they are not imported and must not be modified. The filename `symbion_v13.py` is intentional: it is the v14 codebase. Do not rename it. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI web UI.
+**Only edit `symbion_v14.py`.** `symbion_v3.py`..`symbion_v13.py` and `symbion_v13.py.orig` are historical/pre-refactor snapshots kept for diffing — they are not imported and must not be modified. `symbion_v14.py` is the active codebase; `symbion_v13.py` was cloned forward and is now frozen alongside the older snapshots. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI web UI.
 
 It is not a chatbot wrapper. It attempts to reproduce alignment properties from outside a model using behavioral proxies. v14 stripped 11 LLM-grading-LLM probe subsystems from v11-v13 and replaced them with an offline eval harness (`evals/`) and JSONL telemetry.
 
@@ -24,7 +24,7 @@ python -m pytest tests/test_tools.py -q
 python -m pytest tests/test_tools.py::TestCalculator::test_basic_arithmetic -v
 
 # Compile check (fast — catches syntax errors)
-python -m py_compile symbion_v13.py
+python -m py_compile symbion_v14.py
 
 # Smoke test (needs Ollama running, or falls back to heuristic)
 python scripts/smoke.py
@@ -36,7 +36,7 @@ python evals/run.py --provider ollama
 python scripts/bench_latency.py
 
 # Run Symbion (terminal mode)
-python symbion_v13.py --provider ollama
+python symbion_v14.py --provider ollama
 python -m symbion --provider anthropic --web
 
 # DB migration from v13 schema
@@ -46,12 +46,13 @@ python scripts/migrate_v13_to_v14.py old.db new.db
 ## Repo layout
 
 ```
-symbion_v13.py              # the codebase — everything lives here (v14 despite filename)
+symbion_v14.py              # the active codebase — everything lives here
+symbion_v13.py              # frozen snapshot kept for diffing (do not edit)
 symbion/                    # thin package wrapper for python -m symbion
-  __init__.py               # re-exports SYMBION, SymbionConfig, HealthMetrics, main
+  __init__.py               # re-exports SYMBION, SymbionConfig, HealthMetrics, main (now from symbion_v14)
   __main__.py               # entry point
   web/templates/index.html  # web UI HTML (extracted from inline string)
-  clients|pipeline|tools/   # empty placeholders — do NOT split symbion_v13.py into these without an explicit request
+  clients|pipeline|tools/   # empty placeholders — do NOT split symbion_v14.py into these without an explicit request
 evals/
   golden.jsonl              # 30-entry eval dataset (rule-based, no LLM grading)
   run.py                    # offline eval runner
@@ -70,7 +71,7 @@ symbion_transparency.log    # legacy per-turn audit log (append-only)
 pyproject.toml              # pip install -e .
 ```
 
-## Architectural layers (top to bottom in symbion_v13.py)
+## Architectural layers (top to bottom in symbion_v14.py)
 
 ```
 Config & setup           SymbionConfig, run_setup, _load_dotenv_safe

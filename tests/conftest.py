@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 import pytest
 from typing import AsyncIterator, Dict, List
-from symbion_v13 import BaseClient, SymbionConfig, SYMBION
+from symbion_v14 import BaseClient, SymbionConfig, SYMBION
 
 
 class StubClient(BaseClient):

@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 import pytest
 from pathlib import Path
-from symbion_v13 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace
+from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace
 
 
 # === 4.1: AST-based calculator ===

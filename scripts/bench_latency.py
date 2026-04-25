@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 
-from symbion_v13 import SymbionConfig, SYMBION, OfflineJudgeStub
+from symbion_v14 import SymbionConfig, SYMBION, OfflineJudgeStub
 
 QUERIES = [
     "hello",
