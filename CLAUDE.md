@@ -141,7 +141,7 @@ Entry point              main()
 3. **Logs are append-only.** Both `symbion_transparency.log` and `symbion_events.jsonl`. Every decision path must log.
 4. **Only the judge refuses.** There is no survival gate. `HealthMetrics` is telemetry only — no code path silently refuses based on internal metrics.
 5. **Config-gated subsystems.** Every subsystem gets a bool in `SymbionConfig` and is skippable.
-6. **DB migrations are additive only.** Never drop columns. `init_db()` uses `CREATE TABLE IF NOT EXISTS`. Readers tolerate NULL.
+6. **DB migrations are additive only.** Never drop columns. `init_db()` uses `CREATE TABLE IF NOT EXISTS` plus idempotent `ALTER TABLE ADD COLUMN` for legacy DB upgrades (e.g. `summaries.embedding` was added this way; older rows have NULL embeddings and are backfilled by `_backfill_embeddings` on next launch). Readers tolerate NULL.
 7. **No eval() or exec() on untrusted input.** The calculator uses AST validation. File tools are workspace-sandboxed. URLs are SSRF-checked.
 8. **No bare `except:`.** Use `except ImportError:` for import guards, `except Exception:` everywhere else.
 

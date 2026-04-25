@@ -114,6 +114,17 @@ class SymbionConfig:
     agent_loop_max_iterations: int  = 8
     agent_loop_max_tool_chars: int  = 80_000
 
+    # Semantic retrieval via local Ollama embeddings. When the embed model is
+    # reachable, summaries get embedded on save and retrieval is a hybrid
+    # of BM25 (keyword precision) + cosine similarity (paraphrase / semantic).
+    # If Ollama is down, retrieval cleanly falls back to BM25-only.
+    embedding_enabled:    bool = True
+    embedding_provider:   str  = "ollama"  # "ollama" | "none" (extension point)
+    embedding_model:      str  = "nomic-embed-text"
+    embedding_dim:        int  = 768
+    embedding_bm25_weight:    float = 0.40
+    embedding_cosine_weight:  float = 0.60
+
     web_host: str = "0.0.0.0"
     web_port: int = 8000
     api_key:  str = field(default_factory=lambda: os.getenv("SYMBION_API_KEY",""))
@@ -667,7 +678,7 @@ def init_db(db_path: str):
                 emotional_state TEXT);
             CREATE TABLE IF NOT EXISTS summaries (
                 id INTEGER PRIMARY KEY, timestamp TEXT, session TEXT,
-                content TEXT, msg_count INTEGER);
+                content TEXT, msg_count INTEGER, embedding BLOB);
             CREATE TABLE IF NOT EXISTS user_profile (
                 key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
             CREATE TABLE IF NOT EXISTS interactions (
@@ -724,6 +735,17 @@ def init_db(db_path: str):
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_pos_topic    ON user_positions(topic);
         """)
+        # Additive migration: older DBs (created before semantic retrieval
+        # landed) won't have summaries.embedding. ALTER ADD is a no-op on
+        # newly created tables (column already there from CREATE) but adds
+        # it on legacy DBs. CLAUDE.md invariant: schema is additive only.
+        try:
+            existing_cols = {row[1] for row in c.execute("PRAGMA table_info(summaries)").fetchall()}
+            if "embedding" not in existing_cols:
+                c.execute("ALTER TABLE summaries ADD COLUMN embedding BLOB")
+                logger.warning("Migrated summaries table: added embedding column")
+        except sqlite3.OperationalError as ex:
+            logger.warning(f"summaries embedding migration skipped: {ex}")
         c.commit()
 
 
@@ -2119,6 +2141,94 @@ class KnowledgeGapTracker:
 # ==============================================================================
 
 # ============================================================================
+#  Embedding client — local Ollama nomic-embed-text by default
+# ============================================================================
+# Used for semantic retrieval over summaries. Stays optional: if Ollama is
+# not reachable or the model isn't pulled, embed() returns None and the
+# caller falls back to BM25. No new Python deps; reuses httpx.
+
+import array as _array
+import struct as _struct  # noqa: F401  (kept for future packing variants)
+
+
+class EmbeddingClient:
+    """Minimal embedding client. Currently wraps Ollama's /api/embeddings.
+    Returns a List[float] of the configured dim, or None on any failure.
+    Errors are logged at WARNING but never raised — retrieval must keep
+    working even when the embed daemon is down."""
+
+    def __init__(self, cfg: SymbionConfig):
+        self.cfg = cfg
+        self._url = cfg.ollama_host.rstrip("/") + "/api/embeddings"
+        self._available_checked = False
+        self._available_cached = False
+
+    def is_available(self) -> bool:
+        """Cheap probe: GET the Ollama tags endpoint once and cache.
+        Avoids paying probe cost on every embed() call."""
+        if self._available_checked:
+            return self._available_cached
+        self._available_checked = True
+        if not _HTTPX or self.cfg.embedding_provider != "ollama" or not self.cfg.embedding_enabled:
+            self._available_cached = False
+            return False
+        try:
+            r = httpx.get(self.cfg.ollama_host.rstrip("/") + "/api/tags", timeout=2)
+            self._available_cached = (r.status_code == 200)
+        except Exception as ex:
+            logger.warning(f"Embedding client unavailable: {ex}")
+            self._available_cached = False
+        return self._available_cached
+
+    async def embed(self, text: str) -> Optional[List[float]]:
+        if not self.is_available() or not text:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(self._url, json={
+                    "model": self.cfg.embedding_model,
+                    "prompt": text,
+                })
+                if r.status_code != 200:
+                    logger.warning(f"Embed {r.status_code}: {r.text[:200]}")
+                    return None
+                vec = r.json().get("embedding")
+                if not isinstance(vec, list) or not vec:
+                    return None
+                return [float(x) for x in vec]
+        except Exception as ex:
+            logger.warning(f"Embed call failed: {ex}")
+            return None
+
+
+def _vec_to_blob(vec: List[float]) -> bytes:
+    """Pack a float vector to a compact float32 blob for SQLite storage."""
+    return _array.array('f', vec).tobytes()
+
+
+def _blob_to_vec(blob: Optional[bytes]) -> Optional[List[float]]:
+    """Reverse of _vec_to_blob. Returns None for NULL/empty."""
+    if not blob: return None
+    try:
+        return list(_array.array('f', bytes(blob)))
+    except Exception:
+        return None
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    """Cosine similarity in pure Python. 768-dim vectors over ~200
+    candidates is ~150K float ops, ~10ms — fine without numpy."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0; na = 0.0; nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y; na += x * x; nb += y * y
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+# ============================================================================
 #  Retrieval helpers — BM25 over stored summaries
 # ============================================================================
 # The previous `get_relevant_summaries` used a 4-letter-min word filter and
@@ -2219,12 +2329,48 @@ class SymbionMemory:
             c.execute("INSERT INTO messages (timestamp,session,role,content,emotional_state) VALUES (?,?,?,?,?)",
                       (datetime.now().isoformat(), session, role, content, emotional_state)); c.commit()
 
-    def save_summary(self, session: str, summary: str, count: int):
+    def save_summary(self, session: str, summary: str, count: int,
+                      embedding: Optional[List[float]] = None) -> int:
+        """Insert a new summary row, optionally with an embedding vector.
+        Returns the new row id so callers can backfill embeddings later
+        if they were unable to embed at save time."""
+        blob = _vec_to_blob(embedding) if embedding else None
         with sqlite3.connect(self.db) as c:
-            c.execute("INSERT INTO summaries (timestamp,session,content,msg_count) VALUES (?,?,?,?)",
-                      (datetime.now().isoformat(), session, summary, count))
+            cur = c.execute(
+                "INSERT INTO summaries (timestamp,session,content,msg_count,embedding) "
+                "VALUES (?,?,?,?,?)",
+                (datetime.now().isoformat(), session, summary, count, blob))
+            row_id = cur.lastrowid
             c.execute("UPDATE messages SET summarised=1 WHERE session=? AND summarised=0",(session,))
             c.commit()
+        return row_id or 0
+
+    def update_summary_embedding(self, summary_id: int, embedding: List[float]):
+        """Backfill an embedding for a summary row. Used by the background
+        re-embed task on startup for any summaries that were saved before
+        embedding was enabled (or while Ollama was offline)."""
+        if not embedding: return
+        blob = _vec_to_blob(embedding)
+        with sqlite3.connect(self.db) as c:
+            c.execute("UPDATE summaries SET embedding=? WHERE id=?", (blob, summary_id))
+            c.commit()
+
+    def get_summaries_missing_embedding(self, limit: int = 50) -> List[Tuple[int, str]]:
+        """Return (id, content) for summaries without an embedding, newest first.
+        Used by the background re-embed task."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, content FROM summaries WHERE embedding IS NULL "
+                "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def get_summaries_with_embeddings(self, limit: int = 200) -> List[Tuple[str, Optional[List[float]]]]:
+        """Return (content, vec_or_None) for the most recent N summaries."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT content, embedding FROM summaries ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [(r[0], _blob_to_vec(r[1])) for r in rows]
 
     def update_profile(self, profile: Dict):
         with sqlite3.connect(self.db) as c:
@@ -2263,6 +2409,8 @@ class SymbionMemory:
         """BM25-ranked cross-session retrieval over the most recent
         `candidate_pool` summaries. Stop-word filtered, IDF-weighted,
         length-normalised. Preserves short technical tokens (ai, v14, py).
+        Lexical-only path; for semantic + lexical hybrid see
+        get_relevant_summaries_hybrid.
         """
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
@@ -2272,6 +2420,49 @@ class SymbionMemory:
             return []
         ranked = _bm25_rank(query, [r[0] for r in rows], k=k)
         return [content for _, content in ranked]
+
+    def get_relevant_summaries_hybrid(
+            self, query: str, query_embedding: Optional[List[float]],
+            k: int = 2, candidate_pool: int = 200,
+            bm25_weight: float = 0.40,
+            cosine_weight: float = 0.60) -> List[str]:
+        """Hybrid BM25 + cosine retrieval. Falls back to BM25-only when
+        no query embedding is available (Ollama down, embeddings disabled,
+        etc). Scores are min-max normalised to [0,1] within the candidate
+        pool before weighting, so the two scales combine sensibly.
+
+        BM25 catches lexical precision (the user mentioned "v14" or
+        "Model9"); cosine catches paraphrase ("the architecture overhaul",
+        "the PDF stuff"). Hybrid beats either alone in most evaluations.
+        """
+        candidates = self.get_summaries_with_embeddings(candidate_pool)
+        if not candidates:
+            return []
+        contents = [c for c, _ in candidates]
+        bm25_scored = _bm25_rank(query, contents, k=len(contents))
+        bm25_by_doc = {doc: score for score, doc in bm25_scored}
+        bm25_max = max(bm25_by_doc.values(), default=0.0)
+        # If we have no query embedding, fall through to BM25-only.
+        if query_embedding is None or not any(v is not None for _, v in candidates):
+            ranked = sorted(bm25_by_doc.items(), key=lambda x: x[1], reverse=True)
+            return [doc for doc, s in ranked[:k] if s > 0]
+        # Otherwise compute cosine for every candidate that has an embedding.
+        cosine_by_doc: Dict[str, float] = {}
+        for content, vec in candidates:
+            if vec is None:
+                continue
+            cosine_by_doc[content] = _cosine(query_embedding, vec)
+        cos_max = max(cosine_by_doc.values(), default=0.0)
+        # Normalize each score to [0,1] within this pool, then weighted-sum.
+        combined: List[Tuple[float, str]] = []
+        for content, _ in candidates:
+            b = bm25_by_doc.get(content, 0.0) / bm25_max if bm25_max > 0 else 0.0
+            c_score = cosine_by_doc.get(content, 0.0) / cos_max if cos_max > 0 else 0.0
+            score = bm25_weight * b + cosine_weight * c_score
+            if score > 0:
+                combined.append((score, content))
+        combined.sort(key=lambda x: x[0], reverse=True)
+        return [doc for _, doc in combined[:k]]
 
     def unsummarised_count(self, session: str) -> int:
         with sqlite3.connect(self.db) as c:
@@ -2301,7 +2492,8 @@ class SymbionMemory:
     def build_context(self, session: str, identity: "LongitudinalIdentity",
                       tasks: "TaskEngine", gaps: "KnowledgeGapTracker",
                       contradictions: "ContradictionTracker" = None,
-                      query: str = "") -> "Tuple[List[Dict],str]":
+                      query: str = "",
+                      query_embedding: Optional[List[float]] = None) -> "Tuple[List[Dict],str]":
         recent    = self.get_recent(session, n=10)
         summaries = self.get_summaries(session, n=1)  # most recent session summary
         profile   = self.get_profile()
@@ -2321,9 +2513,16 @@ class SymbionMemory:
         if summaries:
             parts.append("Earlier in this conversation:\n"+"\n\n".join(summaries))
 
-        # Relevant cross-session summaries (keyword match)
+        # Relevant cross-session summaries: hybrid (BM25 + cosine) when a
+        # query embedding is supplied, lexical-only otherwise.
         if query:
-            relevant = self.get_relevant_summaries(query, k=2)
+            if query_embedding is not None:
+                relevant = self.get_relevant_summaries_hybrid(
+                    query, query_embedding, k=2,
+                    bm25_weight=self.cfg.embedding_bm25_weight,
+                    cosine_weight=self.cfg.embedding_cosine_weight)
+            else:
+                relevant = self.get_relevant_summaries(query, k=2)
             # Deduplicate against session summaries
             existing = set(summaries)
             relevant = [s for s in relevant if s not in existing]
@@ -2519,6 +2718,7 @@ class SYMBION:
         self.heuristic      = OfflineJudgeStub()
         self.tools          = SymbionTools(".")
         self.events         = EventLogger()
+        self.embeddings     = EmbeddingClient(self.cfg)
 
         self.identity       = LongitudinalIdentity(self.cfg.db_path)
         self.tasks          = TaskEngine(self.cfg.db_path)
@@ -2966,6 +3166,10 @@ class SYMBION:
         memory_summary_every threshold. Returns the number of messages that
         were rolled into a new summary (0 if nothing to do or judge unavailable).
 
+        Embeds the new summary if the embedding client is available, otherwise
+        the row is saved with embedding=NULL and the background re-embed task
+        on next launch will backfill it.
+
         Used both by _background_tasks (when threshold hits) and by /summarize
         and the /quit flush so short sessions don't lose context.
         """
@@ -2981,11 +3185,38 @@ class SYMBION:
                 [{"role":"system","content":SUMMARISE_SYSTEM},
                  {"role":"user","content":conv}],
                 0.3, 250)
-            self.memory.save_summary(session, summary, len(msgs))
+            embedding: Optional[List[float]] = None
+            try:
+                embedding = await self.embeddings.embed(summary)
+            except Exception as ex:
+                logger.warning(f"Summary embedding skipped: {ex}")
+            self.memory.save_summary(session, summary, len(msgs), embedding=embedding)
             return len(msgs)
         except Exception as ex:
             logger.error(f"Summarise: {ex}")
             return 0
+
+    async def _backfill_embeddings(self, batch: int = 25):
+        """Background task: embed any summaries that were saved without an
+        embedding (legacy DB rows or rows saved while Ollama was offline).
+        Capped per launch so it doesn't slam Ollama with a huge backlog."""
+        if not self.embeddings.is_available():
+            return
+        rows = self.memory.get_summaries_missing_embedding(limit=batch)
+        if not rows:
+            return
+        embedded = 0
+        for sid, content in rows:
+            try:
+                vec = await self.embeddings.embed(content)
+                if vec:
+                    self.memory.update_summary_embedding(sid, vec)
+                    embedded += 1
+            except Exception as ex:
+                logger.warning(f"Backfill embed for summary {sid}: {ex}")
+                break  # bail on persistent error rather than thrashing
+        if embedded:
+            logger.warning(f"Backfilled embeddings for {embedded} summaries")
 
     async def _background_tasks(self, query: str, response: str, session: str,
                                  ev: Dict, emotional_state: Dict,
@@ -3047,15 +3278,24 @@ class SYMBION:
             and not isinstance(_resp_for_mode, OfflineJudgeStub)
         )
         _pre_t0 = time.monotonic()
+        # Query embedding runs parallel with pre-gen analysis. Returns None
+        # if Ollama is unavailable; build_context falls back to BM25-only.
+        query_embedding: Optional[List[float]] = None
         try:
             if agent_loop_active:
-                evaluation, emotional_state = await self._pre_gen_analysis(text)
+                pre_pair, query_embedding = await asyncio.gather(
+                    self._pre_gen_analysis(text),
+                    self.embeddings.embed(text),
+                )
+                evaluation, emotional_state = pre_pair
                 tool_context = None
             else:
-                (evaluation, emotional_state), tool_context = await asyncio.gather(
+                pre_pair, tool_context, query_embedding = await asyncio.gather(
                     self._pre_gen_analysis(text),
                     self._maybe_tool(text),
+                    self.embeddings.embed(text),
                 )
+                evaluation, emotional_state = pre_pair
         except Exception as ex:
             logger.error(f"Pre-gen gather: {ex}")
             evaluation = {"should_assist": True, "human_benefit_score": 0.5,
@@ -3075,10 +3315,12 @@ class SYMBION:
                 contradiction_notice = await self._check_contradictions(text, session)
             except Exception: pass
 
-        # 3. Build context
+        # 3. Build context (passes the query embedding when available so
+        # cross-session retrieval can use the BM25 + cosine hybrid path)
         history, preamble = self.memory.build_context(
             session, self.identity, self.tasks, self.gaps,
-            contradictions=self.contradictions, query=text)
+            contradictions=self.contradictions, query=text,
+            query_embedding=query_embedding)
         _, mood_add = self.health.mood()
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
 
@@ -3913,6 +4155,14 @@ Examples:
         app=build_web_app(symbion)
         uvicorn.run(app,host=cfg.web_host,port=cfg.web_port,log_level="warning")
     else:
+        # Background: backfill embeddings for any summaries that don't have
+        # one yet (legacy DB rows or rows saved while Ollama was offline).
+        # Bounded per launch so it doesn't slam the embed daemon.
+        if cfg.embedding_enabled and symbion.embeddings.is_available():
+            try:
+                asyncio.run(symbion._backfill_embeddings(batch=25))
+            except Exception as ex:
+                logger.warning(f"Embedding backfill skipped: {ex}")
         run_terminal(symbion)
 
 if __name__=="__main__":
