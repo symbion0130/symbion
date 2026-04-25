@@ -340,10 +340,10 @@ Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), rea
 - fetch_url: when a specific URL is given or implied
 - calculate: math expressions
 - datetime: current time/date
-- read_file: read a local TEXT file (source code, markdown, json, logs, etc). Absolute paths OK. Up to 2M chars.
+- read_file: read a local TEXT file (source code, markdown, json, logs, etc). Path MUST be relative to the workspace root (Symbion's project dir). Absolute paths and "..\\" escapes are rejected by the sandbox. Up to 2M chars.
 - read_file_chunk: read a specific chunk of a huge text file using offset and max_chars (only needed for multi-MB files)
-- read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp). Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path.
-- write_file: write/create a local file. Absolute paths OK.
+- read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp). Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path. Path MUST be relative to the workspace root — if the user pasted an absolute path (e.g. C:\\Users\\...\\foo.png) the sandbox will reject it; pass it through and the tool will return a clear error you should surface verbatim, not invent reasons for.
+- write_file: write/create a local file. Path MUST be relative to the workspace root.
 Use web_search aggressively — if the user is asking about anything time-sensitive, factual, or where
 the model's knowledge might be stale, search. Better to search unnecessarily than to answer from stale data.
 If the query mentions an image path (ends in .png/.jpg/.jpeg/.gif/.webp/.bmp, or the user says "screenshot"/"image"/"picture"/"this photo"/"the attached image"), use read_image.
@@ -383,6 +383,21 @@ _STALE_RE = re.compile(
     re.IGNORECASE)
 _SEARCH_TRIGGER_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(s) for s in _SEARCH_TRIGGERS) + r")\b",
+    re.IGNORECASE)
+
+# Self-referential queries about Symbion's own source/architecture. When this
+# matches, _maybe_tool force-reads symbion_v14.py so the responder grounds
+# claims in actual code instead of fabricating from training memory. Without
+# this, the model produces architecturally plausible but invented class names
+# and file structure (see iid=193 fabrication in symbion_events.jsonl).
+_SELF_SOURCE_RE = re.compile(
+    r"(?:"
+    r"\bsymbion_v1[34]\.py\b"
+    r"|\byour\s+(?:own\s+)?(?:code|source(?:\s+code)?|prompt|persona|architecture|implementation|codebase|pipeline)\b"
+    r"|\bread\s+symbion\b"
+    r"|\brespond\s*\(\s*\)"
+    r"|\b(?:respond|symbion)\s+pipeline\b"
+    r")",
     re.IGNORECASE)
 
 
@@ -1090,8 +1105,14 @@ class SymbionTools:
             desc = await responder.describe_image(model, str(p), prompt or "")
             return f"[Image description of {p.name} ({size} bytes)]\n{desc}"
         except ValueError:
-            # _resolve_in_workspace rejected the path — don't echo it back.
-            return "Error: path not allowed (sandbox)"
+            # _resolve_in_workspace rejected the path — don't echo the full
+            # path (it may contain user PII), but tell the model exactly why
+            # so it doesn't fabricate "OneDrive sync" or "path mangled" reasons.
+            return ("Error: path is outside Symbion's workspace (the project dir). "
+                    "The sandbox only allows relative paths inside that root. "
+                    "Tell the user to copy the image into the project dir and "
+                    "re-reference it by relative name (e.g. 'shot.png'). "
+                    "Do not invent other reasons.")
         except FileNotFoundError:
             return f"Not found: {self._safe_name(path)}"
         except Exception as ex:
@@ -1118,7 +1139,10 @@ class SymbionTools:
                 suffix += f"\n\n[...{remaining} chars remaining — use read_file_chunk with offset={offset+len(chunk)} to continue]"
             return chunk + ("\n\n" + suffix if suffix else "")
         except ValueError:
-            return "Error: path not allowed (sandbox)"
+            return ("Error: path is outside Symbion's workspace (the project dir). "
+                    "The sandbox only allows relative paths inside that root. "
+                    "If the user pasted an absolute path, tell them to use "
+                    "a relative name instead. Do not invent other reasons.")
         except Exception as ex:
             return f"Error reading {self._safe_name(path)}: {type(ex).__name__}"
 
@@ -2186,6 +2210,20 @@ class SYMBION:
                     return result
             except Exception as ex:
                 logger.error(f"Hard-trigger read_image: {ex}")
+
+        # Hard-trigger: self-referential queries about Symbion's own source.
+        # Force-read symbion_v14.py and inject as TOOL EXECUTION RESULT so the
+        # responder grounds claims instead of fabricating. Coherence-based
+        # self-eval can't catch hallucinated class names; grounding can.
+        if _SELF_SOURCE_RE.search(query):
+            try:
+                result = self.tools.read_file("symbion_v14.py")
+                if result and not result.startswith("Error"):
+                    logger.warning(f"Hard-trigger self-source: {len(result)} chars from symbion_v14.py")
+                    return result
+                logger.warning(f"Hard-trigger self-source failed: {result[:120]!r}")
+            except Exception as ex:
+                logger.error(f"Hard-trigger self-source: {ex}")
 
         # Hard-trigger: bypass Haiku if user explicitly asked to search
         if _SEARCH_TRIGGER_RE.search(query):
