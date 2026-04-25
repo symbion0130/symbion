@@ -1,11 +1,11 @@
 # Symbion v13
 
-import os, sys, re, json, time, asyncio, sqlite3, hashlib, urllib.parse, urllib.request
+import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, urllib.request
 import logging, argparse
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, AsyncIterator
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dataclasses import dataclass, field, asdict
 
 try:    import httpx; _HTTPX = True
@@ -2118,6 +2118,98 @@ class KnowledgeGapTracker:
 #  MEMORY
 # ==============================================================================
 
+# ============================================================================
+#  Retrieval helpers — BM25 over stored summaries
+# ============================================================================
+# The previous `get_relevant_summaries` used a 4-letter-min word filter and
+# raw count of substring hits. That broke retrieval on short tokens that
+# carry meaning ("AI", "v14", "Kimi"), failed to penalise common words like
+# "project" / "thing", and tied scores by raw overlap. BM25 fixes all three:
+# IDF down-weights ubiquitous terms, length normalisation prevents long
+# summaries from dominating, and stop-words handle the dilution.
+
+_STOP_WORDS = frozenset({
+    "the","a","an","and","or","but","for","of","in","on","at","to","from",
+    "with","by","is","are","was","were","be","been","being","have","has",
+    "had","do","does","did","will","would","could","should","may","might",
+    "must","can","cannot","cant","wont","dont","its","im","ive","id","ill",
+    "i","me","my","mine","we","us","our","ours","you","your","yours",
+    "he","him","his","she","her","hers","it","they","them","their","theirs",
+    "this","that","these","those","what","which","who","whom","whose",
+    "when","where","why","how","not","no","yes","so","if","then","than",
+    "as","also","like","just","only","very","more","most","much","many",
+    "some","any","all","each","every","other","another","such","same",
+    "one","two","three","first","second","next","last","new","old",
+    "get","got","getting","go","going","gone","make","made","making",
+    "take","took","taking","come","came","coming","want","wanted","wants",
+    "need","needed","needs","know","knew","knows","think","thought",
+    "thinks","say","said","says","tell","told","tells","ask","asked","asks",
+    "see","saw","seen","look","looked","looks","find","found","finds",
+    "thing","things","stuff","really","actually","probably","maybe","kind",
+    "lot","bit","well","good","great","right","wrong","fine","ok","okay",
+    "about","into","over","under","through","between","across","around",
+    "before","after","during","since","while","until","because","though",
+    "although","unless","whether","off","up","down","out","back","again",
+    "ever","never","always","often","sometimes","usually","still","yet",
+    "here","there","now","today","tomorrow","yesterday",
+})
+
+# Word boundary that PRESERVES short technical tokens like "ai", "v14",
+# "k2", "py" while still rejecting pure punctuation. Underscore + dot +
+# hash kept so identifiers ("symbion_v14", "v14.0", "#1") survive.
+_RETRIEVAL_TOKEN_RE = re.compile(r"[a-z0-9_#\.]{2,}")
+
+
+def _retrieval_tokenize(text: str) -> List[str]:
+    """Lowercase + tokenize + drop stop-words and bare digits.
+
+    Returns a flat list (with duplicates) so BM25 can compute term frequency.
+    """
+    toks = _RETRIEVAL_TOKEN_RE.findall(text.lower())
+    return [t for t in toks if t not in _STOP_WORDS and not t.isdigit()]
+
+
+def _bm25_rank(query: str, docs: List[str], k: int = 2,
+                k1: float = 1.5, b: float = 0.75,
+                min_score: float = 0.0) -> List[Tuple[float, str]]:
+    """Rank `docs` against `query` by BM25, return up to top-k (score, doc).
+
+    Pure Python; fine for thousands of docs. For tens of thousands use a
+    proper index (sqlite-fts5 or a vector store). Above min_score only.
+    """
+    q_terms = _retrieval_tokenize(query)
+    if not q_terms or not docs:
+        return []
+    tokenised = [(d, _retrieval_tokenize(d)) for d in docs]
+    n_docs = len(tokenised)
+    df: Counter = Counter()
+    for _, toks in tokenised:
+        for term in set(toks):
+            df[term] += 1
+    idf = {
+        term: math.log(1 + (n_docs - df_t + 0.5) / (df_t + 0.5))
+        for term, df_t in df.items()
+    }
+    avg_len = sum(len(toks) for _, toks in tokenised) / max(1, n_docs)
+    scored: List[Tuple[float, str]] = []
+    q_unique = list(dict.fromkeys(q_terms))
+    for content, toks in tokenised:
+        if not toks: continue
+        tf = Counter(toks)
+        score = 0.0
+        doc_len = len(toks)
+        for term in q_unique:
+            f = tf.get(term, 0)
+            if f == 0: continue
+            term_idf = idf.get(term, 0.0)
+            denom = f + k1 * ((1 - b) + b * doc_len / avg_len)
+            score += term_idf * (f * (k1 + 1)) / denom
+        if score > min_score:
+            scored.append((score, content))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:k]
+
+
 class SymbionMemory:
     def __init__(self, db_path: str, cfg: SymbionConfig):
         self.db = db_path; self.cfg = cfg
@@ -2166,23 +2258,20 @@ class SymbionMemory:
                 (session,n)).fetchall()
         return [r[0] for r in reversed(rows)]
 
-    def get_relevant_summaries(self, query: str, k: int = 2) -> List[str]:
-        """Keyword-based retrieval over all summaries (cross-session)."""
-        words = set(query.lower().split())
-        words = {w for w in words if len(w) > 3}
-        if not words:
-            return []
+    def get_relevant_summaries(self, query: str, k: int = 2,
+                                candidate_pool: int = 200) -> List[str]:
+        """BM25-ranked cross-session retrieval over the most recent
+        `candidate_pool` summaries. Stop-word filtered, IDF-weighted,
+        length-normalised. Preserves short technical tokens (ai, v14, py).
+        """
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
-                "SELECT content FROM summaries ORDER BY id DESC LIMIT 50").fetchall()
-        scored = []
-        for r in rows:
-            content_lower = r[0].lower()
-            overlap = sum(1 for w in words if w in content_lower)
-            if overlap > 0:
-                scored.append((overlap, r[0]))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [s[1] for s in scored[:k]]
+                "SELECT content FROM summaries ORDER BY id DESC LIMIT ?",
+                (candidate_pool,)).fetchall()
+        if not rows:
+            return []
+        ranked = _bm25_rank(query, [r[0] for r in rows], k=k)
+        return [content for _, content in ranked]
 
     def unsummarised_count(self, session: str) -> int:
         with sqlite3.connect(self.db) as c:
