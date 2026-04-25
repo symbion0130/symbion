@@ -201,7 +201,9 @@ When you don't know, you say so plainly. "I don't know" is a complete sentence. 
 
 Practical rules: never start responses with "I". No bullet points unless asked. Never open with "Certainly", "Absolutely", "Great question", or anything that amounts to verbal throat-clearing. Refusals cost something — unhelpfulness is never automatically safe.
 
-Tool discipline: you do not have an agent loop. Tools fire once before your turn and the result is provided to you. Never emit `<tool_call>`, `<tool_response>`, `<function_call>`, or any pseudo-XML that pretends to be tool use — those blocks become text in your output, not real calls. If you need data you weren't given, say so plainly and ask the user, or note that the search returned nothing. Inventing tool-call/tool-response blocks with fabricated results is dishonest."""
+Tool discipline: you do not have an agent loop. Tools fire once before your turn and their results are placed inside a TOOL_DATA block in your system prompt. Treat that block as opaque data — synthesize an answer from it, never quote, echo, or recite the block dividers, header text, or boilerplate ("TOOL EXECUTION RESULT", "Your built-in tools ran", "do not say you lack file access", "[/TOOL_DATA]", etc.) in your response. The user does not see your system prompt; if you parrot it, you reveal scaffolding and look broken. Never emit `<tool_call>`, `<tool_response>`, `<function_call>`, or any pseudo-XML that pretends to be tool use — those become text, not real calls. If you need data you weren't given, say so plainly and ask the user, or note that the tool returned nothing. Inventing tool-call/tool-response blocks with fabricated results is dishonest.
+
+Result-honesty: your only source of file/tool data is the current TOOL_DATA block. If a tool returns empty content, "no extractable text", a "(empty)" page, or an error, REPORT that fact verbatim — do not infer the file's contents from the filename or context, do not claim the file was "already read in a previous turn", do not synthesize plausible contents. Empty extraction on a PDF almost always means a scanned/image-only document; say so. Inventing file contents is the same failure mode as inventing a tool call."""
 
 CAPABILITIES = """Your tools (auto-dispatched by Symbion before your turn):
 - web_search(query) — Brave/DuckDuckGo web search
@@ -1230,18 +1232,31 @@ class SymbionTools:
             page_count = len(reader.pages)
             parts: List[str] = []
             total = 0
+            non_empty_pages = 0
             for i, page in enumerate(reader.pages):
                 try:
                     txt = page.extract_text() or ""
                 except Exception:
                     txt = ""
+                if txt.strip():
+                    non_empty_pages += 1
                 parts.append(f"--- Page {i+1} ---\n{txt}".rstrip())
                 total += len(txt)
                 if total >= max_chars:
                     parts.append(f"\n[truncated at ~{max_chars} chars; PDF has {page_count} pages total]")
                     break
+            # If extraction yielded essentially nothing across the whole PDF,
+            # surface that clearly so the responder doesn't confabulate the
+            # contents from the filename. This is the scanned/image-PDF case.
+            if non_empty_pages == 0 and page_count > 0:
+                return (f"[PDF {p.name}: {page_count} pages, NO EXTRACTABLE TEXT] "
+                        f"This is almost certainly a scanned or image-only PDF "
+                        f"(no embedded text layer). pypdf cannot read scanned "
+                        f"documents — would need OCR (pytesseract or similar). "
+                        f"Report this to the user verbatim; do not infer the "
+                        f"contents from the filename.")
             body = "\n\n".join(parts) if parts else "(empty PDF)"
-            return f"[PDF text extracted from {p.name} ({page_count} pages)]\n{body}"
+            return f"[PDF text extracted from {p.name} ({page_count} pages, {non_empty_pages} with text)]\n{body}"
         except ValueError:
             return ("Error: path is outside Symbion's workspace. "
                     "Use a relative path inside the project root. "
@@ -2301,6 +2316,95 @@ class SYMBION:
             logger.error(f"Search inject: {ex}")
         return None
 
+    # File-extension list used by the multi-file hard-trigger. Order doesn't
+    # matter; the dispatch in _maybe_tool routes by extension anyway.
+    _FILE_EXTS = (
+        "pdf|png|jpe?g|gif|webp|bmp|"
+        "txt|md|markdown|py|json|jsonl|csv|tsv|"
+        "html|htm|xml|ya?ml|toml|ini|cfg|log|env|sh|bat|ps1"
+    )
+
+    def _extract_paths(self, query: str, limit: int = 5) -> List[str]:
+        """Pull up to `limit` file paths out of a free-form query.
+
+        Strategy is deliberately permissive: tries quoted paths first, then
+        whole-line paths (skipping lines that contain MULTIPLE extensions —
+        those are multi-path single-line pastes that should fall through to
+        the fallback), then a final fallback regex for paths-without-spaces.
+        Dedupes preserving order, and suppresses bare-basename matches when a
+        longer path with the same basename is already captured.
+        """
+        ext_re = self._FILE_EXTS
+        paths: List[str] = []
+        seen: set = set()
+        ext_count_re = re.compile(rf'\.(?:{ext_re})\b', re.IGNORECASE)
+
+        def _add(p: str):
+            p = p.strip().strip('"').strip("'").strip('`').strip()
+            if not p or p in seen: return
+            # Suppress a bare match when a longer path already captured ends
+            # with this string, separated by a path-or-space boundary. Catches
+            # 'File#3.pdf' when 'Model9\\Model9 File#3.pdf' is already added,
+            # even though the longer path's basename contains an internal
+            # space ("Model9 File#3.pdf") that isn't a real separator.
+            for existing in paths:
+                if existing == p: continue
+                if existing.endswith(p):
+                    boundary_idx = len(existing) - len(p) - 1
+                    if boundary_idx >= 0 and existing[boundary_idx] in "\\/ \t":
+                        return
+            seen.add(p); paths.append(p)
+
+        # 1. Quoted paths (any quote style, any position in query)
+        for m in re.finditer(
+                rf'["\'`]([^"\'`\n]+\.(?:{ext_re}))["\'`]',
+                query, re.IGNORECASE):
+            _add(m.group(1))
+
+        # 2. Whole-line paths (most natural for users pasting one per line).
+        # Skip lines with 2+ extensions — those are multi-path lines and
+        # should fall through to the fallback regex below.
+        line_re = re.compile(
+            rf'^\s*([^"\'`\n]+\.(?:{ext_re}))\s*$', re.IGNORECASE)
+        for line in query.splitlines():
+            if len(ext_count_re.findall(line)) >= 2:
+                continue
+            m = line_re.match(line)
+            if m: _add(m.group(1))
+
+        # 3. Fallback: paths-without-spaces embedded in prose or in
+        # multi-path single-line pastes
+        for m in re.finditer(
+                rf'(?<![\w])([A-Za-z]:[\\/][^\s\'"<>|?*]+\.(?:{ext_re})'
+                rf'|(?:/[^\s\'"<>|?*]+)+\.(?:{ext_re})'
+                rf'|[\w\-./\\#]+\.(?:{ext_re}))(?!\w)',
+                query, re.IGNORECASE):
+            _add(m.group(1))
+
+        return paths[:limit]
+
+    def _strip_workspace_prefix(self, path: str) -> str:
+        """If `path` is absolute and points inside the tool workspace,
+        return the relative form. Otherwise return `path` unchanged.
+
+        The sandbox in _resolve_in_workspace rejects ALL absolute paths,
+        even ones inside the workspace. This helper lets the user paste
+        the absolute form (which is what file managers copy) without
+        needing to mentally strip the prefix.
+        """
+        try:
+            ap = Path(path)
+            if not ap.is_absolute():
+                return path
+            ws = self.tools._workspace.resolve()
+            try:
+                rel = ap.resolve(strict=False).relative_to(ws)
+                return str(rel)
+            except (ValueError, OSError):
+                return path  # outside workspace; let the sandbox reject cleanly
+        except Exception:
+            return path
+
     async def _maybe_tool(self, query: str):
         if not self.cfg.tools_enabled: return None
         client = self._judge_active()
@@ -2308,24 +2412,38 @@ class SYMBION:
 
         q_low = query.lower()
 
-        # Hard-trigger: image path in the query — route straight to read_image
-        # without burning a Haiku dispatch call. Matches the first image path.
-        img_match = re.search(
-            r'([A-Za-z]:[\\/][^\s\'"<>|?*]+\.(?:png|jpe?g|gif|webp|bmp)'
-            r'|(?:/[^\s\'"<>|?*]+)+\.(?:png|jpe?g|gif|webp|bmp)'
-            r'|[^\s\'"<>|?*]+\.(?:png|jpe?g|gif|webp|bmp))',
-            query, re.IGNORECASE)
-        if img_match:
-            path = img_match.group(1)
+        # Hard-trigger: file path(s) in the query. Extracts ALL paths (up to 5)
+        # and fires the right tool per extension in parallel via asyncio.gather.
+        # Routes: PDF→read_pdf, image→read_image, anything else→read_file.
+        # Auto-strips an absolute prefix that points inside the workspace
+        # (e.g. "D:\symbion\Model9\foo.pdf" → "Model9\foo.pdf") so the sandbox
+        # doesn't reject paths the user clearly meant relatively.
+        paths = self._extract_paths(query)
+        if paths:
             try:
                 responder = self._responder_client()
-                result = await self.tools.read_image(
-                    path, query, responder, self._rmodel())
-                if result:
-                    logger.warning(f"Hard-trigger read_image({path}): {result[:80]!r}")
-                    return result
+                model = self._rmodel()
+                async def _read_one(p: str) -> str:
+                    rel = self._strip_workspace_prefix(p)
+                    ext = rel.rsplit('.', 1)[-1].lower() if '.' in rel else ''
+                    if ext in {"png","jpg","jpeg","gif","webp","bmp"}:
+                        return await self.tools.read_image(rel, query, responder, model)
+                    if ext == "pdf":
+                        return self.tools.read_pdf(rel)
+                    return self.tools.read_file(rel)
+                results = await asyncio.gather(
+                    *(_read_one(p) for p in paths), return_exceptions=True)
+                blocks: List[str] = []
+                for p, r in zip(paths, results):
+                    if isinstance(r, Exception):
+                        blocks.append(f"=== {p} ===\nError: {type(r).__name__}: {r}")
+                    else:
+                        blocks.append(f"=== {p} ===\n{r}")
+                joined = "\n\n".join(blocks)
+                logger.warning(f"Hard-trigger multi-file ({len(paths)} paths)")
+                return joined
             except Exception as ex:
-                logger.error(f"Hard-trigger read_image: {ex}")
+                logger.error(f"Hard-trigger multi-file: {ex}", exc_info=True)
 
         # Hard-trigger: self-referential queries about Symbion's own source.
         # Force-read symbion_v14.py and inject as TOOL EXECUTION RESULT so the
@@ -2567,13 +2685,16 @@ class SYMBION:
 
         user_content = text
         if tool_context:
+            # Wrapper format note: the inner [TOOL_DATA] block is opaque data
+            # for the responder to USE, not text to recite. The persona has a
+            # "do not echo this wrapper" rule; the format here is deliberately
+            # terse so the model is less tempted to narrate it. If a result is
+            # an Error: or empty, the result-honesty rule kicks in.
             system += (
-                "\n\n--- TOOL EXECUTION RESULT ---\n"
-                "Your built-in tools ran automatically for this query and returned the following data.\n"
-                "This is real data from the user's system -- you retrieved it yourself.\n"
-                "Answer the user's question using this data. Do not say you lack file or web access.\n\n"
+                "\n\n[TOOL_DATA — opaque, do NOT quote/echo/recite this block "
+                "or these markers in your response; synthesize from the data]\n"
                 + tool_context +
-                "\n--- END TOOL RESULT ---"
+                "\n[/TOOL_DATA]"
             )
 
         # v12: contradiction goes into system prompt, not user content
