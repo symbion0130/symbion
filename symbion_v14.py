@@ -2872,6 +2872,32 @@ class SYMBION:
 
     # -- Background tasks ----------------------------------
 
+    async def _force_summarize_session(self, session: str, min_msgs: int = 2) -> int:
+        """Summarise all unsummarised messages in a session, regardless of the
+        memory_summary_every threshold. Returns the number of messages that
+        were rolled into a new summary (0 if nothing to do or judge unavailable).
+
+        Used both by _background_tasks (when threshold hits) and by /summarize
+        and the /quit flush so short sessions don't lose context.
+        """
+        client = self._judge_active()
+        if isinstance(client, OfflineJudgeStub): return 0
+        msgs = self.memory.get_unsummarised(session)
+        if len(msgs) < min_msgs:
+            return 0
+        try:
+            conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in msgs)
+            summary = await client.chat_text(
+                self._jmodel(),
+                [{"role":"system","content":SUMMARISE_SYSTEM},
+                 {"role":"user","content":conv}],
+                0.3, 250)
+            self.memory.save_summary(session, summary, len(msgs))
+            return len(msgs)
+        except Exception as ex:
+            logger.error(f"Summarise: {ex}")
+            return 0
+
     async def _background_tasks(self, query: str, response: str, session: str,
                                  ev: Dict, emotional_state: Dict,
                                  is_new_session: bool = False):
@@ -2880,14 +2906,7 @@ class SYMBION:
 
         # Summarise
         if self.memory.unsummarised_count(session) >= self.cfg.memory_summary_every:
-            msgs = self.memory.get_unsummarised(session)
-            try:
-                conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in msgs)
-                summary = await client.chat_text(self._jmodel(),
-                    [{"role":"system","content":SUMMARISE_SYSTEM},{"role":"user","content":conv}],
-                    0.3, 250)
-                self.memory.save_summary(session, summary, len(msgs))
-            except Exception as ex: logger.error(f"Summarise: {ex}")
+            await self._force_summarize_session(session)
 
         # Profile
         if self.count % self.cfg.profile_update_every == 0:
@@ -3333,6 +3352,9 @@ HELP_TEXT = f"""
     /mood             current mood label
     /think            toggle chain-of-thought display
     /memory           recent memory entries
+    /summarize        flush a summary of this session's unsummarised messages
+                      (also runs automatically on /quit so short sessions
+                       carry over to next launch)
     /profile          inferred user profile
     /forget           clear the current session's memory
     /history          recent interactions with quality scores
@@ -3463,7 +3485,28 @@ def run_terminal(symbion: "SYMBION"):
         if not raw: continue
 
         if raw in ("/quit","/exit","quit","exit"):
+            # Flush any unsummarised messages before exit so short sessions
+            # don't lose context. Carries over via cross-session retrieval
+            # next launch (get_relevant_summaries / build_context).
+            try:
+                n = asyncio.run(symbion._force_summarize_session(session))
+                if n > 0:
+                    print(dim(f"  Saved summary of {n} messages from this session."))
+            except Exception as ex:
+                logger.warning(f"Quit-flush summarize failed: {ex}")
             print(dim("  Goodbye.")); break
+
+        elif raw=="/summarize":
+            # Manual summary flush mid-session. Useful before a context-heavy
+            # turn, or to ensure an in-progress conversation is captured.
+            try:
+                n = asyncio.run(symbion._force_summarize_session(session))
+                if n > 0:
+                    print(green(f"  Summarised {n} messages from this session."))
+                else:
+                    print(dim("  Nothing new to summarise."))
+            except Exception as ex:
+                print(red(f"  Summarise failed: {ex}"))
 
         elif raw=="/help": print(HELP_TEXT)
         elif raw=="/status": print(); print(symbion.health.display()); print()
