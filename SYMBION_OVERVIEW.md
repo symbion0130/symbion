@@ -12,8 +12,8 @@ Symbion is a **single-file async Python AI assistant** that wraps a frontier LLM
 
 ## Current state (as of April 2026)
 
-- **Stable working version:** `symbion_v14.py` — ~3,120 lines, single file. Cloned forward from `symbion_v13.py`; behaviorally identical at the v13→v14 cutover.
-- **Frozen snapshots:** `symbion_v13.py` (last v13 state, kept for diffing), `symbion_v12.py` — ~3,820 lines. v13 was a deliberate **simplification** of v12, not an expansion.
+- **Stable working version:** `symbion_v14.py` — ~5,300 lines, single file. Cloned forward from `symbion_v13.py`; behaviorally identical at the v13→v14 cutover.
+- **Frozen snapshots:** `symbion_v3.py`..`symbion_v13.py` (incl. `symbion_v13.py.orig`) live in `archive/legacy_versions/` for local diffing. The whole `archive/` tree is gitignored; not part of the repo on GitHub. v13 was a deliberate **simplification** of v12, not an expansion.
 
 ### The v12 → v13 design shift
 
@@ -32,8 +32,9 @@ This is a philosophical shift worth understanding: v11 and v12 leaned into layer
 
 ```
 symbion_v14.py              # current stable, single file (active)
-symbion_v13.py              # frozen snapshot, kept for diffing
-symbion_v12.py              # prior version, kept for reference
+archive/legacy_versions/    # gitignored. v3..v13 snapshots, v13.py.orig,
+                            #   symbion_agent.py / symbion_core.py
+archive/docs/               # gitignored. pre-v14 planning + spec docs
 CLAUDE.md                   # Claude Code project context (invariants, conventions)
 symbion.json                # config (no secrets)
 .env                        # API keys, UTF-8 no BOM

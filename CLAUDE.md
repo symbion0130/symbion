@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~4450 lines, `symbion_v14.py`).
 
-**Only edit `symbion_v14.py`.** `symbion_v3.py`..`symbion_v13.py` and `symbion_v13.py.orig` are historical/pre-refactor snapshots kept for diffing — they are not imported and must not be modified. `symbion_v14.py` is the active codebase; `symbion_v13.py` was cloned forward and is now frozen alongside the older snapshots. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and (planned) a FastAPI web UI — see "Known gaps" below.
+**Only edit `symbion_v14.py`.** Older versions (`symbion_v3.py`..`symbion_v13.py`, plus `symbion_v13.py.orig`, `symbion_agent.py`, `symbion_core.py`) live in `archive/legacy_versions/` and are kept locally for diffing only — they are not imported, not tracked in git (the whole `archive/` tree is gitignored), and must not be modified. `symbion_v14.py` is the active codebase. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI/WebSocket web UI.
 
 It is not a chatbot wrapper. It attempts to reproduce alignment properties from outside a model using behavioral proxies. v14 stripped 11 LLM-grading-LLM probe subsystems from v11-v13 and replaced them with an offline eval harness (`evals/`) and JSONL telemetry.
 
@@ -55,7 +55,10 @@ pip install pypdfium2 pytesseract
 
 ```
 symbion_v14.py              # the active codebase — everything lives here
-symbion_v13.py              # frozen snapshot kept for diffing (do not edit)
+archive/                    # gitignored. legacy_versions/ holds v3..v13
+                            #   snapshots + v13.py.orig + symbion_agent.py /
+                            #   symbion_core.py for diffing. docs/ holds
+                            #   pre-v14 planning + spec docs.
 symbion/                    # thin package wrapper for python -m symbion
   __init__.py               # re-exports SYMBION, SymbionConfig, HealthMetrics, main (now from symbion_v14)
   __main__.py               # entry point
