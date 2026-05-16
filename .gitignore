@@ -17,3 +17,6 @@ __pycache__/
 
 # Archived legacy code, snapshots, plans (kept locally for diffing only)
 archive/
+
+# Personal historical archives (referenced by some evals; local-only)
+Model9/
