@@ -84,10 +84,15 @@ class TestWorkspaceSandbox:
         content = tools.read_file("test.txt")
         assert "hello world" in content
 
-    def test_read_escape_blocked(self, tmp_path):
+    def test_read_escape_allowed(self, tmp_path):
+        # Reads are intentionally unrestricted — the user opted in to
+        # machine-wide read access. The sandbox only applies to writes.
+        # We verify the path resolves outward without raising; the file
+        # itself most likely doesn't exist on the test box, so a "Not
+        # found" response is the success case here.
         tools = SymbionTools(str(tmp_path))
         result = tools.read_file("../../etc/passwd")
-        assert "Error" in result
+        assert "outside" not in result.lower() and "sandbox" not in result.lower()
 
     def test_write_escape_blocked(self, tmp_path):
         tools = SymbionTools(str(tmp_path))
