@@ -17,6 +17,13 @@ __pycache__/
 .claude/
 .pytest_cache/
 
+# Portable Python install — created by scripts\bootstrap-portable.bat,
+# machine-arch-specific (~100MB), should never be committed
+.python/
+
+# Editable install artifact — pip creates this from pyproject.toml
+*.egg-info/
+
 # Archived legacy code, snapshots, plans (kept locally for diffing only)
 archive/
 

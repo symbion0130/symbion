@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "symbion"
@@ -16,6 +16,13 @@ web = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [project.scripts]
 symbion = "symbion.__main__:main"
+
+[tool.setuptools]
+# symbion_v14.py lives at the repo root as a top-level module (the
+# active codebase, per CLAUDE.md). Without this declaration, an editable
+# install registers only the symbion/ wrapper package and `import
+# symbion_v14` fails — which breaks the package's own __init__.py.
+py-modules = ["symbion_v14"]
 
 [tool.setuptools.packages.find]
 include = ["symbion*"]
