@@ -20,3 +20,6 @@ archive/
 
 # Personal historical archives (referenced by some evals; local-only)
 Model9/
+
+# Web UI image paste cache — written by the WS handler, scrubbed per-session
+_pastes/

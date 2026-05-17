@@ -5069,6 +5069,43 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     continue
 
                 text = payload.get("text","").strip()
+                # Inline image attachments: list of data URLs ("data:image/png;base64,...").
+                # Decode each, write to a workspace-relative file, append the
+                # path to the user text so the agent loop's model can call
+                # read_image on it. Keeps the existing read_image plumbing.
+                images = payload.get("images") or []
+                if images and isinstance(images, list):
+                    paste_dir = Path(symbion.tools._workspace) / "_pastes"
+                    try:
+                        paste_dir.mkdir(exist_ok=True)
+                    except Exception as ex:
+                        logger.warning(f"WS image: paste dir mkdir failed: {ex}")
+                        paste_dir = None
+                    saved_rel: List[str] = []
+                    for n, du in enumerate(images[:6]):  # cap at 6 per turn
+                        if not isinstance(du, str) or not du.startswith("data:image/"):
+                            continue
+                        try:
+                            header, b64 = du.split(",", 1)
+                            mime = header.split(";")[0].split(":")[1]  # e.g. image/png
+                            ext = mime.split("/")[-1].lower()
+                            if ext == "jpeg": ext = "jpg"
+                            if ext not in {"png","jpg","gif","webp","bmp"}:
+                                continue
+                            import base64 as _b64
+                            raw = _b64.b64decode(b64)
+                            if len(raw) > 10 * 1024 * 1024:  # 10MB cap per image
+                                continue
+                            ts = int(time.time() * 1000)
+                            fname = f"paste_{ts}_{n}.{ext}"
+                            if paste_dir:
+                                (paste_dir / fname).write_bytes(raw)
+                                saved_rel.append(f"_pastes/{fname}")
+                        except Exception as ex:
+                            logger.warning(f"WS image decode #{n}: {type(ex).__name__}: {ex}")
+                    if saved_rel:
+                        attach_line = "[attached image" + ("s" if len(saved_rel)>1 else "") + ": " + ", ".join(saved_rel) + "]"
+                        text = (text + "\n\n" + attach_line) if text else attach_line
                 if not text: continue
 
                 in_thinking = [False]
