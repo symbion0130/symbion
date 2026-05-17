@@ -30,5 +30,14 @@
   "fallback_chain": [
     "anthropic",
     "openai"
+  ],
+  "mcp_enabled": true,
+  "mcp_servers": [
+    {
+      "name": "time",
+      "command": "python",
+      "args": ["-m", "mcp_server_time"],
+      "enabled": true
+    }
   ]
 }
