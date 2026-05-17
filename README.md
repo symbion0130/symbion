@@ -4,39 +4,19 @@ Symbion is an async Python AI assistant with multi-provider LLM support, SQLite 
 
 ## Install
 
-```bash
-pip install -e .
-```
+See **[SETUP.md](SETUP.md)** for the full setup guide — three install paths (portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
 
-Optional extras for specific providers:
-```bash
-pip install httpx          # required for all LLM providers
-pip install fastapi uvicorn  # required for --web mode
-```
+TL;DR:
 
-## Quickstart
-
-First-time setup (writes API keys to `.env`):
 ```bash
-python -m symbion --setup
-```
+# System Python (the common case)
+pip install -e .[web]
+python -m symbion --setup        # interactive: writes API keys to .env
+python -m symbion --web          # http://localhost:8000
 
-Run with a provider:
-```bash
-python -m symbion --provider anthropic --anthropic-model claude-sonnet-4-6
-python -m symbion --provider ollama --judge llama3.2 --responder mistral
-python -m symbion --provider openai --openai-model gpt-4o
-python -m symbion --provider kimi
-```
-
-Web UI:
-```bash
-python -m symbion --provider anthropic --web
-```
-
-Or run the single file directly:
-```bash
-python symbion_v14.py --provider anthropic
+# Portable drive (no system Python required)
+scripts\bootstrap-portable.bat   # one-time, ~5 min
+scripts\start.bat                # every launch
 ```
 
 ## Architecture
