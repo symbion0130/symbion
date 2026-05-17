@@ -3583,7 +3583,7 @@ class SYMBION:
                     draft += tok
                     if token_callback: await token_callback(tok)
             except Exception as ex:
-                return "", f"(Generation error: {ex})"
+                return "", f"(Generation error: {str(ex).strip() or type(ex).__name__})"
             reasoning = getattr(client, "_last_reasoning", "")
             return reasoning, draft
 
@@ -3598,7 +3598,7 @@ class SYMBION:
                 full += tok
                 if token_callback: await token_callback(tok)
         except Exception as ex:
-            return "", f"(Generation error: {ex})"
+            return "", f"(Generation error: {str(ex).strip() or type(ex).__name__})"
 
         thinking_match = re.search(r'<thinking>(.*?)</thinking>', full, re.DOTALL)
         answer_match   = re.search(r'<answer>(.*?)(?:</answer>|$)', full, re.DOTALL)
@@ -4274,8 +4274,9 @@ class SYMBION:
                         draft += tok
                         if token_callback: await token_callback(tok)
                 except Exception as ex:
-                    logger.error(f"[req={request_id}] Stream: {ex}")
-                    draft = f"(Generation error: {ex})"
+                    err_msg = str(ex).strip() or type(ex).__name__
+                    logger.error(f"[req={request_id}] Stream: {ex!r}")
+                    draft = f"(Generation error: {err_msg})"
                     task_failed = True
                     if token_callback: await token_callback(draft)
 
