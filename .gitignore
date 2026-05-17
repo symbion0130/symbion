@@ -24,6 +24,10 @@ __pycache__/
 # Editable install artifact — pip creates this from pyproject.toml
 *.egg-info/
 
+# Stray launcher logs from Start-Process redirects
+.start.log
+.start.err
+
 # Archived legacy code, snapshots, plans (kept locally for diffing only)
 archive/
 
