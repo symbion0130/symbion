@@ -3,7 +3,7 @@
 import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, uuid
 import logging, argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional, AsyncIterator
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field, asdict
@@ -533,6 +533,16 @@ Don't manufacture reasons. If there's nothing worth saying, say so."""
 
 SUMMARISE_SYSTEM = """Summarise this conversation in 3-4 sentences. Capture main topics/conclusions,
 tone and dynamic, key facts about the human. Third person. Concise."""
+
+CONSOLIDATE_SYSTEM = """Merge these N summaries of past Symbion sessions into ONE consolidated
+summary. They were grouped because they're semantically similar — likely the same recurring
+topic or relationship arc revisited across multiple sessions.
+
+Goal: preserve the FACTS and the ARC. Drop verbatim duplication. Third person, concise (4-6
+sentences). Lead with what's stable (people, places, ongoing projects, decisions made), then
+the trajectory across time if meaningful. If summaries conflict, keep the most recent claim
+and note the change ("initially X, later corrected to Y"). Do NOT invent connective tissue.
+Do NOT add interpretation that isn't supported by at least one source summary."""
 
 PROFILE_SYSTEM = """Extract user profile. Return ONLY JSON:
 {"name":null,"interests":[],"communication_style":"","expertise_areas":[],
@@ -3141,6 +3151,69 @@ class SymbionMemory:
             c.execute("DELETE FROM summaries WHERE session=?",(session,))
             c.commit()
 
+    def find_consolidation_clusters(self, similarity_threshold: float = 0.85,
+                                     min_cluster_size: int = 3,
+                                     min_age_days: float = 7.0,
+                                     max_candidates: int = 200) -> List[List[int]]:
+        """Greedy-cluster old summaries by cosine similarity. Returns list
+        of summary-id groups eligible for merging. O(N^2) on N=200 is
+        ~20K comparisons — fine. Recency-protected: anything newer than
+        min_age_days is left alone so the recency-weighted retrieval keeps
+        its fresh signal."""
+        cutoff = (datetime.now() - timedelta(days=min_age_days)).isoformat()
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, content, embedding FROM summaries "
+                "WHERE embedding IS NOT NULL AND timestamp < ? "
+                "ORDER BY id DESC LIMIT ?",
+                (cutoff, max_candidates)).fetchall()
+        items: List[Dict] = []
+        for sid, content, blob in rows:
+            vec = _blob_to_vec(blob)
+            if vec:
+                items.append({"id": sid, "content": content, "vec": vec})
+        if len(items) < min_cluster_size:
+            return []
+        assigned: set = set()
+        clusters: List[List[int]] = []
+        for i in range(len(items)):
+            if i in assigned: continue
+            cluster_idx = [i]
+            for j in range(i+1, len(items)):
+                if j in assigned: continue
+                if _cosine(items[i]["vec"], items[j]["vec"]) >= similarity_threshold:
+                    cluster_idx.append(j)
+            if len(cluster_idx) >= min_cluster_size:
+                for k in cluster_idx: assigned.add(k)
+                clusters.append([items[k]["id"] for k in cluster_idx])
+        return clusters
+
+    def get_summaries_by_ids(self, ids: List[int]) -> List[Tuple[int, str, int]]:
+        """Return (id, content, msg_count) for a list of summary ids."""
+        if not ids: return []
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, content, COALESCE(msg_count, 0) FROM summaries "
+                f"WHERE id IN ({','.join('?'*len(ids))})", ids).fetchall()
+        return rows
+
+    def replace_with_consolidated(self, source_ids: List[int], merged_content: str,
+                                   total_msg_count: int) -> int:
+        """Insert a new consolidated summary (session='consolidated') and
+        delete the originals. Embedding is left NULL; _backfill_embeddings
+        will fill it on next launch. Returns the new summary id."""
+        ts = datetime.now().isoformat()
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "INSERT INTO summaries (timestamp, session, content, msg_count, embedding) "
+                "VALUES (?, 'consolidated', ?, ?, NULL)",
+                (ts, merged_content, total_msg_count))
+            new_id = cur.lastrowid
+            for sid in source_ids:
+                c.execute("DELETE FROM summaries WHERE id=?", (sid,))
+            c.commit()
+        return new_id
+
     def find_topic_matches(self, topic: str, k_summaries: int = 10,
                            candidate_pool: int = 200) -> Dict:
         """Locate rows that match `topic` across summaries, profile, and
@@ -4261,6 +4334,53 @@ class SYMBION:
             logger.error(f"Summarise: {ex}")
             return 0
 
+    async def consolidate_memory(self, similarity_threshold: float = 0.85,
+                                  min_cluster_size: int = 3,
+                                  min_age_days: float = 7.0) -> Dict:
+        """Find clusters of semantically-near old summaries and merge each
+        into a single consolidated row via the judge model. Returns a dict
+        with `clusters_found`, `clusters_merged`, `summaries_replaced`,
+        `summaries_created`. Safe to run repeatedly — only merges clusters
+        of `min_cluster_size`+ similar summaries older than `min_age_days`."""
+        out = {"clusters_found": 0, "clusters_merged": 0,
+               "summaries_replaced": 0, "summaries_created": 0}
+        client = self._judge_active()
+        if isinstance(client, OfflineJudgeStub):
+            return out
+        clusters = self.memory.find_consolidation_clusters(
+            similarity_threshold=similarity_threshold,
+            min_cluster_size=min_cluster_size,
+            min_age_days=min_age_days)
+        out["clusters_found"] = len(clusters)
+        for cluster_ids in clusters:
+            rows = self.memory.get_summaries_by_ids(cluster_ids)
+            if len(rows) < min_cluster_size:
+                continue
+            sources = [r[1] for r in rows]
+            msg_total = sum(r[2] for r in rows)
+            prompt = "\n\n---\n\n".join(
+                f"SUMMARY {i+1}:\n{s}" for i, s in enumerate(sources))
+            try:
+                merged = await client.chat_text(
+                    self._jmodel(), CONSOLIDATE_SYSTEM, prompt, 0.3, 400)
+            except Exception as ex:
+                logger.error(f"Consolidate cluster: {type(ex).__name__}: {ex}")
+                continue
+            merged = (merged or "").strip()
+            # Defensive lower bound — if the merge came back trivially short,
+            # don't replace richer originals with a stub.
+            if len(merged) < 80:
+                continue
+            try:
+                self.memory.replace_with_consolidated(
+                    [r[0] for r in rows], merged, msg_total)
+                out["clusters_merged"] += 1
+                out["summaries_replaced"] += len(rows)
+                out["summaries_created"] += 1
+            except Exception as ex:
+                logger.error(f"Consolidate replace: {ex}")
+        return out
+
     async def _backfill_embeddings(self, batch: int = 25):
         """Background task: embed any summaries that were saved without an
         embedding (legacy DB rows or rows saved while Ollama was offline).
@@ -5174,6 +5294,8 @@ HELP_TEXT = f"""
     /forget           clear the current session's memory
     /forget <topic>   search summaries/profile/positions for a topic and
                        selectively delete after confirmation
+    /consolidate      merge old similar summaries into one (cosine>=0.85,
+                       min 3 per cluster, >=7 days old)
     /mcp              list configured Model Context Protocol servers
                        (active only in --web mode)
     /tool-stats       per-tool reliability counters for this session
@@ -5530,6 +5652,23 @@ def run_terminal(symbion: "SYMBION"):
             print(f"  {cyan('read_file')}(path)           -- read text file")
             print(f"  {cyan('read_image')}(path, prompt?) -- describe image (png/jpg/gif/webp/bmp)")
             print(f"  {cyan('write_file')}(path,content)  -- write file")
+            print()
+        elif raw=="/consolidate":
+            print()
+            print(dim("  Looking for clusters of similar old summaries..."))
+            try:
+                stats = asyncio.run(symbion.consolidate_memory())
+            except Exception as ex:
+                print(red(f"  Consolidate failed: {type(ex).__name__}: {ex}"))
+                stats = None
+            if stats is not None:
+                print(green(
+                    f"  OK clusters_found={stats['clusters_found']} "
+                    f"merged={stats['clusters_merged']} "
+                    f"replaced={stats['summaries_replaced']} "
+                    f"new={stats['summaries_created']}"))
+                if stats['summaries_created']:
+                    print(dim("  Embeddings for new rows will backfill on next launch."))
             print()
         elif raw=="/tool-stats":
             print()
