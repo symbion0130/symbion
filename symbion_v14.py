@@ -3456,6 +3456,18 @@ _VOICE_TASK_RE = re.compile(
 #  MCP CLIENT
 # ==============================================================================
 
+# Result-string prefixes that mean "this tool call failed". Tools intentionally
+# return error strings rather than raising so the model sees a tool_result and
+# can adapt mid-loop. This list is the heuristic used by tool_stats to count
+# failures from those return strings — keep in sync with any new error prefixes
+# added to a tool implementation.
+_TOOL_ERROR_PREFIXES = (
+    "Error", "ERROR", "Tool error", "Tool execution error", "Tool dispatch error",
+    "MCP tool error", "MCP tool reported error",
+    "Search unavailable", "Error fetching", "Error writing",
+)
+
+
 class MCPManager:
     """Manages a pool of MCP (Model Context Protocol) server subprocesses.
     Each configured server is spawned via stdio, its tools are discovered
@@ -3627,6 +3639,12 @@ class SYMBION:
         # configured, so every dispatch site can call it without guarding.
         self.mcp            = MCPManager(self.cfg.mcp_servers if self.cfg.mcp_enabled else [])
 
+        # Per-tool reliability counters. Populated by _dispatch_tool on
+        # every call; in-memory only (resets on process restart). The
+        # per-call data is already in symbion_events.jsonl — this is the
+        # cheap live aggregate view, surfaced via /tool-stats.
+        self.tool_stats: Dict[str, Dict] = {}
+
         self.kimi_client    = None
         # /escalate sets a per-session one-shot flag, consumed at the top of
         # respond(). Per-session so the flag can't leak across terminal
@@ -3779,11 +3797,36 @@ class SYMBION:
     async def _dispatch_tool(self, name: str, args: Dict,
                               responder=None, responder_model: str = "") -> str:
         """Route a tool call to the MCP manager when prefixed with `mcp__`,
-        otherwise fall through to the built-in SymbionTools dispatcher."""
-        if name.startswith("mcp__") and self.mcp.has_tool(name):
-            return await self.mcp.dispatch(name, args)
-        return await self.tools.dispatch(name, args, self.cfg,
-                                         responder=responder, responder_model=responder_model)
+        otherwise fall through to the built-in SymbionTools dispatcher.
+        Also records per-tool reliability stats (calls, errors, latency,
+        output size, last error) into self.tool_stats for /tool-stats."""
+        stats = self.tool_stats.setdefault(name, {
+            "calls": 0, "errors": 0, "total_chars": 0,
+            "latency_ms_total": 0.0, "last_error": "",
+        })
+        stats["calls"] += 1
+        t0 = time.monotonic()
+        try:
+            if name.startswith("mcp__") and self.mcp.has_tool(name):
+                result = await self.mcp.dispatch(name, args)
+            else:
+                result = await self.tools.dispatch(name, args, self.cfg,
+                                                   responder=responder,
+                                                   responder_model=responder_model)
+        except Exception as ex:
+            stats["errors"] += 1
+            stats["last_error"] = f"{type(ex).__name__}: {ex}"[:200]
+            stats["latency_ms_total"] += (time.monotonic() - t0) * 1000.0
+            raise
+        stats["latency_ms_total"] += (time.monotonic() - t0) * 1000.0
+        if isinstance(result, str):
+            stats["total_chars"] += len(result)
+            # Tools return error strings rather than raising; detect the
+            # common prefixes so the error count reflects real failure rate.
+            if any(result.startswith(p) for p in _TOOL_ERROR_PREFIXES):
+                stats["errors"] += 1
+                stats["last_error"] = result[:200]
+        return result
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -5096,6 +5139,8 @@ HELP_TEXT = f"""
                        selectively delete after confirmation
     /mcp              list configured Model Context Protocol servers
                        (active only in --web mode)
+    /tool-stats       per-tool reliability counters for this session
+                       (calls, errors, avg latency, avg output size)
     /history          recent interactions with quality scores
     /feedback <id> <score> [comment]
                       rate a past interaction (-1.0 to +1.0)
@@ -5448,6 +5493,32 @@ def run_terminal(symbion: "SYMBION"):
             print(f"  {cyan('read_file')}(path)           -- read text file")
             print(f"  {cyan('read_image')}(path, prompt?) -- describe image (png/jpg/gif/webp/bmp)")
             print(f"  {cyan('write_file')}(path,content)  -- write file")
+            print()
+        elif raw=="/tool-stats":
+            print()
+            if not symbion.tool_stats:
+                print(dim("  No tool calls yet this session."))
+            else:
+                print(f"  {'Tool':<32} {'Calls':>6} {'Errs':>6} {'Err%':>6} {'AvgMs':>7} {'AvgChars':>9}")
+                print(dim("  " + "-" * 76))
+                rows = sorted(symbion.tool_stats.items(),
+                              key=lambda kv: kv[1]["calls"], reverse=True)
+                for name, s in rows:
+                    calls = s["calls"]; errs = s["errors"]
+                    err_pct = (errs / calls * 100) if calls else 0.0
+                    avg_ms = (s["latency_ms_total"] / calls) if calls else 0.0
+                    avg_chars = (s["total_chars"] / max(1, calls - errs))
+                    name_short = name if len(name) <= 32 else (name[:29] + "...")
+                    color = red if err_pct >= 50 else (yellow if err_pct >= 10 else str)
+                    print(f"  {color(name_short):<32} {calls:>6} {errs:>6} "
+                          f"{err_pct:>5.1f}% {avg_ms:>7.1f} {int(avg_chars):>9}")
+                # Show the most recent error per tool, if any
+                err_rows = [(n, s["last_error"]) for n, s in rows if s["last_error"]]
+                if err_rows:
+                    print()
+                    print(dim("  Last errors:"))
+                    for n, msg in err_rows[:6]:
+                        print(f"    {n}: {msg[:80]}")
             print()
         elif raw=="/mcp":
             print()
