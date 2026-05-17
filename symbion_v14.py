@@ -193,6 +193,13 @@ class SymbionConfig:
     embedding_model:      str  = "mxbai-embed-large"
     embedding_bm25_weight:    float = 0.40
     embedding_cosine_weight:  float = 0.60
+    # Recency weighting for hybrid retrieval. half_life_days controls how
+    # fast old summaries decay; recency_weight controls how much that decay
+    # affects the final score (0 = pure topical, 1 = recency-multiplicative).
+    # Multiplicative blend was chosen over additive so a fresh-but-unrelated
+    # summary can't beat an old-but-on-topic one — recency only modulates.
+    embedding_recency_half_life_days: float = 30.0
+    embedding_recency_weight:         float = 0.30
 
     web_host: str = "0.0.0.0"
     web_port: int = 8000
@@ -2885,13 +2892,15 @@ class SymbionMemory:
             c.commit()
             return n or 0
 
-    def get_summaries_with_embeddings(self, limit: int = 200) -> List[Tuple[str, Optional[List[float]]]]:
-        """Return (content, vec_or_None) for the most recent N summaries."""
+    def get_summaries_with_embeddings(self, limit: int = 200) -> List[Tuple[str, Optional[List[float]], str]]:
+        """Return (content, vec_or_None, timestamp) for the most recent N summaries.
+        Timestamp is the ISO string from the summaries table; callers parse
+        on demand so retrieval can apply recency weighting."""
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
-                "SELECT content, embedding FROM summaries ORDER BY id DESC LIMIT ?",
+                "SELECT content, embedding, timestamp FROM summaries ORDER BY id DESC LIMIT ?",
                 (limit,)).fetchall()
-        return [(r[0], _blob_to_vec(r[1])) for r in rows]
+        return [(r[0], _blob_to_vec(r[1]), r[2] or "") for r in rows]
 
     def enqueue_proactive(self, session: str, message: str, reason: str = "") -> int:
         """Save a generated proactive message for later delivery. The
@@ -3018,40 +3027,71 @@ class SymbionMemory:
             self, query: str, query_embedding: Optional[List[float]],
             k: int = 2, candidate_pool: int = 200,
             bm25_weight: float = 0.40,
-            cosine_weight: float = 0.60) -> List[str]:
-        """Hybrid BM25 + cosine retrieval. Falls back to BM25-only when
-        no query embedding is available (Ollama down, embeddings disabled,
-        etc). Scores are min-max normalised to [0,1] within the candidate
-        pool before weighting, so the two scales combine sensibly.
+            cosine_weight: float = 0.60,
+            recency_half_life_days: float = 30.0,
+            recency_weight: float = 0.30) -> List[str]:
+        """Hybrid BM25 + cosine retrieval with multiplicative recency decay.
+        Falls back to BM25-only when no query embedding is available (Ollama
+        down, embeddings disabled, etc). Scores are min-max normalised to
+        [0,1] within the candidate pool before weighting, so the two scales
+        combine sensibly.
 
         BM25 catches lexical precision (the user mentioned "v14" or
         "Model9"); cosine catches paraphrase ("the architecture overhaul",
-        "the PDF stuff"). Hybrid beats either alone in most evaluations.
+        "the PDF stuff"). Recency tilts ties toward fresh content without
+        letting a fresh-but-unrelated summary outscore an old-but-on-topic
+        one — applied as a multiplicative factor on the topical score.
         """
         candidates = self.get_summaries_with_embeddings(candidate_pool)
         if not candidates:
             return []
-        contents = [c for c, _ in candidates]
+        contents = [c for c, _, _ in candidates]
+        ts_by_doc: Dict[str, str] = {c: ts for c, _, ts in candidates}
         bm25_scored = _bm25_rank(query, contents, k=len(contents))
         bm25_by_doc = {doc: score for score, doc in bm25_scored}
         bm25_max = max(bm25_by_doc.values(), default=0.0)
-        # If we have no query embedding, fall through to BM25-only.
-        if query_embedding is None or not any(v is not None for _, v in candidates):
-            ranked = sorted(bm25_by_doc.items(), key=lambda x: x[1], reverse=True)
-            return [doc for doc, s in ranked[:k] if s > 0]
+
+        # Recency factor: 2 ** (-age_days / half_life). 1.0 for fresh, 0.5
+        # at half_life, decays smoothly. Blended at recency_weight so old
+        # content is never zeroed out.
+        now = datetime.now()
+        def _recency_factor(ts: str) -> float:
+            if not ts or recency_weight <= 0:
+                return 1.0
+            try:
+                # Tolerate trailing 'Z' and timezone-naive ISO strings.
+                t = datetime.fromisoformat(ts.replace("Z","").split("+")[0])
+            except Exception:
+                return 1.0
+            age_days = max(0.0, (now - t).total_seconds() / 86400.0)
+            decay = 0.5 ** (age_days / max(0.1, recency_half_life_days))
+            return (1.0 - recency_weight) + recency_weight * decay
+
+        # If we have no query embedding, fall through to BM25-only (still
+        # with recency applied so the fallback path benefits too).
+        if query_embedding is None or not any(v is not None for _, v, _ in candidates):
+            ranked = []
+            for doc, score in bm25_by_doc.items():
+                if score > 0:
+                    ranked.append((score * _recency_factor(ts_by_doc.get(doc,"")), doc))
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            return [doc for _, doc in ranked[:k]]
+
         # Otherwise compute cosine for every candidate that has an embedding.
         cosine_by_doc: Dict[str, float] = {}
-        for content, vec in candidates:
+        for content, vec, _ in candidates:
             if vec is None:
                 continue
             cosine_by_doc[content] = _cosine(query_embedding, vec)
         cos_max = max(cosine_by_doc.values(), default=0.0)
-        # Normalize each score to [0,1] within this pool, then weighted-sum.
+        # Normalize each score to [0,1] within this pool, weighted-sum,
+        # then apply the recency factor.
         combined: List[Tuple[float, str]] = []
-        for content, _ in candidates:
+        for content, _, _ in candidates:
             b = bm25_by_doc.get(content, 0.0) / bm25_max if bm25_max > 0 else 0.0
             c_score = cosine_by_doc.get(content, 0.0) / cos_max if cos_max > 0 else 0.0
-            score = bm25_weight * b + cosine_weight * c_score
+            topical = bm25_weight * b + cosine_weight * c_score
+            score = topical * _recency_factor(ts_by_doc.get(content,""))
             if score > 0:
                 combined.append((score, content))
         combined.sort(key=lambda x: x[0], reverse=True)
@@ -3081,6 +3121,69 @@ class SymbionMemory:
             c.execute("DELETE FROM messages WHERE session=?",(session,))
             c.execute("DELETE FROM summaries WHERE session=?",(session,))
             c.commit()
+
+    def find_topic_matches(self, topic: str, k_summaries: int = 10,
+                           candidate_pool: int = 200) -> Dict:
+        """Locate rows that match `topic` across summaries, profile, and
+        user positions. Read-only: returns matches for the caller to
+        confirm before calling forget_topic_matches to actually scrub.
+
+        Matching is intentionally loose so the user can spot adjacent
+        contamination: BM25 over recent summaries (catches paraphrase),
+        case-insensitive substring on profile values and position text.
+        """
+        matches: Dict = {"summaries": [], "profile": [], "positions": []}
+        topic_low = topic.lower()
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, timestamp, content FROM summaries "
+                "ORDER BY id DESC LIMIT ?", (candidate_pool,)).fetchall()
+            if rows:
+                ranked = _bm25_rank(topic, [r[2] for r in rows], k=k_summaries)
+                score_by_content = {content: score for score, content in ranked if score > 0}
+                for sid, ts, content in rows:
+                    if content in score_by_content:
+                        matches["summaries"].append({
+                            "id": sid, "ts": ts,
+                            "preview": content[:160],
+                            "score": score_by_content[content],
+                        })
+                matches["summaries"].sort(key=lambda x: -x["score"])
+
+            for k, v in c.execute("SELECT key, value FROM user_profile").fetchall():
+                if topic_low in (v or "").lower():
+                    matches["profile"].append({"key": k, "value": v})
+
+            for pid, ptopic, pos in c.execute(
+                "SELECT id, topic, position FROM user_positions"
+            ).fetchall():
+                if topic_low in (ptopic or "").lower() or topic_low in (pos or "").lower():
+                    matches["positions"].append({
+                        "id": pid, "topic": ptopic,
+                        "position": (pos or "")[:140],
+                    })
+        return matches
+
+    def forget_topic_matches(self, matches: Dict) -> Dict:
+        """Delete every row identified in `matches` (the dict produced by
+        find_topic_matches). Returns per-bucket deletion counts. Caller is
+        responsible for confirming with the user first — this method does
+        not prompt."""
+        counts = {"summaries": 0, "profile": 0, "positions": 0}
+        if not matches:
+            return counts
+        with sqlite3.connect(self.db) as c:
+            for m in matches.get("summaries", []):
+                c.execute("DELETE FROM summaries WHERE id=?", (m["id"],))
+                counts["summaries"] += 1
+            for m in matches.get("profile", []):
+                c.execute("DELETE FROM user_profile WHERE key=?", (m["key"],))
+                counts["profile"] += 1
+            for m in matches.get("positions", []):
+                c.execute("DELETE FROM user_positions WHERE id=?", (m["id"],))
+                counts["positions"] += 1
+            c.commit()
+        return counts
 
     def build_context(self, session: str, identity: "LongitudinalIdentity",
                       tasks: "TaskEngine", gaps: "KnowledgeGapTracker",
@@ -3130,7 +3233,9 @@ class SymbionMemory:
                 relevant = self.get_relevant_summaries_hybrid(
                     query, query_embedding, k=2,
                     bm25_weight=self.cfg.embedding_bm25_weight,
-                    cosine_weight=self.cfg.embedding_cosine_weight)
+                    cosine_weight=self.cfg.embedding_cosine_weight,
+                    recency_half_life_days=self.cfg.embedding_recency_half_life_days,
+                    recency_weight=self.cfg.embedding_recency_weight)
             else:
                 relevant = self.get_relevant_summaries(query, k=2)
             # Deduplicate against session summaries
@@ -4773,6 +4878,8 @@ HELP_TEXT = f"""
                        carry over to next launch)
     /profile          inferred user profile
     /forget           clear the current session's memory
+    /forget <topic>   search summaries/profile/positions for a topic and
+                       selectively delete after confirmation
     /history          recent interactions with quality scores
     /feedback <id> <score> [comment]
                       rate a past interaction (-1.0 to +1.0)
@@ -4986,9 +5093,46 @@ def run_terminal(symbion: "SYMBION"):
                 for k,v in p.items():
                     if v: print(f"  {cyan(k):<24}  {v}")
                 print()
-        elif raw=="/forget":
-            symbion.memory.forget_session(session)
-            print(green("  OK Session memory cleared."))
+        elif raw.startswith("/forget"):
+            parts = raw.split(None, 1)
+            if len(parts) == 1:
+                # No arg: clear current session memory (existing behavior).
+                symbion.memory.forget_session(session)
+                print(green("  OK Session memory cleared."))
+            else:
+                topic = parts[1].strip()
+                m = symbion.memory.find_topic_matches(topic)
+                total = len(m["summaries"]) + len(m["profile"]) + len(m["positions"])
+                if total == 0:
+                    print(dim(f"  No matches for '{topic}'."))
+                else:
+                    print()
+                    print(f"  Matches for {yellow(topic)}:")
+                    if m["summaries"]:
+                        print(dim(f"  Summaries ({len(m['summaries'])}):"))
+                        for s in m["summaries"]:
+                            print(f"    id={s['id']:>4} {dim(s['ts'][:10])} score={s['score']:.2f}  {s['preview']}...")
+                    if m["profile"]:
+                        print(dim(f"  Profile fields ({len(m['profile'])}):"))
+                        for p in m["profile"]:
+                            print(f"    {p['key']}: {(p['value'] or '')[:160]}")
+                    if m["positions"]:
+                        print(dim(f"  User positions ({len(m['positions'])}):"))
+                        for p in m["positions"]:
+                            print(f"    id={p['id']:>4} on {p['topic']!r}: {p['position']}...")
+                    print()
+                    try:
+                        ans = input(f"  Delete all {total} matching rows? [y/N] ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        ans = ""
+                    if ans == "y":
+                        counts = symbion.memory.forget_topic_matches(m)
+                        print(green(
+                            f"  OK Deleted: {counts['summaries']} summary, "
+                            f"{counts['profile']} profile, "
+                            f"{counts['positions']} position."))
+                    else:
+                        print(dim("  Cancelled."))
         elif raw=="/history":
             rows=symbion.learner.recent(10)
             if not rows: print(dim("  No interactions yet."))
