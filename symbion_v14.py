@@ -10,6 +10,14 @@ from dataclasses import dataclass, field, asdict
 
 try:    import httpx; _HTTPX = True
 except ImportError: _HTTPX = False
+# MCP (Model Context Protocol) client SDK — optional. When absent or no
+# servers configured, MCPManager degrades to a no-op and Symbion runs
+# with only its 10 built-in tools.
+try:
+    import mcp as _mcp_pkg  # noqa: F401
+    _MCP = True
+except ImportError:
+    _MCP = False
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -200,6 +208,17 @@ class SymbionConfig:
     # summary can't beat an old-but-on-topic one — recency only modulates.
     embedding_recency_half_life_days: float = 30.0
     embedding_recency_weight:         float = 0.30
+
+    # MCP (Model Context Protocol) client config. Each entry spawns one
+    # stdio MCP server subprocess at startup; its tools are discovered and
+    # exposed to the agent loop as `mcp__<server_name>__<tool>`. Symbion
+    # only does stdio transport for now; HTTP+SSE is an extension point.
+    #   Example:
+    #   [{"name": "fs", "command": "npx",
+    #     "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\notes"],
+    #     "enabled": True}]
+    mcp_enabled: bool = True
+    mcp_servers: List[Dict] = field(default_factory=list)
 
     web_host: str = "0.0.0.0"
     web_port: int = 8000
@@ -3433,6 +3452,153 @@ _VOICE_TASK_RE = re.compile(
 #  SYMBION CORE  -- v12: all subsystems wired
 # ==============================================================================
 
+# ==============================================================================
+#  MCP CLIENT
+# ==============================================================================
+
+class MCPManager:
+    """Manages a pool of MCP (Model Context Protocol) server subprocesses.
+    Each configured server is spawned via stdio, its tools are discovered
+    on startup, and they're exposed as `mcp__<server>__<tool>` schemas
+    that the agent loop can call directly.
+
+    Designed to degrade silently: if the SDK is missing or no servers are
+    configured, every method is a no-op and the rest of Symbion runs with
+    only its 10 built-in tools.
+    """
+
+    def __init__(self, server_configs: List[Dict]):
+        self._configs = server_configs or []
+        self._sessions: Dict[str, object] = {}            # server_name -> ClientSession
+        self._tools: Dict[str, Tuple[str, object]] = {}   # qname -> (server_name, Tool)
+        self._exit_stack = None
+        self._started = False
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    def has_tool(self, qname: str) -> bool:
+        return qname in self._tools
+
+    def tool_schemas(self) -> List[Dict]:
+        """Anthropic tool_use format. MCP tool inputSchema is already JSON
+        Schema so it passes through unchanged."""
+        out: List[Dict] = []
+        for qname, (server_name, tool) in self._tools.items():
+            desc = getattr(tool, "description", "") or ""
+            schema = getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}}
+            out.append({
+                "name": qname,
+                "description": f"[{server_name}] {desc}",
+                "input_schema": schema,
+            })
+        return out
+
+    def list_for_display(self) -> List[Dict]:
+        """For /mcp terminal command: which servers connected, with tool counts."""
+        per_server: Dict[str, List[str]] = {}
+        for qname, (server_name, tool) in self._tools.items():
+            per_server.setdefault(server_name, []).append(getattr(tool, "name", qname))
+        return [{"server": s, "tools": sorted(tools)} for s, tools in sorted(per_server.items())]
+
+    async def start(self):
+        """Spawn every enabled server, initialize sessions, list_tools."""
+        if self._started: return
+        if not _MCP:
+            if self._configs:
+                logger.warning("MCP servers configured but `mcp` SDK is missing — `pip install mcp` to enable.")
+            return
+        enabled = [c for c in self._configs if c.get("enabled", True)]
+        if not enabled:
+            return
+
+        # Lazy imports so module load doesn't require the SDK.
+        from contextlib import AsyncExitStack
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp.client.session import ClientSession
+
+        self._exit_stack = AsyncExitStack()
+        await self._exit_stack.__aenter__()
+
+        for cfg in enabled:
+            name = cfg.get("name", "").strip()
+            if not name:
+                logger.warning(f"MCP server config missing 'name', skipping: {cfg!r}")
+                continue
+            cmd = cfg.get("command")
+            if not cmd:
+                logger.warning(f"MCP server '{name}' missing 'command', skipping.")
+                continue
+            try:
+                params = StdioServerParameters(
+                    command=cmd,
+                    args=cfg.get("args", []) or [],
+                    env=cfg.get("env"),
+                )
+                read, write = await self._exit_stack.enter_async_context(stdio_client(params))
+                session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                tools_result = await session.list_tools()
+                tools = getattr(tools_result, "tools", []) or []
+                for tool in tools:
+                    tool_name = getattr(tool, "name", "")
+                    if not tool_name: continue
+                    qname = f"mcp__{name}__{tool_name}"
+                    self._tools[qname] = (name, tool)
+                self._sessions[name] = session
+                logger.warning(f"MCP server '{name}' connected with {len(tools)} tools.")
+            except Exception as ex:
+                logger.error(f"MCP server '{name}' failed to start: {type(ex).__name__}: {ex}")
+
+        self._started = True
+
+    async def stop(self):
+        """Close all sessions and terminate subprocesses. Idempotent."""
+        if self._exit_stack is not None:
+            try:
+                await self._exit_stack.aclose()
+            except Exception as ex:
+                logger.warning(f"MCP shutdown: {type(ex).__name__}: {ex}")
+            self._exit_stack = None
+        self._sessions.clear()
+        self._tools.clear()
+        self._started = False
+
+    async def dispatch(self, qname: str, args: Dict) -> str:
+        """Call an MCP tool by its namespaced name. Returns a flat string
+        (concatenated TextContent from the result). Non-text content blocks
+        are surfaced as `[<TypeName>]` markers so the model knows something
+        was returned even if we can't render it."""
+        if qname not in self._tools:
+            return f"Error: unknown MCP tool '{qname}'"
+        server_name, _ = self._tools[qname]
+        session = self._sessions.get(server_name)
+        if session is None:
+            return f"Error: MCP server '{server_name}' not connected"
+        prefix = f"mcp__{server_name}__"
+        tool_name = qname[len(prefix):] if qname.startswith(prefix) else qname
+        try:
+            result = await session.call_tool(tool_name, args or {})
+            parts: List[str] = []
+            for c in (getattr(result, "content", None) or []):
+                if hasattr(c, "text") and getattr(c, "text", None) is not None:
+                    parts.append(c.text)
+                else:
+                    parts.append(f"[{type(c).__name__}]")
+            output = "\n".join(parts).strip() if parts else "(empty)"
+            if getattr(result, "isError", False):
+                return f"MCP tool reported error: {output[:1000]}"
+            return output
+        except Exception as ex:
+            return f"MCP tool error: {type(ex).__name__}: {ex}"
+
+
+# ==============================================================================
+#  SYMBION
+# ==============================================================================
+
 class SYMBION:
     def __init__(self, cfg=None):
         self.cfg      = cfg or SymbionConfig()
@@ -3456,6 +3622,10 @@ class SYMBION:
         self.tasks          = TaskEngine(self.cfg.db_path)
         self.contradictions = ContradictionTracker(self.cfg.db_path)
         self.gaps           = KnowledgeGapTracker(self.cfg.db_path)
+        # MCP manager is instantiated unconditionally — start() is the side
+        # effect. It's a no-op when the SDK is missing or no servers are
+        # configured, so every dispatch site can call it without guarding.
+        self.mcp            = MCPManager(self.cfg.mcp_servers if self.cfg.mcp_enabled else [])
 
         self.kimi_client    = None
         # /escalate sets a per-session one-shot flag, consumed at the top of
@@ -3581,6 +3751,39 @@ class SYMBION:
             return DeepSeekClient(self.cfg.deepseek_api_key, self.cfg.deepseek_model,
                                   self.cfg, base_url=self.cfg.deepseek_base_url)
         return None
+
+    # MCP lifecycle hooks. Called from run_terminal and build_web_app
+    # entry points so MCP servers come up before traffic and shut down
+    # cleanly on exit. Safe to call when MCP is disabled or unavailable.
+    async def start_mcp(self):
+        try:
+            await self.mcp.start()
+            if self.mcp.started and self.mcp._tools:
+                servers = self.mcp.list_for_display()
+                print(green(f"  MCP       :  {len(servers)} server(s), {sum(len(s['tools']) for s in servers)} tool(s)"))
+                for s in servers:
+                    print(dim(f"               {s['server']}: {', '.join(s['tools'][:6])}{'...' if len(s['tools'])>6 else ''}"))
+        except Exception as ex:
+            logger.error(f"MCP start failed: {type(ex).__name__}: {ex}")
+
+    async def stop_mcp(self):
+        try:
+            await self.mcp.stop()
+        except Exception as ex:
+            logger.warning(f"MCP stop: {type(ex).__name__}: {ex}")
+
+    def _agent_tool_schemas(self) -> List[Dict]:
+        """Built-in tool schemas + MCP-server tool schemas, merged."""
+        return list(TOOL_SCHEMAS) + self.mcp.tool_schemas()
+
+    async def _dispatch_tool(self, name: str, args: Dict,
+                              responder=None, responder_model: str = "") -> str:
+        """Route a tool call to the MCP manager when prefixed with `mcp__`,
+        otherwise fall through to the built-in SymbionTools dispatcher."""
+        if name.startswith("mcp__") and self.mcp.has_tool(name):
+            return await self.mcp.dispatch(name, args)
+        return await self.tools.dispatch(name, args, self.cfg,
+                                         responder=responder, responder_model=responder_model)
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -4316,8 +4519,8 @@ class SYMBION:
                 # on the final draft.
                 async def _exec_tool(name: str, args: Dict) -> str:
                     try:
-                        return await self.tools.dispatch(
-                            name, args, self.cfg,
+                        return await self._dispatch_tool(
+                            name, args,
                             responder=resp_client,
                             responder_model=resp_model)
                     except Exception as ex:
@@ -4325,7 +4528,7 @@ class SYMBION:
                         return f"Tool dispatch error: {type(ex).__name__}: {ex}"
                 try:
                     async for ev in resp_client.stream_with_tools(
-                            resp_model, messages, TOOL_SCHEMAS, self.cfg,
+                            resp_model, messages, self._agent_tool_schemas(), self.cfg,
                             _exec_tool,
                             max_iterations=self.cfg.agent_loop_max_iterations,
                             max_tool_chars=self.cfg.agent_loop_max_tool_chars):
@@ -4687,6 +4890,10 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
 
     @asynccontextmanager
     async def _lifespan(app):
+        # Start MCP servers in this loop so subprocess sessions live for the
+        # app lifetime, not just one turn. Terminal mode can't do this cleanly
+        # because each respond() spins up its own asyncio.run().
+        await symbion.start_mcp()
         if symbion.cfg.proactive_interval_minutes > 0 and not isinstance(
                 symbion._judge_active(), OfflineJudgeStub):
             import threading
@@ -4694,7 +4901,10 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 try: asyncio.run(symbion.proactive_loop("web_global"))
                 except Exception as ex: logger.warning(f"Proactive thread crashed: {ex}")
             threading.Thread(target=_runner, daemon=True, name="symbion-proactive-web").start()
-        yield
+        try:
+            yield
+        finally:
+            await symbion.stop_mcp()
 
     app     = FastAPI(title="Symbion v14", lifespan=_lifespan)
     rate_lm = RateLimiter(symbion.cfg.rate_limit_per_minute)
@@ -4880,6 +5090,8 @@ HELP_TEXT = f"""
     /forget           clear the current session's memory
     /forget <topic>   search summaries/profile/positions for a topic and
                        selectively delete after confirmation
+    /mcp              list configured Model Context Protocol servers
+                       (active only in --web mode)
     /history          recent interactions with quality scores
     /feedback <id> <score> [comment]
                       rate a past interaction (-1.0 to +1.0)
@@ -4991,6 +5203,10 @@ def run_terminal(symbion: "SYMBION"):
         proactive_thread.start()
     profile  = symbion.memory.get_profile()
     mood_name, _ = symbion.health.mood()
+
+    if symbion.cfg.mcp_enabled and symbion.cfg.mcp_servers:
+        print(yellow(f"  MCP       :  {len(symbion.cfg.mcp_servers)} server(s) configured but "
+                     "MCP is only active in web mode (`--web`)."))
 
     print()
     print(bold("+==================================================================+"))
@@ -5228,6 +5444,25 @@ def run_terminal(symbion: "SYMBION"):
             print(f"  {cyan('read_file')}(path)           -- read text file")
             print(f"  {cyan('read_image')}(path, prompt?) -- describe image (png/jpg/gif/webp/bmp)")
             print(f"  {cyan('write_file')}(path,content)  -- write file")
+            print()
+        elif raw=="/mcp":
+            print()
+            if not symbion.cfg.mcp_enabled:
+                print(dim("  MCP disabled (cfg.mcp_enabled=False)."))
+            elif not symbion.cfg.mcp_servers:
+                print(dim("  No MCP servers configured. Add entries to cfg.mcp_servers."))
+            elif not _MCP:
+                print(yellow("  MCP SDK not installed. Run: pip install mcp"))
+            else:
+                print(dim("  Configured servers (active only in --web mode):"))
+                for sc in symbion.cfg.mcp_servers:
+                    en = "on" if sc.get("enabled", True) else "off"
+                    print(f"    [{en}] {sc.get('name','?')}: {sc.get('command','?')} {' '.join(sc.get('args',[]))[:60]}")
+                if symbion.mcp.started:
+                    print()
+                    print(dim("  Live tool map:"))
+                    for s in symbion.mcp.list_for_display():
+                        print(f"    {s['server']}: {', '.join(s['tools'])}")
             print()
         elif raw=="/tests":
             print(dim("  Behavioral tests removed in v14. Use evals/ harness instead."))
