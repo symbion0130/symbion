@@ -2843,12 +2843,18 @@ class EmbeddingIndex:
         self._ready = True
 
     def add(self, rowid: int, vec: List[float]):
+        """Upsert a vector for `rowid`. sqlite-vec 0.1.9's vec0 virtual
+        table does NOT honor `INSERT OR REPLACE` on the rowid primary
+        key — it raises UNIQUE constraint failed. DELETE-then-INSERT is
+        the supported upsert pattern, so re-syncs and embedding refreshes
+        work without warnings."""
         if not self._available or not vec: return
         try:
             with self._connect() as c:
                 self._ensure_table(c, len(vec))
+                c.execute("DELETE FROM summaries_vec WHERE rowid=?", (rowid,))
                 c.execute(
-                    "INSERT OR REPLACE INTO summaries_vec(rowid, embedding) VALUES (?, ?)",
+                    "INSERT INTO summaries_vec(rowid, embedding) VALUES (?, ?)",
                     (rowid, _vec_to_blob(vec)))
                 c.commit()
         except Exception as ex:
