@@ -3951,6 +3951,10 @@ class SYMBION:
         ext_re = self._FILE_EXTS
         paths: List[str] = []
         seen: set = set()
+        # Strip URLs before path extraction — paths inside URLs
+        # (https://example.com/doc.pdf) are fetch_url territory, not local
+        # files. Locked in by test_url_doesnt_match.
+        query = re.sub(r'https?://\S+', '', query)
         ext_count_re = re.compile(rf'\.(?:{ext_re})\b', re.IGNORECASE)
 
         def _add(p: str):
