@@ -191,7 +191,6 @@ class SymbionConfig:
     embedding_enabled:    bool = True
     embedding_provider:   str  = "ollama"  # "ollama" | "none" (extension point)
     embedding_model:      str  = "mxbai-embed-large"
-    embedding_dim:        int  = 768
     embedding_bm25_weight:    float = 0.40
     embedding_cosine_weight:  float = 0.60
 
@@ -845,6 +844,8 @@ class HealthMetrics:
 
 def init_db(db_path: str):
     with sqlite3.connect(db_path) as c:
+        # WAL lets web + terminal + background tasks coexist without "database is locked".
+        c.execute("PRAGMA journal_mode=WAL")
         c.executescript("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY, timestamp TEXT, session TEXT,
@@ -1188,6 +1189,11 @@ class AnthropicClient(BaseClient):
         msgs = [dict(m) for m in msgs]  # shallow copy to avoid mutating caller's
         tool_calls_log: List[Dict] = []
         stop_reason: Optional[str] = None
+        # Track consecutive errors per tool name across the whole loop.
+        # If the same tool errors twice in a row, the model is stuck — break
+        # out instead of burning the iteration cap on the same failure.
+        stuck_tool_counts: Dict[str, int] = {}
+        stuck_tool_name: Optional[str] = None
 
         for iteration in range(max_iterations):
             blocks_by_idx: Dict[int, Dict] = {}  # content blocks built by SSE deltas
@@ -1308,6 +1314,12 @@ class AnthropicClient(BaseClient):
                     "output_chars": len(output_str),
                     "is_error": is_error,
                 })
+                if is_error:
+                    stuck_tool_counts[tu["name"]] = stuck_tool_counts.get(tu["name"], 0) + 1
+                    if stuck_tool_counts[tu["name"]] >= 2:
+                        stuck_tool_name = tu["name"]
+                else:
+                    stuck_tool_counts[tu["name"]] = 0
                 yield {"type": "tool_result", "id": tu["id"], "name": tu["name"],
                         "output": output_str, "is_error": is_error}
                 rb = {"type": "tool_result", "tool_use_id": tu["id"],
@@ -1317,6 +1329,10 @@ class AnthropicClient(BaseClient):
                 tool_result_blocks.append(rb)
 
             msgs.append({"role": "user", "content": tool_result_blocks})
+
+            if stuck_tool_name:
+                stop_reason = f"stuck_tool:{stuck_tool_name}"
+                break
 
         else:
             # Loop exited via the for-else, meaning we hit max_iterations
@@ -2624,20 +2640,26 @@ class EmbeddingClient:
     Errors are logged at WARNING but never raised — retrieval must keep
     working even when the embed daemon is down."""
 
+    _FAIL_TTL_SECONDS = 30.0  # re-probe at most every 30s after a failure
+
     def __init__(self, cfg: SymbionConfig):
         self.cfg = cfg
         self._url = cfg.ollama_host.rstrip("/") + "/api/embeddings"
-        self._available_checked = False
         self._available_cached = False
+        self._last_check_ts = 0.0  # 0 means never probed
 
     def is_available(self) -> bool:
-        """Cheap probe: GET the Ollama tags endpoint once and cache.
-        Avoids paying probe cost on every embed() call."""
-        if self._available_checked:
-            return self._available_cached
-        self._available_checked = True
+        """Probe the Ollama tags endpoint. Success caches indefinitely;
+        failure caches for _FAIL_TTL_SECONDS so the client recovers when
+        Ollama starts after Symbion does, without paying the probe cost
+        on every embed() call."""
+        if self._available_cached:
+            return True
+        now = time.time()
+        if self._last_check_ts and (now - self._last_check_ts) < self._FAIL_TTL_SECONDS:
+            return False
+        self._last_check_ts = now
         if not _HTTPX or self.cfg.embedding_provider != "ollama" or not self.cfg.embedding_enabled:
-            self._available_cached = False
             return False
         try:
             r = httpx.get(self.cfg.ollama_host.rstrip("/") + "/api/tags", timeout=2)
@@ -3834,16 +3856,6 @@ class SYMBION:
                                 f"\"{position[:80]}\". If relevant, weave this in naturally -- don't announce it.")
         except Exception as ex: logger.error(f"Contradiction: {ex}")
         return None
-
-    def _is_pushback_turn(self, text: str) -> bool:
-        """Detect whether the current turn is a pushback on a prior claim."""
-        t = text.lower()
-        pushback_cues = ("actually,", "but ", "you're wrong", "that's not right",
-                         "i disagree", "that's incorrect", "no,", "wrong,",
-                         "not true", "i don't think so", "that isn't")
-        has_cue = any(t.startswith(p) or f" {p}" in t for p in pushback_cues)
-        has_strong_punct = text.count("!") >= 2 or text.upper() == text and len(text) > 15
-        return has_cue or has_strong_punct
 
     # -- Background tasks ----------------------------------
 
