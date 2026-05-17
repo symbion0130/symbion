@@ -16,7 +16,8 @@ python -m symbion --web          # http://localhost:8000
 
 # Portable drive (no system Python required)
 scripts\bootstrap-portable.bat   # one-time, ~5 min
-scripts\start.bat                # every launch
+symbion                          # terminal REPL (default) — same as scripts\start.bat
+symbion --web                    # web UI on http://localhost:8000
 ```
 
 ## Architecture

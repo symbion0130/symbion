@@ -47,7 +47,7 @@ The **single-file constraint is load-bearing**. Symbion is deliberately one `.py
 
 ---
 
-## v13 architecture at a glance
+## v14 architecture at a glance
 
 A single `SYMBION` core object composes these subsystems (see lines ~1587+ of `symbion_v14.py`):
 

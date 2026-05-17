@@ -1,8 +1,15 @@
 @echo off
 REM ===========================================================================
-REM Symbion portable launcher — runs the web app using the .python\ install
-REM on this drive. Works from any machine that has the drive plugged in,
-REM no system Python required.
+REM Symbion portable launcher — runs the terminal REPL using the .python\
+REM install on this drive. Works from any machine that has the drive plugged
+REM in, no system Python required.
+REM
+REM Default: terminal mode (PowerShell / cmd REPL).
+REM Web UI:  scripts\start.bat --web        (FastAPI on http://localhost:8000)
+REM
+REM Extra args pass straight through, e.g.:
+REM   scripts\start.bat --provider anthropic
+REM   scripts\start.bat --web --port 9000
 REM
 REM First-time setup: run scripts\bootstrap-portable.bat once.
 REM ===========================================================================
@@ -19,5 +26,4 @@ if not exist "%PYDIR%\python.exe" (
     exit /b 1
 )
 
-REM Forward any extra args, so `start.bat --provider anthropic` etc. work.
-"%PYDIR%\python.exe" -m symbion --web %*
+"%PYDIR%\python.exe" -m symbion %*

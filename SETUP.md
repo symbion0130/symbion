@@ -9,12 +9,15 @@ How to go from a fresh machine to a running Symbion. Three paths depending on wh
 For when Symbion lives on an external drive and you want to plug it into any x64 Windows machine.
 
 ```cmd
-:: From the drive root (e.g. D:\symbion)
+:: From the drive root (e.g. D:\symbion). Works in both PowerShell and cmd.
 scripts\bootstrap-portable.bat   :: one-time, ~5 min, ~100MB
-scripts\start.bat                :: every launch
+symbion                          :: terminal REPL (default)
+symbion --web                    :: web UI on http://localhost:8000
 ```
 
-`bootstrap-portable.bat` downloads Python 3.12 embeddable into `.python\` on the drive, installs pip + setuptools, then runs `pip install -e .[web] mcp mcp-server-time pypdf`. After that, `start.bat` launches the FastAPI/uvicorn web app on `http://localhost:8000` using **only** the drive's Python — system Python (if any) is irrelevant.
+`bootstrap-portable.bat` downloads Python 3.12 embeddable into `.python\` on the drive, installs pip + setuptools, then runs `pip install -e .[web] mcp mcp-server-time pypdf`. After that, `symbion` (a thin top-level shortcut to `scripts\start.bat`) launches Symbion using **only** the drive's Python — system Python (if any) is irrelevant.
+
+Terminal is the default so the drive works the same on every machine you plug it into: open PowerShell at the drive root, run `symbion`, talk to it. Add `--web` (or any other flag) when you want the browser UI. Extra args pass straight through to `python -m symbion`, so `symbion --provider anthropic`, `symbion --web --port 9000`, etc. all work. `scripts\start.bat` still exists and does the same thing if you prefer the explicit path.
 
 Use this when:
 - You want one drive that "just works" across multiple machines
