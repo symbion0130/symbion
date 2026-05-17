@@ -3344,8 +3344,10 @@ class SYMBION:
         self.gaps           = KnowledgeGapTracker(self.cfg.db_path)
 
         self.kimi_client    = None
-        # /escalate sets this for one turn, consumed at the top of respond().
-        self._escalate_next_turn: bool = False
+        # /escalate sets a per-session one-shot flag, consumed at the top of
+        # respond(). Per-session so the flag can't leak across terminal
+        # sessions or browser tabs sharing this SYMBION instance.
+        self._escalate_next_turn: Dict[str, bool] = {}
 
         self._providers: List[BaseClient] = []
         self._build_providers()
@@ -3786,12 +3788,12 @@ class SYMBION:
     # -- Self-eval --------------------------------------------
 
     async def _self_eval(self, query: str, draft: str,
-                         skip_short: int = 60) -> Tuple[float,bool,str,bool,bool]:
-        if not self.cfg.self_eval_enabled: return 1.0, False, "", False, False
+                         skip_short: int = 60) -> Tuple[float,bool,str,bool,bool,Optional[float]]:
+        if not self.cfg.self_eval_enabled: return 1.0, False, "", False, False, None
         # Short-circuit: very short responses don't need quality grading
-        if len(draft) < skip_short: return 0.8, False, "", False, False
+        if len(draft) < skip_short: return 0.8, False, "", False, False, None
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return 1.0, False, "", False, False
+        if isinstance(client, OfflineJudgeStub): return 1.0, False, "", False, False, None
         try:
             raw = await client.chat_json(self._jmodel(), SELF_EVAL_SYSTEM,
                                          f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 220)
@@ -3802,18 +3804,19 @@ class SYMBION:
             revise = bool(r.get("should_revise",False)) or score < 0.35
             # Telemetry: capture self-eval confidence for calibration tracking.
             # Does not influence revise/score logic — pure signal collection.
+            conf: Optional[float] = None
             try:
-                conf = float(r.get("confidence", 0.7))
-                conf = max(0.0, min(1.0, conf))
+                conf_val = float(r.get("confidence", 0.7))
+                conf = max(0.0, min(1.0, conf_val))
                 self.health.last_self_eval_confidence = conf
-                self._last_self_eval_confidence = conf
             except (TypeError, ValueError):
-                self._last_self_eval_confidence = None
+                conf = None
             return (score, revise, r.get("revision_guidance",""),
                     bool(r.get("recklessness_risk",False)),
-                    bool(r.get("scope_exceeded",False)))
+                    bool(r.get("scope_exceeded",False)),
+                    conf)
         except Exception as ex:
-            logger.error(f"Self-eval: {ex}"); return 1.0, False, "", False, False
+            logger.error(f"Self-eval: {ex}"); return 1.0, False, "", False, False, None
 
     # -- Knowledge gap check ------------------------------
 
@@ -4000,7 +4003,7 @@ class SYMBION:
         # Reset per-turn telemetry caches so the event log doesn't carry
         # forward stale values from a prior turn that didn't actually run
         # the corresponding probe (e.g. self-eval skipped on a short reply).
-        self._last_self_eval_confidence = None
+        self_eval_confidence: Optional[float] = None
         # Track sessions
         is_new_session = session not in self._seen_sessions
         if is_new_session:
@@ -4159,8 +4162,7 @@ class SYMBION:
         # reasoning, long report compilation). /escalate forces a one-turn
         # manual escalation. Both routes only fire when the user has an
         # Anthropic key and isn't on Kimi — see _escalation_client().
-        manual_escalate = self._escalate_next_turn
-        self._escalate_next_turn = False  # consume the one-turn flag
+        manual_escalate = self._escalate_next_turn.pop(session, False)
         judge_escalate = bool(evaluation.get("escalate")) if not refusal else False
         escalated = False
         if (not refusal) and self.cfg.escalation_enabled and (judge_escalate or manual_escalate):
@@ -4297,8 +4299,9 @@ class SYMBION:
 
             # Self-eval + revision (skip if stale-draft already revised)
             if not refusal and not task_failed and not revised:
-                quality_score, should_revise, guidance, recklessness_risk, scope_exceeded = \
-                    await self._self_eval(text, draft)
+                (quality_score, should_revise, guidance,
+                 recklessness_risk, scope_exceeded,
+                 self_eval_confidence) = await self._self_eval(text, draft)
 
                 if should_revise:
                     extra = ""
@@ -4415,7 +4418,7 @@ class SYMBION:
             tool_used=_tool_used_label,
             response_len=len(full_response),
             self_eval=({"score": quality_score, "revised": revised,
-                        "confidence": getattr(self, "_last_self_eval_confidence", None)}
+                        "confidence": self_eval_confidence}
                        if not refusal else None),
             revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
             stale_refresh=stale_refresh,
@@ -5106,7 +5109,7 @@ def run_terminal(symbion: "SYMBION"):
             elif symbion.cfg.use_kimi_responder or not symbion.cfg.anthropic_api_key:
                 print(red("  Escalation requires Anthropic provider with an API key."))
             else:
-                symbion._escalate_next_turn = True
+                symbion._escalate_next_turn[session] = True
                 print(green(f"  OK Next turn will use {symbion.cfg.anthropic_escalation_model} (one-shot)."))
 
         elif raw.startswith("/provider"):
