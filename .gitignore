@@ -8,6 +8,8 @@ __pycache__/
 # Data files
 *.db
 *.db.bak
+*.db-shm
+*.db-wal
 *.log
 *.jsonl
 
