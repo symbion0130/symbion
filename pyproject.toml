@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.100", "uvicorn>=0.20"]
+# uvicorn[standard] pulls websockets+wsproto so /ws/{session_id} works.
+# Bare `uvicorn` accepts the upgrade request and then logs
+# "Unsupported upgrade request" — the WebSocket UI silently fails.
+web = ["fastapi>=0.100", "uvicorn[standard]>=0.20"]
 
 [project.scripts]
 symbion = "symbion.__main__:main"

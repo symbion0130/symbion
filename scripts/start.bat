@@ -14,7 +14,7 @@ set PYDIR=.python
 if not exist "%PYDIR%\python.exe" (
     echo.
     echo Portable Python not found at %PYDIR%\python.exe
-    echo Run scripts\bootstrap-portable.bat first (one-time setup, ~5 min).
+    echo Run scripts\bootstrap-portable.bat first -- one-time setup, ~5 min.
     echo.
     exit /b 1
 )
