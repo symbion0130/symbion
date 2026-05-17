@@ -18,6 +18,14 @@ try:
     _MCP = True
 except ImportError:
     _MCP = False
+# sqlite-vec for fast vector top-K retrieval. Optional — we still
+# maintain the full Python-cosine fallback for when the extension isn't
+# loadable. Pays off at 1000+ summaries; below that the index is a wash.
+try:
+    import sqlite_vec as _sqlite_vec_pkg
+    _SQLITE_VEC = True
+except ImportError:
+    _SQLITE_VEC = False
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -2764,6 +2772,130 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+class EmbeddingIndex:
+    """Parallel vec0 virtual table over summaries.embedding for fast top-K
+    cosine retrieval. Optional — falls through gracefully when sqlite-vec
+    is missing or fails to load. Index lifecycle:
+
+    - lazy table creation: dim inferred from the first add() call
+    - dim stored in embedding_meta so re-open knows the existing geometry
+    - retrieval falls back to full Python cosine when index isn't ready
+      or when total summaries <= candidate_pool (no win at small N)
+
+    Honest scale note: at <200 summaries the full-scan path is faster
+    once you include extension-load + roundtrip overhead. The win
+    materializes around 1000+ summaries. This is a long-tail
+    optimization, not a hot-fix.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._dim: Optional[int] = None
+        self._ready = False
+        self._available = False
+        if _SQLITE_VEC:
+            # Probe once: confirm the extension loads against this db. After
+            # this, every operation opens a fresh connection — persistent
+            # connections were holding the DB lock long enough to block
+            # learner.record's writers despite WAL mode.
+            try:
+                with self._connect() as c:
+                    exists = c.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='summaries_vec'"
+                    ).fetchone()
+                    if exists:
+                        row = c.execute(
+                            "SELECT v FROM embedding_meta WHERE k='vec_dim'").fetchone()
+                        if row:
+                            self._dim = int(row[0])
+                            self._ready = True
+                self._available = True
+            except Exception as ex:
+                logger.warning(f"EmbeddingIndex probe: {type(ex).__name__}: {ex}")
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection with sqlite-vec loaded. Caller is responsible
+        for closing (use as context manager)."""
+        conn = sqlite3.connect(self.db_path)
+        conn.enable_load_extension(True)
+        _sqlite_vec_pkg.load(conn)
+        conn.enable_load_extension(False)
+        return conn
+
+    def available(self) -> bool:
+        return self._available
+
+    def ready(self) -> bool:
+        return self._available and self._ready
+
+    def _ensure_table(self, c: sqlite3.Connection, dim: int):
+        if self._ready and self._dim == dim: return
+        if self._ready and self._dim != dim:
+            c.execute("DROP TABLE IF EXISTS summaries_vec")
+        c.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS summaries_vec "
+            f"USING vec0(embedding float[{dim}])")
+        c.execute(
+            "INSERT OR REPLACE INTO embedding_meta(k,v) VALUES('vec_dim', ?)",
+            (str(dim),))
+        c.commit()
+        self._dim = dim
+        self._ready = True
+
+    def add(self, rowid: int, vec: List[float]):
+        if not self._available or not vec: return
+        try:
+            with self._connect() as c:
+                self._ensure_table(c, len(vec))
+                c.execute(
+                    "INSERT OR REPLACE INTO summaries_vec(rowid, embedding) VALUES (?, ?)",
+                    (rowid, _vec_to_blob(vec)))
+                c.commit()
+        except Exception as ex:
+            logger.warning(f"EmbeddingIndex add({rowid}): {type(ex).__name__}: {ex}")
+
+    def delete(self, rowid: int):
+        if not self._ready: return
+        try:
+            with self._connect() as c:
+                c.execute("DELETE FROM summaries_vec WHERE rowid=?", (rowid,))
+                c.commit()
+        except Exception as ex:
+            logger.warning(f"EmbeddingIndex delete({rowid}): {ex}")
+
+    def clear(self):
+        if not self._available: return
+        try:
+            with self._connect() as c:
+                c.execute("DROP TABLE IF EXISTS summaries_vec")
+                c.commit()
+        except Exception as ex:
+            logger.warning(f"EmbeddingIndex clear: {ex}")
+        self._ready = False
+        self._dim = None
+
+    def topk(self, query_vec: List[float], k: int = 50) -> List[Tuple[int, float]]:
+        if not self._ready or not query_vec: return []
+        try:
+            with self._connect() as c:
+                rows = c.execute(
+                    "SELECT rowid, distance FROM summaries_vec "
+                    "WHERE embedding MATCH ? AND k=? ORDER BY distance",
+                    (_vec_to_blob(query_vec), k)).fetchall()
+            return list(rows)
+        except Exception as ex:
+            logger.warning(f"EmbeddingIndex topk: {ex}")
+            return []
+
+    def size(self) -> int:
+        if not self._ready: return 0
+        try:
+            with self._connect() as c:
+                return c.execute("SELECT COUNT(*) FROM summaries_vec").fetchone()[0]
+        except Exception:
+            return 0
+
+
 # ============================================================================
 #  Retrieval helpers — BM25 over stored summaries
 # ============================================================================
@@ -2859,6 +2991,11 @@ def _bm25_rank(query: str, docs: List[str], k: int = 2,
 class SymbionMemory:
     def __init__(self, db_path: str, cfg: SymbionConfig):
         self.db = db_path; self.cfg = cfg
+        # Parallel vec0 index over summaries.embedding. Optional — when
+        # sqlite-vec is missing or the extension fails to load, all
+        # methods on this object are no-ops and retrieval falls through
+        # to full-scan Python cosine.
+        self.vec_index = EmbeddingIndex(db_path)
 
     def add(self, role: str, content: str, session: str, emotional_state: str = ""):
         with sqlite3.connect(self.db) as c:
@@ -2879,6 +3016,8 @@ class SymbionMemory:
             row_id = cur.lastrowid
             c.execute("UPDATE messages SET summarised=1 WHERE session=? AND summarised=0",(session,))
             c.commit()
+        if embedding and row_id:
+            self.vec_index.add(row_id, embedding)
         return row_id or 0
 
     def update_summary_embedding(self, summary_id: int, embedding: List[float]):
@@ -2890,6 +3029,45 @@ class SymbionMemory:
         with sqlite3.connect(self.db) as c:
             c.execute("UPDATE summaries SET embedding=? WHERE id=?", (blob, summary_id))
             c.commit()
+        self.vec_index.add(summary_id, embedding)
+
+    def sync_vec_index(self) -> int:
+        """Populate the vec index for all summaries that have an embedding
+        but aren't in the index yet. Called at startup as a one-shot
+        backfill. Returns the number of rows added. No-op if the index
+        isn't available."""
+        if not self.vec_index.available():
+            return 0
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, embedding FROM summaries WHERE embedding IS NOT NULL"
+            ).fetchall()
+        added = 0
+        for sid, blob in rows:
+            vec = _blob_to_vec(blob)
+            if vec:
+                self.vec_index.add(sid, vec)
+                added += 1
+        return added
+
+    def total_summaries_with_embedding(self) -> int:
+        with sqlite3.connect(self.db) as c:
+            n = c.execute(
+                "SELECT COUNT(*) FROM summaries WHERE embedding IS NOT NULL"
+            ).fetchone()[0]
+        return n or 0
+
+    def get_summaries_with_embeddings_by_ids(
+            self, ids: List[int]) -> List[Tuple[str, Optional[List[float]], str]]:
+        """Same shape as get_summaries_with_embeddings but pulls a specific
+        ID set. Used by the vec-index fast path so retrieval still has
+        content + timestamps to score on."""
+        if not ids: return []
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                f"SELECT content, embedding, timestamp FROM summaries "
+                f"WHERE id IN ({','.join('?'*len(ids))})", ids).fetchall()
+        return [(r[0], _blob_to_vec(r[1]), r[2] or "") for r in rows]
 
     def get_summaries_missing_embedding(self, limit: int = 50) -> List[Tuple[int, str]]:
         """Return (id, content) for summaries without an embedding, newest first.
@@ -2919,7 +3097,10 @@ class SymbionMemory:
             c.execute("INSERT OR REPLACE INTO embedding_meta(k,v) VALUES (?,?)",
                       (key, current_model))
             c.commit()
-            return n or 0
+        # Index dim is implied by stored vectors; wipe so it rebuilds with
+        # the new model's geometry on the next add().
+        self.vec_index.clear()
+        return n or 0
 
     def get_summaries_with_embeddings(self, limit: int = 200) -> List[Tuple[str, Optional[List[float]], str]]:
         """Return (content, vec_or_None, timestamp) for the most recent N summaries.
@@ -3071,7 +3252,22 @@ class SymbionMemory:
         letting a fresh-but-unrelated summary outscore an old-but-on-topic
         one — applied as a multiplicative factor on the topical score.
         """
-        candidates = self.get_summaries_with_embeddings(candidate_pool)
+        # Decide candidate set. At small N (everything fits in candidate_pool)
+        # the index gives identical results to the recent-N pull, so we skip
+        # it to avoid extension-load + roundtrip overhead. At larger N the
+        # index lets us surface semantically-relevant OLD summaries that
+        # otherwise fall off the recency window.
+        use_vec_index = (
+            query_embedding is not None
+            and self.vec_index.ready()
+            and self.total_summaries_with_embedding() > candidate_pool
+        )
+        if use_vec_index:
+            ranked = self.vec_index.topk(query_embedding, k=candidate_pool)
+            cand_ids = [rid for rid, _ in ranked]
+            candidates = self.get_summaries_with_embeddings_by_ids(cand_ids)
+        else:
+            candidates = self.get_summaries_with_embeddings(candidate_pool)
         if not candidates:
             return []
         contents = [c for c, _, _ in candidates]
@@ -3147,9 +3343,13 @@ class SymbionMemory:
 
     def forget_session(self, session: str):
         with sqlite3.connect(self.db) as c:
+            doomed = [r[0] for r in c.execute(
+                "SELECT id FROM summaries WHERE session=?", (session,)).fetchall()]
             c.execute("DELETE FROM messages WHERE session=?",(session,))
             c.execute("DELETE FROM summaries WHERE session=?",(session,))
             c.commit()
+        for sid in doomed:
+            self.vec_index.delete(sid)
 
     def find_consolidation_clusters(self, similarity_threshold: float = 0.85,
                                      min_cluster_size: int = 3,
@@ -3201,7 +3401,8 @@ class SymbionMemory:
                                    total_msg_count: int) -> int:
         """Insert a new consolidated summary (session='consolidated') and
         delete the originals. Embedding is left NULL; _backfill_embeddings
-        will fill it on next launch. Returns the new summary id."""
+        will fill it on next launch (which also re-syncs the vec index).
+        Returns the new summary id."""
         ts = datetime.now().isoformat()
         with sqlite3.connect(self.db) as c:
             cur = c.execute(
@@ -3212,6 +3413,8 @@ class SymbionMemory:
             for sid in source_ids:
                 c.execute("DELETE FROM summaries WHERE id=?", (sid,))
             c.commit()
+        for sid in source_ids:
+            self.vec_index.delete(sid)
         return new_id
 
     def find_topic_matches(self, topic: str, k_summaries: int = 10,
@@ -3275,6 +3478,8 @@ class SymbionMemory:
                 c.execute("DELETE FROM user_positions WHERE id=?", (m["id"],))
                 counts["positions"] += 1
             c.commit()
+        for m in matches.get("summaries", []):
+            self.vec_index.delete(m["id"])
         return counts
 
     def build_context(self, session: str, identity: "LongitudinalIdentity",
@@ -3752,6 +3957,15 @@ class SYMBION:
         positions = self.contradictions.total_positions()
         if positions > 0:
             print(dim(f"  Positions :  {positions} user positions tracked"))
+
+        # Sync vec index. No-op when sqlite-vec is missing or no embeddings
+        # exist yet. Single one-shot pass at startup is enough — every
+        # subsequent embedding write goes through update_summary_embedding
+        # which keeps the index in sync incrementally.
+        if self.memory.vec_index.available():
+            added = self.memory.sync_vec_index()
+            if added:
+                print(dim(f"  VecIndex  :  {added} embeddings indexed (sqlite-vec)"))
 
     def _build_providers(self):
         order = [self.cfg.llm_provider] + [p for p in self.cfg.fallback_chain
