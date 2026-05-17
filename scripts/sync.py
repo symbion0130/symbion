@@ -87,6 +87,23 @@ def _check_local_db_not_busy() -> None:
         )
 
 
+def _checkpoint_wal(db: Path) -> None:
+    """Fold WAL into main DB so copying just symbion.db captures all writes.
+
+    Symbion runs SQLite in WAL mode, so recent writes can sit in symbion.db-wal
+    instead of the main file. Without this, push would copy a stale .db and the
+    other machine would never see the tail of the last session.
+    """
+    if not db.exists():
+        return
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=rw", uri=True, timeout=5.0)
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+    except sqlite3.OperationalError as e:
+        _info(f"{db.name}: WAL checkpoint skipped ({e})")
+
+
 def _read_lock() -> dict | None:
     p = SYNC_DIR / LOCK_NAME
     if not p.exists():
@@ -232,6 +249,8 @@ def cmd_push(args) -> int:
         local = REPO / name
         if not local.exists():
             continue
+        if name == "symbion.db":
+            _checkpoint_wal(local)
         remote = SYNC_DIR / name
         try:
             _atomic_copy(local, remote)
