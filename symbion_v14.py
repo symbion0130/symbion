@@ -1,6 +1,6 @@
 # Symbion v13
 
-import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, urllib.request
+import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, uuid
 import logging, argparse
 from pathlib import Path
 from datetime import datetime
@@ -1913,37 +1913,40 @@ class SymbionTools:
         # Per-backend failure reasons, surfaced in the final error so the
         # responder can tell the user the truth rather than "no results."
         reasons: List[str] = []
+        if not _HTTPX:
+            return ("Search unavailable for: " + query +
+                    " | reasons: httpx not installed | suggest: pip install httpx")
 
         if brave_key and not cls._brave_auth_failed:
             try:
-                params = urllib.parse.urlencode({"q":query,"count":5})
-                req = urllib.request.Request(
-                    f"https://api.search.brave.com/res/v1/web/search?{params}",
-                    headers={"Accept":"application/json","X-Subscription-Token":brave_key})
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = json.loads(r.read())
-                parts = [f"{r.get('title','')}: {r.get('description','')} ({r.get('url','')})"
-                         for r in data.get("web",{}).get("results",[])[:4] if r.get("description")]
-                if parts: return "\n".join(parts)[:max_chars]
-                reasons.append("Brave returned no usable results")
-            except urllib.error.HTTPError as ex:
-                # Latch auth failures so the rest of the process skips Brave
-                # instead of paying ~2s per call to learn the same thing.
-                # Brave returns 422 (not 401) for an invalid token, with the
-                # specific error code in the JSON body — so we have to read
-                # enough of the body to find it.
-                body = ""
-                try: body = ex.read().decode("utf-8","replace")[:600]
-                except Exception: pass
-                auth_marker = ("SUBSCRIPTION_TOKEN_INVALID" in body
-                               or '"component":"authentication"' in body)
-                if ex.code in (401, 403) or auth_marker:
-                    cls._brave_auth_failed = True
-                    reasons.append("Brave key rejected (regenerate at brave.com/search/api)")
-                    logger.warning(f"Brave auth failed; disabling for this process.")
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        params={"q": query, "count": 5},
+                        headers={"Accept": "application/json",
+                                 "X-Subscription-Token": brave_key})
+                if r.status_code == 200:
+                    data = r.json()
+                    parts = [f"{rr.get('title','')}: {rr.get('description','')} ({rr.get('url','')})"
+                             for rr in data.get("web",{}).get("results",[])[:4] if rr.get("description")]
+                    if parts: return "\n".join(parts)[:max_chars]
+                    reasons.append("Brave returned no usable results")
                 else:
-                    reasons.append(f"Brave HTTP {ex.code}")
-                    logger.warning(f"Brave: HTTP {ex.code}: {body[:300]}")
+                    # Latch auth failures so the rest of the process skips Brave
+                    # instead of paying ~2s per call to learn the same thing.
+                    # Brave returns 422 (not 401) for an invalid token, with the
+                    # specific error code in the JSON body — so we have to read
+                    # enough of the body to find it.
+                    body = r.text[:600] if r.text else ""
+                    auth_marker = ("SUBSCRIPTION_TOKEN_INVALID" in body
+                                   or '"component":"authentication"' in body)
+                    if r.status_code in (401, 403) or auth_marker:
+                        cls._brave_auth_failed = True
+                        reasons.append("Brave key rejected (regenerate at brave.com/search/api)")
+                        logger.warning(f"Brave auth failed; disabling for this process.")
+                    else:
+                        reasons.append(f"Brave HTTP {r.status_code}")
+                        logger.warning(f"Brave: HTTP {r.status_code}: {body[:300]}")
             except Exception as ex:
                 reasons.append(f"Brave error: {type(ex).__name__}")
                 logger.warning(f"Brave: {ex}")
@@ -1951,12 +1954,12 @@ class SymbionTools:
             reasons.append("Brave skipped (key previously rejected)")
 
         try:
-            encoded = urllib.parse.quote_plus(query)
-            req = urllib.request.Request(
-                f"https://html.duckduckgo.com/html/?q={encoded}&df=w",
-                headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                html = r.read().decode("utf-8","replace")
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query, "df": "w"},
+                    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            html = r.text
             # DDG serves an anomaly/captcha page to scripted clients. The page
             # has no real result classes, just `anomaly-modal__*`. Without this
             # check the regex returns [] and the function lies "no results."
@@ -1980,12 +1983,13 @@ class SymbionTools:
             logger.warning(f"DDG: {ex}")
 
         try:
-            encoded = urllib.parse.quote(query)
-            req = urllib.request.Request(
-                f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
-                headers={"User-Agent":"Symbion/14.0"})
-            with urllib.request.urlopen(req, timeout=6) as r:
-                data = json.loads(r.read())
+            async with httpx.AsyncClient(timeout=6) as c:
+                r = await c.get(
+                    "https://api.duckduckgo.com/",
+                    params={"q": query, "format": "json",
+                            "no_html": "1", "skip_disambig": "1"},
+                    headers={"User-Agent":"Symbion/14.0"})
+            data = r.json()
             parts = ([data["AbstractText"]] if data.get("AbstractText") else []) + \
                     [t["Text"] for t in data.get("RelatedTopics",[])[:3]
                      if isinstance(t,dict) and t.get("Text")]
@@ -2043,15 +2047,15 @@ class SymbionTools:
         renders JS server-side and returns clean markdown. No API key
         needed for low-volume use. Returns None on any failure so caller
         can fall back to a clear error message rather than crashing."""
+        if not _HTTPX:
+            return None
         try:
-            jina_url = "https://r.jina.ai/" + url
-            req = urllib.request.Request(jina_url,
-                headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                         "Accept": "text/plain"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                raw = r.read()
-                encoding = r.headers.get_content_charset() or "utf-8"
-                text = raw.decode(encoding, errors="replace")
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+                r = await c.get(
+                    "https://r.jina.ai/" + url,
+                    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                             "Accept": "text/plain"})
+            text = r.text
             text = re.sub(r'\s+', ' ', text).strip()
             if len(text) < SymbionTools._MIN_USEFUL_CHARS:
                 return None
@@ -2084,13 +2088,14 @@ class SymbionTools:
                     f"r.jina.ai render fallback also failed. Report this to the "
                     f"user verbatim — do not invent the page contents.")
 
+        if not _HTTPX:
+            return f"Error fetching {url}: httpx not installed"
         try:
-            req = urllib.request.Request(url,
-                headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-            with urllib.request.urlopen(req, timeout=12) as r:
-                raw = r.read()
-                encoding = r.headers.get_content_charset() or "utf-8"
-                html = raw.decode(encoding, errors="replace")
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+                r = await c.get(
+                    url,
+                    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            html = r.text
             html = re.sub(r'<script[^>]*>.*?</script>','',html,flags=re.DOTALL|re.IGNORECASE)
             html = re.sub(r'<style[^>]*>.*?</style>','',html,flags=re.DOTALL|re.IGNORECASE)
             text = re.sub(r'<[^>]+>','',html)
@@ -2266,10 +2271,12 @@ class EventLogger:
                  revision_cause: Optional[str], stale_refresh: bool,
                  latency_ms: Dict, provider: str, model: str,
                  agent_tool_calls: Optional[List[Dict]] = None,
-                 agent_iterations: int = 0):
+                 agent_iterations: int = 0,
+                 request_id: Optional[str] = None):
         entry = {
             "ts": datetime.now().isoformat() + "Z",
             "event": "turn",
+            "request_id": request_id,
             "session": session,
             "interaction_id": interaction_id,
             "query_preview": query[:120],
@@ -2307,10 +2314,12 @@ class EventLogger:
             logger.error(f"EventLogger: {ex}")
 
     def log_sycophancy(self, session: str, interaction_id: int,
-                       score: float, signals: List[str], reasoning: str):
+                       score: float, signals: List[str], reasoning: str,
+                       request_id: Optional[str] = None):
         entry = {
             "ts": datetime.now().isoformat() + "Z",
             "event": "sycophancy",
+            "request_id": request_id,
             "session": session,
             "interaction_id": interaction_id,
             "score": round(float(score), 3),
@@ -3956,7 +3965,8 @@ class SYMBION:
                 context=response[:120], strength=min(1.0, benefit))
 
     async def _check_sycophancy(self, query: str, response: str,
-                                 session: str, interaction_id: int):
+                                 session: str, interaction_id: int,
+                                 request_id: Optional[str] = None):
         """Telemetry-only sycophancy probe. Runs after the user has the
         response. Updates HealthMetrics and emits a separate JSONL event.
         Never affects refusal or revision — invariant #4 (only the judge
@@ -3989,9 +3999,10 @@ class SYMBION:
                 self.health.sycophancy_rate * 0.95 + score * 0.05)
             self.events.log_sycophancy(
                 session=session, interaction_id=interaction_id,
-                score=score, signals=signals[:8], reasoning=reasoning)
+                score=score, signals=signals[:8], reasoning=reasoning,
+                request_id=request_id)
         except Exception as ex:
-            logger.error(f"Sycophancy probe: {ex}")
+            logger.error(f"[req={request_id}] Sycophancy probe: {ex}")
 
     # ==========================================================
     #  MAIN PIPELINE -- v12
@@ -4000,6 +4011,12 @@ class SYMBION:
     async def respond(self, text: str, session: str,
                       token_callback=None) -> Tuple[str, Dict, int]:
         _t0 = time.monotonic()
+        # Per-turn correlation id. Short enough for log lines, unique enough
+        # to tie a JSONL event back to the logger.error/warning calls fired
+        # during the same turn. The DB row's interaction_id (`iid`) is only
+        # assigned at the end of respond(), so it can't correlate mid-turn
+        # failures — request_id fills that gap.
+        request_id = uuid.uuid4().hex[:12]
         # Reset per-turn telemetry caches so the event log doesn't carry
         # forward stale values from a prior turn that didn't actually run
         # the corresponding probe (e.g. self-eval skipped on a short reply).
@@ -4059,7 +4076,7 @@ class SYMBION:
                 )
                 evaluation, emotional_state = pre_pair
         except Exception as ex:
-            logger.error(f"Pre-gen gather: {ex}")
+            logger.error(f"[req={request_id}] Pre-gen gather: {ex}")
             evaluation = {"should_assist": True, "human_benefit_score": 0.5,
                           "confidence": 0.5, "flags": [], "reasoning": "", "over_cautious": False,
                           "evaluator_degraded": True}
@@ -4089,7 +4106,7 @@ class SYMBION:
                 contradictions=self.contradictions, query=text,
                 query_embedding=query_embedding)
         except Exception as ex:
-            logger.error(f"build_context: {ex}")
+            logger.error(f"[req={request_id}] build_context: {ex}")
             history, preamble = [], ""
         _, mood_add = self.health.mood()
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
@@ -4199,7 +4216,7 @@ class SYMBION:
                             responder=resp_client,
                             responder_model=resp_model)
                     except Exception as ex:
-                        logger.error(f"Agent tool dispatch '{name}': {ex}", exc_info=True)
+                        logger.error(f"[req={request_id}] Agent tool dispatch '{name}': {ex}", exc_info=True)
                         return f"Tool dispatch error: {type(ex).__name__}: {ex}"
                 try:
                     async for ev in resp_client.stream_with_tools(
@@ -4234,7 +4251,7 @@ class SYMBION:
                                 f"{len(agent_tool_calls)} tool calls, "
                                 f"stop={ev.get('stop_reason')}")
                 except Exception as ex:
-                    logger.error(f"Agent loop: {ex}", exc_info=True)
+                    logger.error(f"[req={request_id}] Agent loop: {ex}", exc_info=True)
                     if not draft:
                         draft = f"(Agent loop error: {ex})"
                         task_failed = True
@@ -4257,7 +4274,7 @@ class SYMBION:
                         draft += tok
                         if token_callback: await token_callback(tok)
                 except Exception as ex:
-                    logger.error(f"Stream: {ex}")
+                    logger.error(f"[req={request_id}] Stream: {ex}")
                     draft = f"(Generation error: {ex})"
                     task_failed = True
                     if token_callback: await token_callback(draft)
@@ -4293,7 +4310,7 @@ class SYMBION:
                                     if token_callback: await token_callback("\n\n[SYMBION_REVISE]")
                                     stale_signalled = True
                                 if token_callback: await token_callback(tok)
-                        except Exception as ex: logger.error(f"Stale revision: {ex}")
+                        except Exception as ex: logger.error(f"[req={request_id}] Stale revision: {ex}")
                         if stale_draft:
                             draft = stale_draft; revised = True; quality_score = 0.9; stale_refresh = True
 
@@ -4321,7 +4338,7 @@ class SYMBION:
                                 if token_callback: await token_callback("\n\n[SYMBION_REVISE]")
                                 signalled = True
                             if token_callback: await token_callback(tok)
-                    except Exception as ex: logger.error(f"Revision: {ex}")
+                    except Exception as ex: logger.error(f"[req={request_id}] Revision: {ex}")
                     if rev_draft:
                         draft = rev_draft; revised = True
                     quality_score = 0.9
@@ -4346,11 +4363,11 @@ class SYMBION:
         try:
             self.memory.add("user", text, session, emotional_state.get("state",""))
         except Exception as ex:
-            logger.error(f"memory.add(user): {ex}")
+            logger.error(f"[req={request_id}] memory.add(user): {ex}")
         try:
             self.memory.add("assistant", full_response, session)
         except Exception as ex:
-            logger.error(f"memory.add(assistant): {ex}")
+            logger.error(f"[req={request_id}] memory.add(assistant): {ex}")
         self.count += 1
 
         # 6. Background (fire-and-forget)
@@ -4380,14 +4397,14 @@ class SYMBION:
                 had_reasoning=had_reasoning,
                 knowledge_gaps=json.dumps(self.gaps.get_open(2)))
         except Exception as ex:
-            logger.error(f"learner.record: {ex}")
+            logger.error(f"[req={request_id}] learner.record: {ex}")
             iid = -1
 
         # Sycophancy probe — separate fire-and-forget so it runs after iid
         # is known (allows correlating sycophancy events to turns).
         if not refusal:
             asyncio.create_task(self._check_sycophancy(
-                text, full_response, session, iid))
+                text, full_response, session, iid, request_id=request_id))
 
         if contradiction_notice:
             try:
@@ -4396,7 +4413,7 @@ class SYMBION:
                     f"Noticed user contradicted themselves on: {text[:60]}",
                     strength=0.5)
             except Exception as ex:
-                logger.error(f"identity.record_moment: {ex}")
+                logger.error(f"[req={request_id}] identity.record_moment: {ex}")
 
         self._write_log(text, full_response, evaluation, revised, quality_score,
                         emotional_state, reasoning)
@@ -4427,6 +4444,7 @@ class SYMBION:
             model=resp_model,
             agent_tool_calls=agent_tool_calls if agent_tool_calls else None,
             agent_iterations=agent_iterations,
+            request_id=request_id,
         )
 
         return full_response, evaluation, iid
