@@ -162,9 +162,27 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
     }
 
 
-async def run_eval(cfg: SymbionConfig, golden: list) -> list:
+async def _run_one(symbion, entry: dict, run_id: str) -> dict:
+    """Run a single eval entry. Multi-turn entries run all turns in the
+    same session and score against the final response only."""
+    session = f"eval_{run_id}_{entry['id']}"
+    turns = entry.get("turns")
+    queries = turns if isinstance(turns, list) and turns else [entry["query"]]
+    try:
+        response, evaluation = "", {}
+        for q in queries:
+            response, evaluation, iid = await symbion.respond(q, session)
+        return score_response(entry, response, evaluation)
+    except Exception as ex:
+        return {
+            "id": entry["id"], "passed": False,
+            "reason": f"Exception: {ex}", "expected": entry["expected_behavior"],
+            "assisted": None, "response_preview": "", "response_full": "",
+        }
+
+
+async def run_eval(cfg: SymbionConfig, golden: list, concurrency: int = 1) -> list:
     symbion = SYMBION(cfg)
-    results = []
 
     # Per-run session prefix so a re-run doesn't pick up the prior run's
     # memory and respond "same answer as before." Symbion's SQLite store
@@ -172,29 +190,24 @@ async def run_eval(cfg: SymbionConfig, golden: list) -> list:
     # test memory continuity instead of persona stability under fresh state.
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    for i, entry in enumerate(golden):
-        session = f"eval_{run_id}_{entry['id']}"
-        # Multi-turn entries use `turns` (list); single-shot uses `query` (str).
-        # Multi-turn runs all turns in the same session; scoring is against the
-        # FINAL response only. The warmup turns shape conversational state.
-        turns = entry.get("turns")
-        queries = turns if isinstance(turns, list) and turns else [entry["query"]]
-        try:
-            response, evaluation = "", {}
-            for q in queries:
-                response, evaluation, iid = await symbion.respond(q, session)
-            result = score_response(entry, response, evaluation)
-        except Exception as ex:
-            result = {
-                "id": entry["id"], "passed": False,
-                "reason": f"Exception: {ex}", "expected": entry["expected_behavior"],
-                "assisted": None, "response_preview": "",
-            }
-        results.append(result)
-        status = "PASS" if result["passed"] else "FAIL"
-        turn_tag = f" [{len(queries)}t]" if len(queries) > 1 else ""
-        print(f"  [{i+1:>2}/{len(golden)}] {status:<4}  {entry['id']:<20}{turn_tag}  {result.get('reason','')[:50]}")
+    results: list = [None] * len(golden)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    completed = [0]
 
+    async def _bounded(idx: int, entry: dict):
+        async with semaphore:
+            res = await _run_one(symbion, entry, run_id)
+        results[idx] = res
+        completed[0] += 1
+        n_turns = len(entry.get("turns") or [entry["query"]])
+        turn_tag = f" [{n_turns}t]" if n_turns > 1 else ""
+        status = "PASS" if res["passed"] else "FAIL"
+        # Print in completion order (not source order) with both indices so
+        # progress is monotone regardless of which case lands first.
+        print(f"  [{completed[0]:>2}/{len(golden)} src#{idx+1:>2}] {status:<4}  "
+              f"{entry['id']:<20}{turn_tag}  {res.get('reason','')[:50]}")
+
+    await asyncio.gather(*[_bounded(i, e) for i, e in enumerate(golden)])
     return results
 
 
@@ -239,6 +252,11 @@ def main():
     parser = argparse.ArgumentParser(description="Symbion eval harness")
     parser.add_argument("--provider", default="ollama")
     parser.add_argument("--golden", default=None)
+    parser.add_argument("--concurrency", type=int, default=4,
+                        help="Max concurrent eval cases. Sequential when 1. "
+                             "Anthropic typically tolerates 4-8; higher risks "
+                             "more 529 (Overloaded) responses that the client "
+                             "still recovers from but adds tail latency.")
     args = parser.parse_args()
 
     cfg = SymbionConfig()
@@ -247,9 +265,10 @@ def main():
     cfg.self_eval_enabled = False
 
     golden = load_golden(args.golden)
-    print(f"\n  Running {len(golden)} eval cases with provider={args.provider}\n")
+    print(f"\n  Running {len(golden)} eval cases with provider={args.provider}  "
+          f"(concurrency={args.concurrency})\n")
 
-    results = asyncio.run(run_eval(cfg, golden))
+    results = asyncio.run(run_eval(cfg, golden, concurrency=args.concurrency))
     summary = print_summary(results)
 
     # Save results
