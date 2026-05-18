@@ -36,8 +36,21 @@ try:
 except ImportError: _FASTAPI = False
 
 
+# Anchor every relative path Symbion touches to the repo, not the launch
+# CWD. Without this, `python -m symbion` from another directory loads
+# repo-side symbion.json/DB/logs but misses repo-side .env, or `--setup`
+# writes API keys into the caller's directory. Defined here (not below
+# the config section) so _load_dotenv_safe can use it.
+_REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _anchor(path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else _REPO_ROOT / p
+
+
 def _load_dotenv_safe():
-    env_path = Path(".env")
+    env_path = _anchor(".env")
     if not env_path.exists(): return
     try:
         raw = env_path.read_bytes()
@@ -110,14 +123,6 @@ class _ResilientFileHandler(logging.FileHandler):
             super().flush()
         except OSError:
             pass
-
-
-_REPO_ROOT = Path(__file__).resolve().parent
-
-
-def _anchor(path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else _REPO_ROOT / p
 
 
 try:    _TW = min(os.get_terminal_size().columns, 100)
@@ -314,7 +319,7 @@ def run_setup():
     if brave:
         lines.append(f"BRAVE_API_KEY={brave}")
 
-    Path(".env").write_bytes("\n".join(lines).encode('utf-8'))
+    _anchor(".env").write_bytes("\n".join(lines).encode('utf-8'))
     print(green("\n  OK .env written (UTF-8, no BOM)"))
 
     cfg = SymbionConfig.load()
@@ -4046,7 +4051,7 @@ class SYMBION:
         self.learner        = SymbionLearner(_db)
         self.health          = HealthMetrics()
         self.heuristic      = OfflineJudgeStub()
-        self.tools          = SymbionTools(".")
+        self.tools          = SymbionTools(str(_REPO_ROOT))
         self.events         = EventLogger()
         self.embeddings     = EmbeddingClient(self.cfg)
 
