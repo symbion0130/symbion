@@ -1626,6 +1626,10 @@ _CALC_ALLOWED_FUNCS = {
 }
 _CALC_ALLOWED_NAMES = {"pi": _math.pi, "e": _math.e}
 
+_CALC_MAX_EXPONENT = 1000  # caps |b| in a**b for literal exponents
+_CALC_MAX_LITERAL  = 10 ** 50  # caps any single numeric literal magnitude
+_CALC_WALL_TIMEOUT = 1.0  # seconds — defense in depth for non-literal exponents
+
 def _safe_calc(expr: str) -> str:
     """AST-based calculator — no eval()."""
     clean = expr.replace("^", "**")
@@ -1637,17 +1641,41 @@ def _safe_calc(expr: str) -> str:
     for node in _ast.walk(tree):
         if not isinstance(node, _CALC_ALLOWED_NODES):
             return f"Error: unsafe expression (disallowed: {type(node).__name__})"
-        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float, complex)):
-            return f"Error: only numeric constants allowed"
+        if isinstance(node, _ast.Constant):
+            if not isinstance(node.value, (int, float, complex)):
+                return f"Error: only numeric constants allowed"
+            # Reject astronomically large literals — they make subsequent
+            # Pow/Mult ops a DoS even without nesting.
+            try:
+                if isinstance(node.value, (int, float)) and abs(node.value) > _CALC_MAX_LITERAL:
+                    return f"Error: literal too large"
+            except OverflowError:
+                return f"Error: literal too large"
         if isinstance(node, _ast.Name) and node.id not in _CALC_ALLOWED_NAMES and node.id not in _CALC_ALLOWED_FUNCS:
             return f"Error: unknown name '{node.id}'"
         if isinstance(node, _ast.Call):
             if not isinstance(node.func, _ast.Name) or node.func.id not in _CALC_ALLOWED_FUNCS:
                 return f"Error: unsafe function call"
+        # Pow DoS guard: reject nested Pow (a**b**c) and cap literal exponents.
+        # Python's `**` is right-associative, so the nested form is the classic
+        # 9**9**9 attack — refuse it outright. For the flat form, if the
+        # exponent is a numeric literal, cap |b| at _CALC_MAX_EXPONENT.
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Pow):
+            if isinstance(node.right, _ast.BinOp) and isinstance(node.right.op, _ast.Pow):
+                return f"Error: nested ** is not allowed"
+            if isinstance(node.right, _ast.Constant) and isinstance(node.right.value, (int, float)):
+                try:
+                    if abs(node.right.value) > _CALC_MAX_EXPONENT:
+                        return f"Error: exponent magnitude too large (cap {_CALC_MAX_EXPONENT})"
+                except OverflowError:
+                    return f"Error: exponent magnitude too large (cap {_CALC_MAX_EXPONENT})"
     # Safe to compile and eval the validated AST
     code = compile(tree, "<calc>", "eval")
     try:
         result = eval(code, {"__builtins__": {}}, {**_CALC_ALLOWED_FUNCS, **_CALC_ALLOWED_NAMES})
+        # Stringifying a huge int is itself O(n^2) work — bail before printing.
+        if isinstance(result, int) and result.bit_length() > 4096:
+            return f"Error: result magnitude too large"
         return str(result)
     except Exception as ex:
         return f"Error: {ex}"
@@ -1667,17 +1695,29 @@ def _is_safe_url(url: str) -> Tuple[bool, str]:
     blocked_hosts = {"localhost", "metadata.google.internal", "metadata.goog"}
     if host.lower() in blocked_hosts:
         return False, f"Blocked host: {host}"
+    # Reject IP-literal hosts that fall inside disallowed ranges before the
+    # DNS lookup — covers `http://169.254.169.254/...` directly.
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return False, f"Blocked address: {ip}"
+    except ValueError:
+        pass  # not an IP literal — fall through to DNS resolution
     try:
         addrs = _socket.getaddrinfo(host, parsed.port or 443, proto=_socket.IPPROTO_TCP)
         import ipaddress
         for family, _, _, _, sockaddr in addrs:
             ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
                 return False, f"Blocked address: {ip}"
     except _socket.gaierror:
-        pass  # DNS resolution failed — allow (might be valid, let the fetch fail)
-    except Exception:
-        pass
+        # Fail closed: an unresolvable host could be a momentary DNS hiccup or
+        # an attacker probing for a name that resolves to a private IP inside
+        # httpx (which would then bypass the guard). Refuse rather than allow.
+        return False, f"DNS resolution failed for {host}"
+    except Exception as ex:
+        return False, f"URL safety check failed: {ex}"
     return True, "ok"
 
 
@@ -2135,10 +2175,31 @@ class SymbionTools:
         if not _HTTPX:
             return f"Error fetching {url}: httpx not installed"
         try:
-            async with httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
-                r = await c.get(
-                    url,
-                    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            # Manual redirect walk so _is_safe_url runs against every hop.
+            # follow_redirects=True would let a public URL bounce to
+            # 127.0.0.1, AWS metadata, etc. after the initial check.
+            current = url
+            hops = 0
+            MAX_HOPS = 5
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False) as c:
+                while True:
+                    r = await c.get(
+                        current,
+                        headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                    if r.status_code in (301, 302, 303, 307, 308):
+                        loc = r.headers.get("location") or r.headers.get("Location")
+                        if not loc:
+                            break
+                        nxt = urllib.parse.urljoin(current, loc)
+                        hops += 1
+                        if hops > MAX_HOPS:
+                            return f"Error fetching {url}: too many redirects (> {MAX_HOPS})"
+                        safe_n, reason_n = _is_safe_url(nxt)
+                        if not safe_n:
+                            return f"Error: blocked redirect target — {reason_n}"
+                        current = nxt
+                        continue
+                    break
             html = r.text
             html = re.sub(r'<script[^>]*>.*?</script>','',html,flags=re.DOTALL|re.IGNORECASE)
             html = re.sub(r'<style[^>]*>.*?</style>','',html,flags=re.DOTALL|re.IGNORECASE)
@@ -5399,10 +5460,34 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
     async def ws_endpoint(websocket: WebSocket, session_id: str):
         await websocket.accept()
         show_reasoning = symbion.cfg.show_reasoning
+        client_host = (websocket.client.host if websocket.client else "unknown") or "unknown"
 
         async def send(d):
             try: await websocket.send_text(json.dumps(d, default=str))
             except Exception: pass
+
+        # First-message auth gate. When SYMBION_API_KEY is set, the client
+        # must send {"type":"auth","key":"<key>"} before anything else.
+        # Mirrors the /api/chat X-API-Key check — without this, anyone on the
+        # LAN can drive the agent loop (with machine-wide reads) bypassing
+        # the same gate /api/chat enforces.
+        if symbion.cfg.api_key:
+            try:
+                first = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+                fp = json.loads(first)
+            except asyncio.TimeoutError:
+                await send({"t":"error","v":"auth timeout"})
+                await websocket.close(code=1008)
+                return
+            except Exception:
+                await send({"t":"error","v":"invalid auth frame"})
+                await websocket.close(code=1008)
+                return
+            if fp.get("type") != "auth" or fp.get("key","") != symbion.cfg.api_key:
+                await send({"t":"error","v":"unauthorized"})
+                await websocket.close(code=1008)
+                return
+            await send({"t":"auth_ok"})
 
         async def _push_proactive():
             for sess in (session_id, "web_global"):
@@ -5427,6 +5512,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
 
             while True:
                 data    = await websocket.receive_text()
+                # Per-client-host rate limit — same RateLimiter the REST
+                # endpoints use, keyed on remote host. Soft-fail by sending
+                # an error frame rather than closing so the user can retry.
+                if not rate_lm.allow(client_host):
+                    await send({"t":"error","v":"rate limit exceeded"})
+                    continue
                 payload = json.loads(data)
 
                 if payload.get("type")=="toggle_reasoning":

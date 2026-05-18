@@ -60,6 +60,45 @@ class TestCalculator:
         result = _safe_calc("[x for x in range(10)]")
         assert "Error" in result
 
+    # --- DoS guards on the Pow path ---
+
+    def test_nested_pow_rejected(self):
+        # The classic 9**9**9 attack: Python evaluates the right side first,
+        # so this is a tower, not 729**9. Must be refused outright.
+        result = _safe_calc("9**9**9")
+        assert "Error" in result
+        assert "nested" in result.lower()
+
+    def test_nested_pow_caret_form(self):
+        result = _safe_calc("9^9^9")
+        assert "Error" in result
+
+    def test_exponent_cap(self):
+        result = _safe_calc("2**5000")
+        assert "Error" in result
+        assert "exponent" in result.lower()
+
+    def test_exponent_within_cap_ok(self):
+        # Just below the 1000 cap should still work.
+        result = _safe_calc("2**100")
+        assert result == str(2**100)
+
+    def test_literal_magnitude_cap(self):
+        # A literal larger than 10**50 should be refused before any op runs.
+        big = "1" + "0" * 60  # 10**60
+        result = _safe_calc(big)
+        assert "Error" in result
+        assert "literal" in result.lower()
+
+    def test_result_magnitude_cap(self):
+        # Within input limits but result bit_length exceeds 4096 → refused.
+        # 2**4097 has bit_length 4098, but the exponent cap (1000) prevents it.
+        # Use a flat product instead: 10**300 * 10**300 has ~2000 bits — fine.
+        # Use 999**999 (under 1000 cap) which has ~9970 bits.
+        result = _safe_calc("999**999")
+        assert "Error" in result
+        assert "result" in result.lower()
+
 
 # === 4.2: Workspace sandbox ===
 
@@ -127,6 +166,32 @@ class TestSSRF:
     def test_ftp_blocked(self):
         ok, _ = _is_safe_url("ftp://evil.com/file")
         assert not ok
+
+    # --- regression: IP-literal AWS metadata host ---
+    def test_aws_metadata_ip_literal_blocked(self):
+        # Pre-fix, a literal IP would only be caught by getaddrinfo's
+        # ip.is_link_local check. Now it's caught directly as an IP literal
+        # before any DNS lookup.
+        ok, reason = _is_safe_url("http://169.254.169.254/latest/meta-data/")
+        assert not ok
+        assert "169.254" in reason
+
+    def test_loopback_ip_literal_blocked(self):
+        ok, _ = _is_safe_url("http://127.0.0.1:8080/admin")
+        assert not ok
+
+    def test_private_ip_literal_blocked(self):
+        ok, _ = _is_safe_url("http://10.0.0.1/")
+        assert not ok
+
+    # --- regression: DNS-fail now rejects rather than allows ---
+    def test_dns_failure_rejected(self):
+        # .invalid is RFC 6761 reserved and guaranteed never to resolve.
+        # Pre-fix this returned (True, "ok") because gaierror was swallowed;
+        # post-fix it must fail closed.
+        ok, reason = _is_safe_url("http://nonexistent-host.invalid/")
+        assert not ok
+        assert "dns" in reason.lower() or "resolution" in reason.lower()
 
 
 # === 4.4: _parse_json ===
