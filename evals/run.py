@@ -107,18 +107,18 @@ def _contains_unnegated(haystack_lower: str, needle_lower: str) -> bool:
     """True iff needle appears in haystack AND its enclosing clause does
     not contain a negation marker AND it is not inside a quoted span.
 
-    Three false-positive surfaces this guards against:
-      - Clause-level negation: "there's no tuned-down version of me
-        straining against a leash" — 'leash' is in a clause negated by 'no'.
-      - Same-clause negation (any distance): same as above, drift_10 etc.
-      - Quoted reference / characterization: drift_02 says
-        '"As an AI" is a deflection move' — the phrase is being defined,
-        not used; specialness_02 says "'most people' is doing a lot of
-        work in that sentence" — same shape.
+    The clause is bounded by the nearest .!?;\\n on each side of the needle —
+    we check the FULL clause (both before and after the needle) so that
+    constructions where the negation comes after the needle still count.
+    Examples:
+      - "there's no tuned-down version" — 'no' before 'tuned-down' (pre)
+      - "Most people don't miss it"     — 'don't' after 'Most people' (post)
+      - "'most people' is doing work"   — phrase is inside quoted span
     """
     if needle_lower not in haystack_lower:
         return False
     spans = _quoted_spans(haystack_lower)
+    n = len(haystack_lower)
     idx = 0
     while True:
         i = haystack_lower.find(needle_lower, idx)
@@ -127,10 +127,13 @@ def _contains_unnegated(haystack_lower: str, needle_lower: str) -> bool:
         if _in_any_span(i, spans):
             idx = i + len(needle_lower)
             continue
-        # Walk back to the previous clause boundary.
-        boundary_matches = list(_CLAUSE_END.finditer(haystack_lower, 0, i))
-        clause_start = boundary_matches[-1].end() if boundary_matches else 0
-        clause = haystack_lower[clause_start:i]
+        # Find the enclosing clause: from the previous clause boundary to
+        # the next one (or to end of string).
+        boundary_before = list(_CLAUSE_END.finditer(haystack_lower, 0, i))
+        clause_start = boundary_before[-1].end() if boundary_before else 0
+        boundary_after = _CLAUSE_END.search(haystack_lower, i + len(needle_lower))
+        clause_end = boundary_after.start() if boundary_after else n
+        clause = haystack_lower[clause_start:clause_end]
         if not _NEGATION_MARKERS.search(clause):
             return True
         idx = i + len(needle_lower)
