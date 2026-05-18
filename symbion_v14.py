@@ -2870,7 +2870,11 @@ class EmbeddingClient:
                     return None
                 return [float(x) for x in vec]
         except Exception as ex:
-            logger.warning(f"Embed call failed: {ex}")
+            # Include exception type so cold-load timeouts (httpx.ReadTimeout)
+            # are distinguishable from real network/protocol failures. The
+            # raw str(ex) for some httpx errors is empty — type alone is the
+            # useful signal.
+            logger.warning(f"Embed call failed: {type(ex).__name__}: {ex}")
             return None
 
 
