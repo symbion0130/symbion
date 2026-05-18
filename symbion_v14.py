@@ -1626,26 +1626,89 @@ _CALC_ALLOWED_FUNCS = {
 }
 _CALC_ALLOWED_NAMES = {"pi": _math.pi, "e": _math.e}
 
-_CALC_MAX_EXPONENT = 1000  # caps |b| in a**b for literal exponents
+_CALC_MAX_EXPONENT = 1000      # caps |b| in a**b (literal *or* computed)
 _CALC_MAX_LITERAL  = 10 ** 50  # caps any single numeric literal magnitude
-_CALC_WALL_TIMEOUT = 1.0  # seconds — defense in depth for non-literal exponents
+_CALC_MAX_BITS     = 4096      # caps every intermediate int's bit_length
+
+
+class _CalcError(Exception):
+    """Raised inside _eval_calc_node when a DoS guard trips."""
+
+
+def _eval_calc_node(node):
+    """Recursively evaluate a validated calc AST, capping size at every step.
+
+    Manual evaluation (no eval()/compile()) lets us refuse intermediate
+    blow-ups like (999**999)**999 — which sail past static literal-exponent
+    checks because the outer exponent is small and the inner is computed.
+    """
+    if isinstance(node, _ast.Constant):
+        return node.value
+    if isinstance(node, _ast.Name):
+        if node.id in _CALC_ALLOWED_NAMES:
+            return _CALC_ALLOWED_NAMES[node.id]
+        raise _CalcError(f"unknown name '{node.id}'")
+    if isinstance(node, _ast.UnaryOp):
+        v = _eval_calc_node(node.operand)
+        if isinstance(node.op, _ast.USub): return -v
+        if isinstance(node.op, _ast.UAdd): return +v
+        raise _CalcError(f"unsupported unary op {type(node.op).__name__}")
+    if isinstance(node, _ast.BinOp):
+        l = _eval_calc_node(node.left)
+        r = _eval_calc_node(node.right)
+        op = node.op
+        if isinstance(op, _ast.Pow):
+            # Cap the *computed* exponent magnitude — catches both literal
+            # (2**5000) and computed (9**(9**9)) cases. Also refuse if the
+            # base itself is already at the bit-length cap, since a**1
+            # would otherwise sneak past.
+            try:
+                if isinstance(r, (int, float)) and abs(r) > _CALC_MAX_EXPONENT:
+                    raise _CalcError(f"exponent magnitude too large (cap {_CALC_MAX_EXPONENT})")
+            except OverflowError:
+                raise _CalcError(f"exponent magnitude too large (cap {_CALC_MAX_EXPONENT})")
+            if isinstance(l, int) and l.bit_length() > _CALC_MAX_BITS:
+                raise _CalcError("base magnitude too large")
+            res = l ** r
+        elif isinstance(op, _ast.Add):      res = l + r
+        elif isinstance(op, _ast.Sub):      res = l - r
+        elif isinstance(op, _ast.Mult):     res = l * r
+        elif isinstance(op, _ast.Div):      res = l / r
+        elif isinstance(op, _ast.Mod):      res = l % r
+        elif isinstance(op, _ast.FloorDiv): res = l // r
+        else:
+            raise _CalcError(f"unsupported binary op {type(op).__name__}")
+        # Check size of every intermediate, not just the final result —
+        # otherwise (999**999)**999 spends seconds computing before we
+        # ever look at the answer.
+        if isinstance(res, int) and res.bit_length() > _CALC_MAX_BITS:
+            raise _CalcError("intermediate result too large")
+        return res
+    if isinstance(node, _ast.Call):
+        if not isinstance(node.func, _ast.Name) or node.func.id not in _CALC_ALLOWED_FUNCS:
+            raise _CalcError("unsafe function call")
+        fn = _CALC_ALLOWED_FUNCS[node.func.id]
+        args = [_eval_calc_node(a) for a in node.args]
+        return fn(*args)
+    raise _CalcError(f"unsupported node {type(node).__name__}")
+
 
 def _safe_calc(expr: str) -> str:
-    """AST-based calculator — no eval()."""
+    """AST-validated calculator. No eval()/compile() — we evaluate the
+    tree ourselves so we can cap intermediate magnitudes between ops."""
     clean = expr.replace("^", "**")
     try:
         tree = _ast.parse(clean, mode="eval")
     except SyntaxError as ex:
         return f"Error: {ex}"
-    # Validate all nodes
+    # Static pass: structural allowlist + literal-magnitude cap. Cheap
+    # rejections that don't need evaluation.
     for node in _ast.walk(tree):
         if not isinstance(node, _CALC_ALLOWED_NODES):
             return f"Error: unsafe expression (disallowed: {type(node).__name__})"
         if isinstance(node, _ast.Constant):
             if not isinstance(node.value, (int, float, complex)):
                 return f"Error: only numeric constants allowed"
-            # Reject astronomically large literals — they make subsequent
-            # Pow/Mult ops a DoS even without nesting.
             try:
                 if isinstance(node.value, (int, float)) and abs(node.value) > _CALC_MAX_LITERAL:
                     return f"Error: literal too large"
@@ -1656,29 +1719,25 @@ def _safe_calc(expr: str) -> str:
         if isinstance(node, _ast.Call):
             if not isinstance(node.func, _ast.Name) or node.func.id not in _CALC_ALLOWED_FUNCS:
                 return f"Error: unsafe function call"
-        # Pow DoS guard: reject nested Pow (a**b**c) and cap literal exponents.
-        # Python's `**` is right-associative, so the nested form is the classic
-        # 9**9**9 attack — refuse it outright. For the flat form, if the
-        # exponent is a numeric literal, cap |b| at _CALC_MAX_EXPONENT.
+        # Reject any Pow whose left or right subtree contains another Pow.
+        # Catches BOTH 9**9**9 (right-nested, parses as 9**(9**9)) AND
+        # (999**999)**999 (left-nested, exponent <= cap but intermediate
+        # explodes). Dynamic per-step bit_length check below is the deeper
+        # defense; this static check just gives clearer errors on the
+        # obvious shapes.
         if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Pow):
-            if isinstance(node.right, _ast.BinOp) and isinstance(node.right.op, _ast.Pow):
-                return f"Error: nested ** is not allowed"
-            if isinstance(node.right, _ast.Constant) and isinstance(node.right.value, (int, float)):
-                try:
-                    if abs(node.right.value) > _CALC_MAX_EXPONENT:
-                        return f"Error: exponent magnitude too large (cap {_CALC_MAX_EXPONENT})"
-                except OverflowError:
-                    return f"Error: exponent magnitude too large (cap {_CALC_MAX_EXPONENT})"
-    # Safe to compile and eval the validated AST
-    code = compile(tree, "<calc>", "eval")
+            for sub in list(_ast.walk(node.left)) + list(_ast.walk(node.right)):
+                if isinstance(sub, _ast.BinOp) and isinstance(sub.op, _ast.Pow):
+                    return f"Error: nested ** is not allowed"
     try:
-        result = eval(code, {"__builtins__": {}}, {**_CALC_ALLOWED_FUNCS, **_CALC_ALLOWED_NAMES})
-        # Stringifying a huge int is itself O(n^2) work — bail before printing.
-        if isinstance(result, int) and result.bit_length() > 4096:
-            return f"Error: result magnitude too large"
-        return str(result)
+        result = _eval_calc_node(tree.body)
+    except _CalcError as ex:
+        return f"Error: {ex}"
     except Exception as ex:
         return f"Error: {ex}"
+    if isinstance(result, int) and result.bit_length() > _CALC_MAX_BITS:
+        return f"Error: result magnitude too large"
+    return str(result)
 
 
 def _is_safe_url(url: str) -> Tuple[bool, str]:

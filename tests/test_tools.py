@@ -73,6 +73,21 @@ class TestCalculator:
         result = _safe_calc("9^9^9")
         assert "Error" in result
 
+    def test_left_nested_pow_rejected(self):
+        # Left-associative form (a**b)**c — exponent c is small, inner
+        # exponent is small, but the intermediate a**b can already be a
+        # DoS. Pre-fix only the right-nested form was caught.
+        result = _safe_calc("(999**999)**999")
+        assert "Error" in result
+        assert "nested" in result.lower()
+
+    def test_intermediate_size_capped(self):
+        # No nested **, but the single-Pow result blows the bit_length cap.
+        # Exercises the dynamic per-step magnitude check rather than the
+        # static nested-** check.
+        result = _safe_calc("sqrt(10**1500)")
+        assert "Error" in result
+
     def test_exponent_cap(self):
         result = _safe_calc("2**5000")
         assert "Error" in result
