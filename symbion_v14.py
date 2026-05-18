@@ -5473,6 +5473,48 @@ def validate_and_report(cfg) -> list:
 WEB_HTML = (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").read_text(encoding="utf-8") if (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").exists() else "<h1>Symbion v14</h1><p>Template not found</p>"
 
 
+def _origin_allowed(origin: str, expected_port: int) -> bool:
+    """Validate the WebSocket Origin header against a same-host policy.
+
+    CORS does not protect WebSockets the way it protects fetch(). A
+    malicious page loaded in the same browser can open
+    ws://127.0.0.1:<port>/ws/... and drive Symbion's tools — unless we
+    check Origin ourselves.
+
+    Policy:
+      - Empty / missing Origin: allow (non-browser clients like Python
+        scripts that don't send Origin; they're authenticated by virtue
+        of running on the same machine + optional API key).
+      - Origin port must match the server's port.
+      - Origin host must be loopback (127.0.0.1, ::1, localhost) or a
+        private RFC1918 address (10.x, 172.16-31.x, 192.168.x). This
+        blocks https://evil.com:<port> drive-bys, including DNS-rebinding
+        attempts where the resolved IP is loopback but Origin still
+        carries the attacker's hostname.
+    """
+    if not origin:
+        return True
+    from urllib.parse import urlparse
+    import ipaddress
+    try:
+        u = urlparse(origin)
+    except Exception:
+        return False
+    host = (u.hostname or "").strip("[]")
+    if not host:
+        return False
+    port = u.port if u.port else (80 if u.scheme == "http" else 443 if u.scheme == "https" else None)
+    if port != expected_port:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 def build_web_app(symbion: "SYMBION") -> "FastAPI":
     if not _FASTAPI: raise ImportError("pip install fastapi uvicorn")
     from contextlib import asynccontextmanager
@@ -5554,14 +5596,23 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
     @app.post("/api/chat")
     async def api_chat(request: Request):
         _auth(request); _rate(request)
+        # Content-Length is a fast pre-flight for honest oversized
+        # requests. A chunked-encoded client can omit or lie about it,
+        # so we ALSO stream the body chunk-by-chunk and abort as soon
+        # as the cap is exceeded. Prior code called request.body() which
+        # buffered the whole body before checking — that allowed a
+        # chunked sender to force a large allocation regardless of the
+        # CL check.
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > _MAX_REQUEST_BYTES:
             raise HTTPException(413, f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)")
-        body_bytes = await request.body()
-        if len(body_bytes) > _MAX_REQUEST_BYTES:
-            raise HTTPException(413, f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)")
+        body_buf = bytearray()
+        async for chunk in request.stream():
+            body_buf.extend(chunk)
+            if len(body_buf) > _MAX_REQUEST_BYTES:
+                raise HTTPException(413, f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)")
         try:
-            body = json.loads(body_bytes)
+            body = json.loads(bytes(body_buf))
         except (json.JSONDecodeError, ValueError):
             raise HTTPException(400, "Invalid JSON body")
         message    = (body.get("message") or "").strip()
@@ -5618,6 +5669,17 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
 
     @app.websocket("/ws/{session_id}")
     async def ws_endpoint(websocket: WebSocket, session_id: str):
+        # Origin allowlist. CORS does not protect WebSocket connections the
+        # way it protects fetch — without this check, a malicious page in
+        # the same browser could open ws://127.0.0.1:<port>/ws/... and
+        # drive the agent loop (including machine-wide read_file). Allows
+        # empty Origin (non-browser clients) and same-port loopback /
+        # RFC1918 hosts; rejects everything else (close code 1008 =
+        # policy violation).
+        origin = websocket.headers.get("origin", "")
+        if not _origin_allowed(origin, symbion.cfg.web_port):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         show_reasoning = symbion.cfg.show_reasoning
         client_host = (websocket.client.host if websocket.client else "unknown") or "unknown"
@@ -6559,7 +6621,17 @@ Examples:
         if cfg.show_reasoning: print(f"  Reasoning: {green('ON')} (toggle ? in UI)")
         print()
         app=build_web_app(symbion)
-        uvicorn.run(app,host=cfg.web_host,port=cfg.web_port,log_level="warning")
+        # ws_max_size caps each individual WebSocket frame at the protocol
+        # layer (websockets library), so an oversized frame is rejected
+        # before Symbion's handler ever sees it. Default websockets cap
+        # is 1MB, which would break image-attachment frames (each image
+        # data URL can be up to ~15MB). 32MB fits ~2 max-size images
+        # comfortably while bounding memory exposure on adversarial
+        # frames. Multi-large-image use cases that exceed this can split
+        # across multiple frames; the per-image checks inside the handler
+        # still bound individual decoded sizes.
+        uvicorn.run(app, host=cfg.web_host, port=cfg.web_port,
+                    log_level="warning", ws_max_size=32 * 1024 * 1024)
     else:
         # Background: backfill embeddings for any summaries that don't have
         # one yet (legacy DB rows or rows saved while Ollama was offline).
