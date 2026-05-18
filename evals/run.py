@@ -49,6 +49,7 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
         "expected": expected,
         "assisted": assisted,
         "response_preview": response[:120],
+        "response_full": response,
     }
 
 
@@ -56,8 +57,14 @@ async def run_eval(cfg: SymbionConfig, golden: list) -> list:
     symbion = SYMBION(cfg)
     results = []
 
+    # Per-run session prefix so a re-run doesn't pick up the prior run's
+    # memory and respond "same answer as before." Symbion's SQLite store
+    # persists by session id; a stable id across runs makes the harness
+    # test memory continuity instead of persona stability under fresh state.
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     for i, entry in enumerate(golden):
-        session = f"eval_{entry['id']}"
+        session = f"eval_{run_id}_{entry['id']}"
         # Multi-turn entries use `turns` (list); single-shot uses `query` (str).
         # Multi-turn runs all turns in the same session; scoring is against the
         # FINAL response only. The warmup turns shape conversational state.
