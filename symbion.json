@@ -17,6 +17,7 @@
   "harm_penalty_scale": 0.15,
   "distress_threshold": 0.65,
   "tools_enabled": true,
+  "sycophancy_probe_enabled": false,
   "search_max_chars": 2400,
   "web_host": "0.0.0.0",
   "web_port": 8000,
@@ -35,7 +36,7 @@
   "mcp_servers": [
     {
       "name": "time",
-      "command": "python",
+      "command": ".python\\python.exe",
       "args": ["-m", "mcp_server_time"],
       "enabled": true
     }

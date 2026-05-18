@@ -44,8 +44,18 @@ ONEDRIVE = Path(_ONEDRIVE_RAW) if _ONEDRIVE_RAW else None
 SYNC_DIR = (ONEDRIVE / "Symbion" / "sync") if ONEDRIVE else None
 
 
+_VERBOSE = bool(os.environ.get("SYMBION_SYNC_VERBOSE"))
+
+
 def _info(msg: str) -> None:
     print(f"[sync] {msg}")
+
+
+def _quiet(msg: str) -> None:
+    # Routine confirmations (in sync / lock acquired / lock released / reclaim-own-lock).
+    # Suppressed by default — set SYMBION_SYNC_VERBOSE=1 to see them.
+    if _VERBOSE:
+        print(f"[sync] {msg}")
 
 
 def _err(msg: str, code: int = 1) -> None:
@@ -191,7 +201,7 @@ def cmd_pull(args) -> int:
         owner = lock.get("machine")
         started = lock.get("started", "?")
         if owner == _machine():
-            _info(f"reclaiming our own lock (started {started})")
+            _quiet(f"reclaiming our own lock (started {started})")
         else:
             age = _lock_age_hours(lock)
             if age < STALE_LOCK_HOURS and not args.force:
@@ -230,10 +240,10 @@ def cmd_pull(args) -> int:
                 "previous push likely failed; will push on next clean exit)"
             )
         else:
-            _info(f"{name}: in sync")
+            _quiet(f"{name}: in sync")
 
     _write_lock()
-    _info(f"lock acquired by '{_machine()}'")
+    _quiet(f"lock acquired by '{_machine()}'")
     return 0
 
 
@@ -259,7 +269,7 @@ def cmd_push(args) -> int:
             _info(f"{name}: push FAILED ({e})")
 
     _clear_lock()
-    _info("lock released")
+    _quiet("lock released")
     return 0
 
 

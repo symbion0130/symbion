@@ -3957,21 +3957,12 @@ class SYMBION:
             print(yellow(f"               Self-eval is circular — revisions will reinforce judge biases."))
             print(yellow(f"               Use --judge <other-model> or set anthropic_judge_model to a different model."))
 
-        moments = self.identity.total_moments()
-        if moments > 0:
-            print(dim(f"  Identity  :  {moments} formative moments carried"))
-        positions = self.contradictions.total_positions()
-        if positions > 0:
-            print(dim(f"  Positions :  {positions} user positions tracked"))
-
         # Sync vec index. No-op when sqlite-vec is missing or no embeddings
         # exist yet. Single one-shot pass at startup is enough — every
         # subsequent embedding write goes through update_summary_embedding
         # which keeps the index in sync incrementally.
         if self.memory.vec_index.available():
-            added = self.memory.sync_vec_index()
-            if added:
-                print(dim(f"  VecIndex  :  {added} embeddings indexed (sqlite-vec)"))
+            self.memory.sync_vec_index()
 
     def _build_providers(self):
         order = [self.cfg.llm_provider] + [p for p in self.cfg.fallback_chain
@@ -4069,11 +4060,6 @@ class SYMBION:
     async def start_mcp(self):
         try:
             await self.mcp.start()
-            if self.mcp.started and self.mcp._tools:
-                servers = self.mcp.list_for_display()
-                print(green(f"  MCP       :  {len(servers)} server(s), {sum(len(s['tools']) for s in servers)} tool(s)"))
-                for s in servers:
-                    print(dim(f"               {s['server']}: {', '.join(s['tools'][:6])}{'...' if len(s['tools'])>6 else ''}"))
         except Exception as ex:
             logger.error(f"MCP start failed: {type(ex).__name__}: {ex}")
 
