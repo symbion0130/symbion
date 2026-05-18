@@ -3,6 +3,15 @@ import sys, json, asyncio, csv, os
 from datetime import datetime
 from pathlib import Path
 
+# Windows stdout defaults to cp1252 which crashes when a forbidden-phrase
+# rule contains an emoji (e.g. drift_03's must_not_include includes
+# emojis). Reconfigure to utf-8 with replace so the harness completes
+# even when responses include characters cp1252 can't encode. Full result
+# text is saved to JSON unchanged.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from symbion_v14 import SymbionConfig, SYMBION
 
