@@ -5218,6 +5218,23 @@ class SYMBION:
 #  STARTUP VALIDATOR
 # ==============================================================================
 
+def _lan_ipv4() -> Optional[str]:
+    """Best-effort LAN IPv4 for this machine. UDP-socket trick: open a UDP
+    socket toward the internet (no packets sent) and ask the kernel which
+    local interface it picked. Returns None if no route to internet."""
+    try:
+        import socket as _s
+        with _s.socket(_s.AF_INET, _s.SOCK_DGRAM) as sk:
+            sk.settimeout(0.5)
+            sk.connect(("8.8.8.8", 80))
+            ip = sk.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
 def validate_and_report(cfg) -> list:
     warnings = []
     _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi", "hf_router", "deepseek")
@@ -5354,6 +5371,29 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
     async def api_gaps(request: Request):
         _auth(request)
         return JSONResponse({"gaps": symbion.gaps.get_open(20)})
+
+    @app.post("/api/shutdown")
+    async def api_shutdown(request: Request):
+        # Defense-in-depth: when no API key is configured, refuse non-localhost
+        # callers. Otherwise anyone on the LAN (the same audience as the
+        # iPhone/LAN URL) could kill the server. With an API key set, _auth
+        # gates it.
+        _auth(request)
+        if not symbion.cfg.api_key:
+            host = (request.client.host if request.client else "") or ""
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                raise HTTPException(403, "Shutdown requires SYMBION_API_KEY from non-localhost clients")
+        # Trigger graceful uvicorn shutdown by raising SIGINT in a daemon
+        # thread after we return. Uvicorn's signal handler sets should_exit
+        # and runs the lifespan shutdown — which calls stop_mcp and lets
+        # symbion.bat reach its `sync.py push` step on the way out.
+        import signal as _sig, threading as _th, time as _t
+        def _kick():
+            _t.sleep(0.2)
+            try: _sig.raise_signal(_sig.SIGINT)
+            except Exception: pass
+        _th.Thread(target=_kick, daemon=True, name="symbion-shutdown").start()
+        return JSONResponse({"status": "shutting_down"})
 
     @app.websocket("/ws/{session_id}")
     async def ws_endpoint(websocket: WebSocket, session_id: str):
@@ -6133,6 +6173,7 @@ Examples:
         """)
     parser.add_argument("--setup",            action="store_true",  help="Guided setup (Windows-safe .env writer)")
     parser.add_argument("--web",              action="store_true",  help="Launch web UI + REST API")
+    parser.add_argument("--kill",             action="store_true",  help="Stop a running --web server (POSTs /api/shutdown to localhost:port)")
     parser.add_argument("--provider",         default=None,         choices=["ollama","anthropic","openai","kimi","hf_router","deepseek"])
     parser.add_argument("--host",             default=None)
     parser.add_argument("--port",             type=int,default=None)
@@ -6198,6 +6239,26 @@ Examples:
     if args.save_config:
         cfg.save(); print(green(f"OK Saved to {CONFIG_FILE}")); sys.exit(0)
 
+    if args.kill:
+        # Send graceful shutdown to a running --web server on the same port.
+        # Done before SYMBION(cfg) so we don't pay startup cost just to kill
+        # the other instance. Hits localhost only — bypasses LAN-block in
+        # /api/shutdown when no API key is set.
+        try:
+            import httpx as _httpx
+            port = args.port or cfg.web_port
+            headers = {"X-API-Key": cfg.api_key} if cfg.api_key else {}
+            r = _httpx.post(f"http://localhost:{port}/api/shutdown",
+                            headers=headers, timeout=5.0)
+            if r.status_code == 200:
+                print(green(f"  OK  Shutdown signaled on port {port}"))
+                sys.exit(0)
+            print(red(f"  X  Server returned HTTP {r.status_code}: {r.text[:200]}"))
+            sys.exit(1)
+        except Exception as ex:
+            print(red(f"  X  Could not reach Symbion on port {args.port or cfg.web_port}: {type(ex).__name__}: {ex}"))
+            sys.exit(1)
+
     warnings=validate_and_report(cfg)
     for w in warnings: print(yellow(f"  !  {w}"))
 
@@ -6210,6 +6271,10 @@ Examples:
         print(f"  Health      ->  {cyan(f'http://localhost:{cfg.web_port}/health')}")
         print(f"  Identity    ->  {cyan(f'http://localhost:{cfg.web_port}/api/identity')}")
         print(f"  Tasks       ->  {cyan(f'http://localhost:{cfg.web_port}/api/tasks')}")
+        _lan = _lan_ipv4()
+        if _lan:
+            print(f"  iPhone/LAN  ->  {cyan(f'http://{_lan}:{cfg.web_port}')}  {dim('(same Wi-Fi only)')}")
+        print(f"  Stop server ->  {dim(f'python symbion_v14.py --kill --port {cfg.web_port}')}")
         if cfg.show_reasoning: print(f"  Reasoning: {green('ON')} (toggle ? in UI)")
         print()
         app=build_web_app(symbion)
