@@ -4326,12 +4326,33 @@ class SYMBION:
             return False
         return True
 
+    # In-memory LRU cache for pre-gen judge results. Keyed on (judge model
+    # identifier, query text); both are inputs to a deterministic-up-to-
+    # temperature call. Bounded so a long-running web process can't grow
+    # unbounded. Biggest wins: eval re-runs within the same process, and
+    # interactive sessions where users sometimes ask the same thing twice.
+    _PREGEN_CACHE_MAX = 512
+
     async def _pre_gen_analysis(self, text: str) -> Tuple[Dict, Dict]:
         """Fused judge + emotion detection in one LLM call. Returns (evaluation, emotional_state)."""
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub):
             ev = await client.judge(text)
             return ev, {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
+
+        # LRU cache check. Skip on the OfflineJudgeStub path above (already
+        # non-LLM, no benefit to caching). Move-to-end on hit so frequently
+        # repeated queries don't get evicted by one-off probes.
+        cache = getattr(self, "_pregen_cache", None)
+        if cache is None:
+            from collections import OrderedDict
+            self._pregen_cache = OrderedDict()
+            cache = self._pregen_cache
+        cache_key = (self._jmodel(), text)
+        if cache_key in cache:
+            cache.move_to_end(cache_key)
+            return cache[cache_key]
+
         try:
             raw = await client.chat_json(self._jmodel(), PRE_GEN_SYSTEM,
                                          f"Evaluate: {text}", self.cfg.judge_temp, 250)
@@ -4354,10 +4375,15 @@ class SYMBION:
                 "state": r.get("emotional_state", "neutral"),
                 "suggested_response_mode": r.get("suggested_response_mode", "normal"),
             }
+            cache[cache_key] = (evaluation, emotional_state)
+            if len(cache) > self._PREGEN_CACHE_MAX:
+                cache.popitem(last=False)
             return evaluation, emotional_state
         except Exception as ex:
             logger.error(f"Pre-gen analysis: {ex}")
-            # Fail open — a judge error is not a safety signal, don't refuse the user
+            # Fail open — a judge error is not a safety signal, don't refuse the user.
+            # Don't cache the error path: a transient failure shouldn't poison
+            # future calls for the same query.
             return ({"human_benefit_score":0.5,"should_assist":True,"reasoning":"",
                      "confidence":0.0,"flags":["judge_error"],"evaluator_degraded":True,"over_cautious":False},
                     {"state":"neutral","suggested_response_mode":"normal"})
