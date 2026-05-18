@@ -29,6 +29,12 @@ __pycache__/
 .start.log
 .start.err
 
+# Eval run artifacts — JSON outputs from evals/run.py + tee'd log files.
+# Each run produces a new timestamped file; the golden set + harness are
+# source-of-truth, the per-run results are reproducible from them.
+evals/results/
+evals/golden_*.jsonl
+
 # Archived legacy code, snapshots, plans (kept locally for diffing only)
 archive/
 
