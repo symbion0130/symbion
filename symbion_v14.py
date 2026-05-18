@@ -5440,8 +5440,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
     app     = FastAPI(title="Symbion v14", lifespan=_lifespan)
     rate_lm = RateLimiter(symbion.cfg.rate_limit_per_minute)
 
-    app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_credentials=True,
-                       allow_methods=["*"],allow_headers=["*"])
+    # No CORS middleware: the UI is served from / on the same origin as the
+    # API and the WebSocket, so same-origin requests succeed without CORS
+    # headers. allow_origins=["*"] previously let any website a browser
+    # loaded attempt cross-origin POSTs to /api/chat. If a non-default JS
+    # client needs cross-origin access, add CORSMiddleware here with a
+    # specific allow_origins list — never with "*".
 
     def _auth(req: Request):
         if not symbion.cfg.api_key: return
@@ -5482,13 +5486,31 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             **_health_dict(),
         })
 
+    # Caps for /api/chat. Starlette buffers the whole request body in
+    # memory; without a cap a large POST is a large allocation that then
+    # flows into retrieval/logging/model prompts. 1MB is well above any
+    # legit chat message and well below DoS territory.
+    _MAX_REQUEST_BYTES = 1_000_000
+    _MAX_MESSAGE_CHARS = 100_000
+
     @app.post("/api/chat")
     async def api_chat(request: Request):
         _auth(request); _rate(request)
-        body = await request.json()
-        message    = body.get("message","").strip()
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > _MAX_REQUEST_BYTES:
+            raise HTTPException(413, f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)")
+        body_bytes = await request.body()
+        if len(body_bytes) > _MAX_REQUEST_BYTES:
+            raise HTTPException(413, f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)")
+        try:
+            body = json.loads(body_bytes)
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(400, "Invalid JSON body")
+        message    = (body.get("message") or "").strip()
         session_id = body.get("session_id", datetime.now().strftime("api_%Y%m%d_%H%M%S"))
         if not message: raise HTTPException(400,"message required")
+        if len(message) > _MAX_MESSAGE_CHARS:
+            raise HTTPException(413, f"Message too long (max {_MAX_MESSAGE_CHARS} chars)")
         full, ev, iid = await symbion.respond(message, session_id)
         m = symbion.health
         return JSONResponse({
@@ -5619,8 +5641,18 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                         logger.warning(f"WS image: paste dir mkdir failed: {ex}")
                         paste_dir = None
                     saved_rel: List[str] = []
+                    # 10MB decoded ~= 13.4MB base64; 15MB ceiling on the
+                    # full data URL is a fast pre-decode gate so a malicious
+                    # client can't force a 100MB+ allocation before the size
+                    # cap fires.
+                    _MAX_IMG_DATAURL = 15 * 1024 * 1024
+                    _MAX_IMG_B64     = 14 * 1024 * 1024
+                    _MAX_IMG_RAW     = 10 * 1024 * 1024
                     for n, du in enumerate(images[:6]):  # cap at 6 per turn
                         if not isinstance(du, str) or not du.startswith("data:image/"):
+                            continue
+                        if len(du) > _MAX_IMG_DATAURL:
+                            logger.warning(f"WS image #{n}: data URL too large ({len(du)} bytes), skipping")
                             continue
                         try:
                             header, b64 = du.split(",", 1)
@@ -5629,9 +5661,16 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                             if ext == "jpeg": ext = "jpg"
                             if ext not in {"png","jpg","gif","webp","bmp"}:
                                 continue
+                            if len(b64) > _MAX_IMG_B64:
+                                logger.warning(f"WS image #{n}: base64 too large ({len(b64)} bytes), skipping")
+                                continue
                             import base64 as _b64
-                            raw = _b64.b64decode(b64)
-                            if len(raw) > 10 * 1024 * 1024:  # 10MB cap per image
+                            try:
+                                raw = _b64.b64decode(b64, validate=True)
+                            except Exception:
+                                logger.warning(f"WS image #{n}: invalid base64, skipping")
+                                continue
+                            if len(raw) > _MAX_IMG_RAW:
                                 continue
                             ts = int(time.time() * 1000)
                             fname = f"paste_{ts}_{n}.{ext}"
@@ -6437,6 +6476,19 @@ Examples:
 
     if args.web:
         if not _FASTAPI: print(red("  pip install fastapi uvicorn")); sys.exit(1)
+        # Refuse to start LAN-exposed without an API key. _auth() is a no-op
+        # when cfg.api_key is empty, so 0.0.0.0 + no key = anyone on the LAN
+        # can drive /api/chat and the WebSocket — which can in turn invoke
+        # tools (machine-wide file reads via read_file, web_search, etc).
+        _LOCAL_BINDS = {"127.0.0.1", "localhost", "::1"}
+        if cfg.web_host not in _LOCAL_BINDS and not cfg.api_key:
+            print(red(f"\n  X  Refusing to start: web_host={cfg.web_host} with no API key."))
+            print(red(f"      _auth() is disabled when SYMBION_API_KEY is empty, so anyone"))
+            print(red(f"      on the LAN could call /api/chat and drive tools (including"))
+            print(red(f"      machine-wide file reads). Pick one:"))
+            print(red(f"        $env:SYMBION_API_KEY = '<random-secret>'; .\\symbion --web"))
+            print(red(f"        .\\symbion --web --host 127.0.0.1   (localhost only)"))
+            sys.exit(1)
         print(f"\n  Web UI      ->  {cyan(f'http://localhost:{cfg.web_port}')}")
         print(f"  API         ->  {cyan(f'http://localhost:{cfg.web_port}/api/chat')}")
         print(f"  Health      ->  {cyan(f'http://localhost:{cfg.web_port}/health')}")
