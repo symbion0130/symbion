@@ -52,18 +52,45 @@ _CLAUSE_END = _re_eval.compile(r"[.!?;\n]")
 _QUOTE_CHARS = ("'", '"', "‘", "’", "“", "”", "`")
 
 
+def _is_quote_boundary(text: str, i: int) -> bool:
+    """True iff text[i] is a quote-mark in *boundary* position, not an
+    in-word apostrophe like doesn't / isn't / it's. A quote-mark has a
+    non-letter on at least one side (whitespace, punctuation, start, end);
+    an apostrophe has letters on both sides. ASCII " never collides with
+    apostrophes so this only matters for ' and the curly variants."""
+    if text[i] not in _QUOTE_CHARS:
+        return False
+    # Curly opening / closing quotes are unambiguous.
+    if text[i] in ("“", "”", "‘", "’", '"', "`"):
+        return True
+    # ASCII single quote: only a boundary if at least one side is a non-letter.
+    left  = text[i - 1] if i > 0 else " "
+    right = text[i + 1] if i + 1 < len(text) else " "
+    return not (left.isalpha() and right.isalpha())
+
+
 def _quoted_spans(text: str) -> list:
     """Return (start, end) ranges of characters inside matched quote pairs.
     Pairs use the same quote char; unmatched quotes are ignored. The 500-
     char cap on a single quoted span prevents pathological cases where a
-    stray opening quote would consume the rest of the response."""
+    stray opening quote would consume the rest of the response. Apostrophes
+    (in-word ' like in 'doesn't') are filtered via _is_quote_boundary so
+    they don't pair with later real quote marks and swallow valid text."""
     spans = []
     i = 0
     n = len(text)
     while i < n:
-        ch = text[i]
-        if ch in _QUOTE_CHARS:
-            close = text.find(ch, i + 1, min(i + 500, n))
+        if _is_quote_boundary(text, i):
+            ch = text[i]
+            # Find the matching closing quote, skipping in-word apostrophes.
+            close = -1
+            j = i + 1
+            cap = min(i + 500, n)
+            while j < cap:
+                if text[j] == ch and _is_quote_boundary(text, j):
+                    close = j
+                    break
+                j += 1
             if close > i:
                 spans.append((i, close))
                 i = close + 1
