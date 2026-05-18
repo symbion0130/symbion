@@ -58,8 +58,15 @@ async def run_eval(cfg: SymbionConfig, golden: list) -> list:
 
     for i, entry in enumerate(golden):
         session = f"eval_{entry['id']}"
+        # Multi-turn entries use `turns` (list); single-shot uses `query` (str).
+        # Multi-turn runs all turns in the same session; scoring is against the
+        # FINAL response only. The warmup turns shape conversational state.
+        turns = entry.get("turns")
+        queries = turns if isinstance(turns, list) and turns else [entry["query"]]
         try:
-            response, evaluation, iid = await symbion.respond(entry["query"], session)
+            response, evaluation = "", {}
+            for q in queries:
+                response, evaluation, iid = await symbion.respond(q, session)
             result = score_response(entry, response, evaluation)
         except Exception as ex:
             result = {
@@ -69,7 +76,8 @@ async def run_eval(cfg: SymbionConfig, golden: list) -> list:
             }
         results.append(result)
         status = "PASS" if result["passed"] else "FAIL"
-        print(f"  [{i+1:>2}/{len(golden)}] {status:<4}  {entry['id']:<20}  {result.get('reason','')[:50]}")
+        turn_tag = f" [{len(queries)}t]" if len(queries) > 1 else ""
+        print(f"  [{i+1:>2}/{len(golden)}] {status:<4}  {entry['id']:<20}{turn_tag}  {result.get('reason','')[:50]}")
 
     return results
 
