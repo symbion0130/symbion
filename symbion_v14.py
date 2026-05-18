@@ -112,6 +112,14 @@ class _ResilientFileHandler(logging.FileHandler):
             pass
 
 
+_REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _anchor(path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else _REPO_ROOT / p
+
+
 try:    _TW = min(os.get_terminal_size().columns, 100)
 except Exception: _TW = 88
 
@@ -120,7 +128,7 @@ except Exception: _TW = 88
 #  CONFIG
 # ==============================================================================
 
-CONFIG_FILE = Path("symbion.json")
+CONFIG_FILE = _anchor("symbion.json")
 
 @dataclass
 class SymbionConfig:
@@ -2427,7 +2435,7 @@ class SymbionTools:
 class EventLogger:
     """Append-only JSONL event stream for per-turn telemetry."""
     def __init__(self, path: str = "symbion_events.jsonl"):
-        self._path = path
+        self._path = str(_anchor(path))
 
     def log_turn(self, session: str, interaction_id: int, query: str,
                  judge: Dict, emotion: str, tool_used: Optional[str],
@@ -4024,20 +4032,21 @@ class SYMBION:
         self._seen_sessions: set = set()
         self._session_count: int = 0
 
-        init_db(self.cfg.db_path)
+        _db = str(_anchor(self.cfg.db_path))
+        init_db(_db)
 
-        self.memory         = SymbionMemory(self.cfg.db_path, self.cfg)
-        self.learner        = SymbionLearner(self.cfg.db_path)
+        self.memory         = SymbionMemory(_db, self.cfg)
+        self.learner        = SymbionLearner(_db)
         self.health          = HealthMetrics()
         self.heuristic      = OfflineJudgeStub()
         self.tools          = SymbionTools(".")
         self.events         = EventLogger()
         self.embeddings     = EmbeddingClient(self.cfg)
 
-        self.identity       = LongitudinalIdentity(self.cfg.db_path)
-        self.tasks          = TaskEngine(self.cfg.db_path)
-        self.contradictions = ContradictionTracker(self.cfg.db_path)
-        self.gaps           = KnowledgeGapTracker(self.cfg.db_path)
+        self.identity       = LongitudinalIdentity(_db)
+        self.tasks          = TaskEngine(_db)
+        self.contradictions = ContradictionTracker(_db)
+        self.gaps           = KnowledgeGapTracker(_db)
         # MCP manager is instantiated unconditionally — start() is the side
         # effect. It's a no-op when the SDK is missing or no servers are
         # configured, so every dispatch site can call it without guarding.
@@ -4603,7 +4612,7 @@ class SYMBION:
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub): return None
         try:
-            with sqlite3.connect(self.cfg.db_path) as c:
+            with sqlite3.connect(_anchor(self.cfg.db_path)) as c:
                 rows = c.execute(
                     "SELECT id,topic,position FROM user_positions WHERE session=? ORDER BY id DESC LIMIT 5",
                     (session,)).fetchall()
@@ -5269,7 +5278,7 @@ class SYMBION:
         # indexer briefly holds the file. Swallow and continue — losing one
         # legacy-log line must not kill respond().
         try:
-            with open(self.cfg.log_path,"a",encoding='utf-8') as f:
+            with open(_anchor(self.cfg.log_path),"a",encoding='utf-8') as f:
                 f.write(json.dumps(entry)+"\n")
         except Exception as ex:
             logger.error(f"_write_log: {ex}")
@@ -6357,7 +6366,7 @@ Examples:
 
     logging.basicConfig(level=logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[_ResilientFileHandler("symbion_system.log",
+        handlers=[_ResilientFileHandler(str(_anchor("symbion_system.log")),
                                          encoding='utf-8', delay=True)])
 
     cfg=SymbionConfig.load()
