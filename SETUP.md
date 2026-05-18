@@ -153,6 +153,38 @@ python -m pytest tests/ -q
 
 ---
 
+## Windows: speed up local Python and file I/O
+
+Optional. On older laptops without a discrete GPU, Windows Defender real-time scanning is the dominant overhead on Python startup, pytest, and git operations — it re-scans files on every read/write, and the Python interpreter touches hundreds of files per launch.
+
+**Run in an elevated PowerShell** (right-click → Run as Administrator). Adjust the path if Symbion lives somewhere other than `D:\symbion`:
+
+```powershell
+# Exclude the project tree + the Python interpreters that read from it.
+Add-MpPreference -ExclusionPath    "D:\symbion"
+Add-MpPreference -ExclusionProcess "python.exe"
+Add-MpPreference -ExclusionProcess "D:\symbion\.python\python.exe"
+Add-MpPreference -ExclusionProcess "D:\symbion\venv\Scripts\python.exe"
+
+# Verify
+Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+Get-MpPreference | Select-Object -ExpandProperty ExclusionProcess
+```
+
+**Optionally, stop Windows Search from indexing the project tree.** Lightest touch: Control Panel → Indexing Options → Modify → uncheck the Symbion directory. Heavier (only if you don't use Start-menu file search):
+
+```powershell
+# Elevated.
+Stop-Service  WSearch
+Set-Service   WSearch -StartupType Disabled
+```
+
+**Don't bother with OneDrive on-demand toggling** for the project — Symbion's repo lives outside any OneDrive directory by default. The cross-machine DB sync via `scripts\sync.py` is explicit and unaffected.
+
+Expected impact on a CPU-only laptop: Python startup and pytest wall-time both drop noticeably (commonly 30–50%). No effect on Anthropic API latency or local Ollama inference — those are bottlenecks elsewhere.
+
+---
+
 ## Common gotchas
 
 | Symptom | Cause | Fix |
