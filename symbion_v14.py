@@ -6274,7 +6274,7 @@ Examples:
         _lan = _lan_ipv4()
         if _lan:
             print(f"  iPhone/LAN  ->  {cyan(f'http://{_lan}:{cfg.web_port}')}  {dim('(same Wi-Fi only)')}")
-        print(f"  Stop server ->  {dim(f'python symbion_v14.py --kill --port {cfg.web_port}')}")
+        print(f"  Stop server ->  {dim('Ctrl+C here, or')} {dim(f'python symbion_v14.py --kill --port {cfg.web_port}')} {dim('from another shell')}")
         if cfg.show_reasoning: print(f"  Reasoning: {green('ON')} (toggle ? in UI)")
         print()
         app=build_web_app(symbion)
