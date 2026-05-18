@@ -160,9 +160,11 @@ Optional. On older laptops without a discrete GPU, Windows Defender real-time sc
 **Run in an elevated PowerShell** (right-click → Run as Administrator). Adjust the path if Symbion lives somewhere other than `D:\symbion`:
 
 ```powershell
-# Exclude the project tree + the Python interpreters that read from it.
+# Exclude the project tree + the project's two Python interpreters.
+# Use the path-specific ProcessExclusion (not bare "python.exe") so
+# Defender still scans any unrelated python.exe that might appear on
+# the machine — same speed win, much narrower attack surface.
 Add-MpPreference -ExclusionPath    "D:\symbion"
-Add-MpPreference -ExclusionProcess "python.exe"
 Add-MpPreference -ExclusionProcess "D:\symbion\.python\python.exe"
 Add-MpPreference -ExclusionProcess "D:\symbion\venv\Scripts\python.exe"
 
