@@ -1314,7 +1314,8 @@ class AnthropicClient(BaseClient):
 
     async def stream_with_tools(self, model, messages, tools, cfg, tool_executor,
                                  max_iterations: int = 8,
-                                 max_tool_chars: int = 80_000):
+                                 max_tool_chars: int = 80_000,
+                                 show_reasoning: Optional[bool] = None):
         """Native tool-use agent loop. Streams text events, executes tool calls,
         feeds results back to the model, repeats until end_turn or iteration cap.
 
@@ -1344,12 +1345,16 @@ class AnthropicClient(BaseClient):
             # tool calls and leaving the user with no answer.
             is_final_iter = (iteration == max_iterations - 1)
             _m = model or self.model
-            # Extended thinking: when cfg.show_reasoning is on, ask
-            # Anthropic for thinking blocks. Constraints from the API:
+            # Extended thinking: when show_reasoning is on, ask Anthropic
+            # for thinking blocks. Constraints from the API:
             #   - budget_tokens must be >= 1024 and < max_tokens
             #   - temperature MUST be 1.0 or omitted when thinking is on
             #   - top_p / top_k must be omitted (we don't send those)
-            thinking_on = bool(getattr(cfg, "show_reasoning", False))
+            # Explicit show_reasoning param wins over cfg.show_reasoning so
+            # respond() can pass a per-session value without mutating cfg
+            # (cfg is shared across concurrent web sessions).
+            thinking_on = (bool(show_reasoning) if show_reasoning is not None
+                           else bool(getattr(cfg, "show_reasoning", False)))
             body_payload = {
                 "model": _m,
                 "max_tokens": cfg.max_tokens,
@@ -4326,6 +4331,12 @@ class SYMBION:
         # Reads fall back to cfg.active_user when a session has no override.
         self._session_user: Dict[str, str] = {}
 
+        # Per-session show_reasoning override. cfg.show_reasoning is the
+        # global default; this dict lets two concurrent web sessions have
+        # independent /think state. Without it, user A toggling /think
+        # would also flip user B's chain-of-thought display.
+        self._session_show_reasoning: Dict[str, bool] = {}
+
         self._providers: List[BaseClient] = []
         self._build_providers()
         self.client = self._providers[0] if self._providers else None
@@ -4504,6 +4515,14 @@ class SYMBION:
         Used by respond() to scope memory reads/writes and by the profile
         injection in build_context so lala doesn't see aaron's profile."""
         return self._session_user.get(session) or (self.cfg.active_user or "aaron")
+
+    def _show_reasoning(self, session: str) -> bool:
+        """Resolve the effective show_reasoning for `session`. Per-session
+        override wins; falls back to cfg.show_reasoning (terminal mode
+        and any web session that hasn't toggled /think yet)."""
+        if session in self._session_show_reasoning:
+            return self._session_show_reasoning[session]
+        return bool(self.cfg.show_reasoning)
 
     def _set_session_user(self, session: str, user: str) -> str:
         """Set the active user for `session`. Returns the canonicalized
@@ -5155,6 +5174,11 @@ class SYMBION:
         # session retrieval) downstream scope to this user so lala's
         # context never includes aaron's history and vice versa.
         active_user = self._active_user(session)
+        # Resolve effective show_reasoning for THIS session — independent
+        # of any other concurrent web session. Used wherever the agent-
+        # loop / single-shot generation needs to know whether to enable
+        # thinking blocks for this specific turn.
+        effective_show_reasoning = self._show_reasoning(session)
 
         # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + (legacy-mode only)
         # tool dispatch. In agent-loop mode the model fires tools itself during
@@ -5381,7 +5405,8 @@ class SYMBION:
                             resp_model, messages, self._agent_tool_schemas(), self.cfg,
                             _exec_tool,
                             max_iterations=self.cfg.agent_loop_max_iterations,
-                            max_tool_chars=self.cfg.agent_loop_max_tool_chars):
+                            max_tool_chars=self.cfg.agent_loop_max_tool_chars,
+                            show_reasoning=effective_show_reasoning):
                         et = ev.get("type")
                         if et == "text":
                             tok = ev.get("text", "")
@@ -5428,7 +5453,7 @@ class SYMBION:
                     if token_callback and task_failed:
                         await token_callback(draft)
 
-            elif self.cfg.show_reasoning and not refusal:
+            elif effective_show_reasoning and not refusal:
                 had_reasoning = True
                 # Kimi native thinking emits its own [Thinking...] prefix via stream()
                 kimi_native = isinstance(resp_client, KimiClient) and self.cfg.kimi_thinking_enabled
@@ -5436,7 +5461,7 @@ class SYMBION:
                     await token_callback("\n[Thinking...]\n")
                 reasoning, draft = await self._generate_with_reasoning(
                     messages,
-                    token_callback=(lambda t: token_callback(t)) if self.cfg.show_reasoning else None
+                    token_callback=(lambda t: token_callback(t)) if effective_show_reasoning else None
                 )
             else:
                 try:
@@ -6181,8 +6206,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 payload = json.loads(data)
 
                 if payload.get("type")=="toggle_reasoning":
+                    # Per-session override (not the global cfg) so two
+                    # concurrent web sessions can have independent /think
+                    # state — one user toggling reasoning shouldn't flip
+                    # the other's chain-of-thought display.
                     show_reasoning = bool(payload.get("value",False))
-                    symbion.cfg.show_reasoning = show_reasoning
+                    symbion._session_show_reasoning[session_id] = show_reasoning
                     continue
 
                 if payload.get("type")=="cmd":
