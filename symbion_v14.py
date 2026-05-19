@@ -1187,11 +1187,32 @@ class AnthropicClient(BaseClient):
             else: msgs.append(m)
         return system, msgs
 
+    @staticmethod
+    def _supports_temperature(model: str) -> bool:
+        """Anthropic's reasoning-class models (Opus 4.7+) reject the
+        `temperature` parameter with HTTP 400 'temperature is deprecated
+        for this model'. Sonnet 4.x and Haiku 4.x still accept it. The
+        responder defaults to Sonnet 4.6, so the common path is fine —
+        but /escalate routes the turn to Opus 4.7 which trips the check
+        without this guard.
+
+        When adding future models, opt them OUT here when Anthropic
+        deprecates temperature on them too."""
+        m = (model or "").lower()
+        return "opus-4-7" not in m and "opus-4.7" not in m
+
+    def _maybe_temp(self, model: str, temp: float) -> Dict:
+        """Returns {'temperature': temp} when the model accepts it, or
+        {} when it doesn't. Spread into the request body."""
+        return {"temperature": temp} if self._supports_temperature(model) else {}
+
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
+        _m = model or self.model
         async def _call():
             async with httpx.AsyncClient(timeout=60) as c:
                 r = await c.post(self._url, headers=self._h(), json={
-                    "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,
+                    "model":_m,"max_tokens":max_tokens,
+                    **self._maybe_temp(_m, temp),
                     "system":system,"messages":[{"role":"user","content":user}]})
                 if r.status_code != 200:
                     body = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
@@ -1203,10 +1224,12 @@ class AnthropicClient(BaseClient):
 
     async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
         system, msgs = self._split(messages)
+        _m = model or self.model
         async def _call():
             async with httpx.AsyncClient(timeout=90) as c:
                 r = await c.post(self._url, headers=self._h(), json={
-                    "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,
+                    "model":_m,"max_tokens":max_tokens,
+                    **self._maybe_temp(_m, temp),
                     "system":system or "You are helpful.","messages":msgs})
                 r.raise_for_status()
                 return r.json()["content"][0]["text"].strip()
@@ -1240,9 +1263,11 @@ class AnthropicClient(BaseClient):
 
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
         system, msgs = self._split(messages)
+        _m = model or self.model
         async with httpx.AsyncClient(timeout=180) as c:
             async with c.stream("POST", self._url, headers=self._h(), json={
-                "model":model or self.model,"max_tokens":cfg.max_tokens,"temperature":cfg.temperature,
+                "model":_m,"max_tokens":cfg.max_tokens,
+                **self._maybe_temp(_m, cfg.temperature),
                 "system":system or SYMBION_PERSONA,"messages":msgs,"stream":True}) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
@@ -1294,10 +1319,11 @@ class AnthropicClient(BaseClient):
             # produce a text synthesis instead of burning the budget on more
             # tool calls and leaving the user with no answer.
             is_final_iter = (iteration == max_iterations - 1)
+            _m = model or self.model
             body_payload = {
-                "model": model or self.model,
+                "model": _m,
                 "max_tokens": cfg.max_tokens,
-                "temperature": cfg.temperature,
+                **self._maybe_temp(_m, cfg.temperature),
                 "system": system or SYMBION_PERSONA,
                 "messages": msgs,
                 "stream": True,
