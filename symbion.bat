@@ -6,9 +6,13 @@ REM through.
 REM
 REM This wrapper pulls conversation state from OneDrive before launch.
 REM The push back to OneDrive is handled inside Python on shutdown (see
-REM the --web shutdown path in symbion_v14.py), so the batch has nothing
-REM left to run after Python exits — which means cmd.exe does NOT show
-REM "Terminate batch job (Y/N)?" when you Ctrl+C the web session.
+REM the --web shutdown path in symbion_v14.py).
+REM
+REM Why NOT `call scripts\start.bat`: cmd.exe shows "Terminate batch job
+REM (Y/N)?" when Ctrl+C is hit inside a CALL'd sub-batch, even when
+REM nothing's queued after. Running python directly here (same shape as
+REM start.bat does, just inlined) makes the python process THE batch
+REM script — Ctrl+C exits cleanly with no prompt.
 REM
 REM To bypass sync (e.g. OneDrive offline), run scripts\start.bat directly.
 REM ===========================================================================
@@ -31,5 +35,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-call "%~dp0scripts\start.bat" %*
+"%PY%" -m symbion %*
 endlocal & exit /b %ERRORLEVEL%

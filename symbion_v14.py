@@ -5927,43 +5927,71 @@ def _lan_ipv4() -> Optional[str]:
 
 
 def _tailscale_ipv4() -> Optional[str]:
-    """Best-effort Tailscale IPv4 for this machine. Tries `tailscale ip -4`
-    first (most reliable, works on any platform where tailscale CLI is on
-    PATH). Falls back to enumerating local IPv4 addresses and picking
-    anything in the CGNAT 100.64.0.0/10 range that Tailscale assigns
-    tailnet members. Returns None if Tailscale isn't installed or running."""
-    try:
-        import subprocess as _subp
-        r = _subp.run(["tailscale", "ip", "-4"],
-                      capture_output=True, text=True, timeout=2)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    # Validate it's actually in CGNAT range
-                    try:
-                        import ipaddress
-                        ip = ipaddress.ip_address(line)
-                        if ip in ipaddress.ip_network("100.64.0.0/10"):
-                            return line
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    # Fallback: scan local interfaces for an IP in the CGNAT range.
+    """Best-effort Tailscale IPv4 for this machine. Tries four paths in
+    order; returns the first hit, or None if Tailscale isn't installed
+    or running.
+
+      1. `tailscale ip -4` on PATH (works when the CLI is reachable)
+      2. The standard Windows install path
+         C:\\Program Files\\Tailscale\\tailscale.exe (PATH varies between
+         cmd.exe / PowerShell / Bash on Windows; absolute path is robust)
+      3. PowerShell Get-NetIPAddress filtered to 100.64.0.0/10 (queries
+         the OS network stack directly, sees the Tailscale virtual
+         adapter even when the CLI isn't on PATH)
+      4. socket.getaddrinfo on the local hostname (often misses virtual
+         adapters on Windows but works on Linux/macOS)
+    """
+    import ipaddress
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+
+    def _check_cgnat(s: str) -> Optional[str]:
+        s = s.strip()
+        if not s or s.startswith("#"):
+            return None
+        try:
+            ip = ipaddress.ip_address(s)
+        except Exception:
+            return None
+        return s if ip in cgnat else None
+
+    import subprocess as _subp
+
+    # 1. tailscale CLI on PATH
+    for cmd in (["tailscale", "ip", "-4"],
+                [r"C:\Program Files\Tailscale\tailscale.exe", "ip", "-4"]):
+        try:
+            r = _subp.run(cmd, capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    hit = _check_cgnat(line)
+                    if hit: return hit
+        except Exception:
+            continue
+
+    # 3. PowerShell Get-NetIPAddress (Windows; queries IPv4 directly)
+    if sys.platform == "win32":
+        try:
+            r = _subp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-NetIPAddress -AddressFamily IPv4 | "
+                 "Where-Object { $_.IPAddress -match '^100\\.' } | "
+                 "Select-Object -First 1 -ExpandProperty IPAddress"],
+                capture_output=True, text=True, timeout=4)
+            if r.returncode == 0:
+                hit = _check_cgnat(r.stdout)
+                if hit: return hit
+        except Exception:
+            pass
+
+    # 4. Hostname-based fallback (often misses virtual adapters on Windows)
     try:
         import socket as _s
-        import ipaddress
-        cgnat = ipaddress.ip_network("100.64.0.0/10")
         for info in _s.getaddrinfo(_s.gethostname(), None, _s.AF_INET):
-            ip_str = info[4][0]
-            try:
-                if ipaddress.ip_address(ip_str) in cgnat:
-                    return ip_str
-            except Exception:
-                pass
+            hit = _check_cgnat(info[4][0])
+            if hit: return hit
     except Exception:
         pass
+
     return None
 
 
