@@ -73,9 +73,30 @@ REM imports straight from this drive — no copy, no rebuild on edits.
 if errorlevel 1 goto :err
 
 echo.
+echo === Registering `symbion` PowerShell function ===
+REM Drops a tiny function into $PROFILE.CurrentUserAllHosts so typing
+REM `symbion` from any directory invokes THIS clone's launcher. -Bypass so
+REM systems with Restricted ExecutionPolicy still run the installer. Non-
+REM fatal: portable Python is the load-bearing part of bootstrap; if the
+REM CLI registration fails (e.g. profile dir on a read-only OneDrive
+REM mount), we still print success but tell the user how to do it manually.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-cli.ps1"
+if errorlevel 1 (
+    echo.
+    echo [warn] CLI registration failed. Run manually after bootstrap:
+    echo   powershell -ExecutionPolicy Bypass -File scripts\install-cli.ps1
+    echo Portable Python is still set up; you can launch via .\symbion.ps1
+)
+
+echo.
 echo ===========================================================================
 echo OK. Portable Python ready at %PYDIR%\python.exe
-echo Launch with: scripts\start.bat
+echo.
+echo Open a NEW PowerShell window, then run from any directory:
+echo   symbion              (terminal mode)
+echo   symbion --web        (web UI)
+echo.
+echo Or from this directory: .\symbion.ps1
 echo ===========================================================================
 exit /b 0
 
