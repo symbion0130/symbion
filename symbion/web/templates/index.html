@@ -196,6 +196,53 @@ footer{
   .icon-btn{width:42px;height:42px}
   .send-btn{padding:0 .9rem;height:42px;font-size:.88rem}
 }
+
+/* Key entry modal — shown when the WS server requires SYMBION_API_KEY
+   auth and the browser has no stored key (or the stored one was wrong). */
+.key-modal{
+  position:fixed;inset:0;z-index:1000;
+  background:rgba(0,0,0,.72);
+  display:flex;align-items:center;justify-content:center;
+  padding:1rem;padding-top:max(1rem,env(safe-area-inset-top));
+  padding-bottom:max(1rem,env(safe-area-inset-bottom));
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+}
+.key-modal.hidden{display:none}
+.key-modal-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:1.4rem;
+  max-width:380px;width:100%;
+  display:flex;flex-direction:column;gap:.85rem;
+}
+.key-modal-card h2{font-size:1.05rem;font-weight:700}
+.key-modal-sub{font-size:.83rem;color:var(--muted-2);line-height:1.5}
+.key-modal-sub code{
+  background:var(--surface-2);padding:.1rem .35rem;
+  border-radius:4px;font-size:.78rem;
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+}
+.key-modal-card input{
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);font-size:16px; /* 16px prevents iOS auto-zoom */
+  padding:.7rem .85rem;border-radius:8px;
+  -webkit-appearance:none;font-family:ui-monospace,Menlo,Consolas,monospace;
+}
+.key-modal-card input:focus{outline:none;border-color:var(--sym)}
+.key-error{color:var(--danger);font-size:.78rem;min-height:1.1rem;line-height:1.4}
+.key-modal-actions{display:flex;justify-content:flex-end;gap:.5rem}
+.key-modal-actions .send-btn{height:38px;padding:0 1rem;font-size:.88rem}
+.key-modal-actions .ghost-btn{
+  background:transparent;border:1px solid var(--border);color:var(--muted-2);
+  height:38px;padding:0 .85rem;font-size:.85rem;border-radius:8px;cursor:pointer;
+}
+.key-modal-hint{font-size:.7rem;color:var(--muted);line-height:1.5}
+.key-btn{
+  background:transparent;border:1px solid var(--border);color:var(--muted-2);
+  font-size:.65rem;padding:.18rem .5rem;border-radius:999px;cursor:pointer;
+  flex-shrink:0;
+}
+.key-btn:hover{color:var(--text);border-color:var(--muted)}
 </style>
 </head>
 <body>
@@ -208,7 +255,22 @@ footer{
     <span class="pill" id="st-dist-pill">dist <b id="st-dist">--</b></span>
     <span class="pill warn" id="st-welfare"><b>! welfare</b></span>
   </div>
+  <button id="key-btn" class="key-btn" title="Change or clear API key" aria-label="API key">key</button>
 </header>
+
+<div id="key-modal" class="key-modal hidden" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
+  <div class="key-modal-card">
+    <h2 id="key-modal-title">Symbion API key</h2>
+    <p class="key-modal-sub">This server requires authentication. Enter your <code>SYMBION_API_KEY</code> to continue.</p>
+    <input id="key-input" type="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="API key" />
+    <div id="key-error" class="key-error"></div>
+    <div class="key-modal-actions">
+      <button id="key-clear" class="ghost-btn" type="button">Clear</button>
+      <button id="key-submit" class="send-btn" type="button">Connect</button>
+    </div>
+    <p class="key-modal-hint">Stored locally in this browser (localStorage). Tap <b>key</b> in the header any time to change or clear it.</p>
+  </div>
+</div>
 <main>
   <div id="chat"><div id="chat-inner"></div></div>
 </main>
@@ -229,6 +291,51 @@ const thinkBtn=document.getElementById('think-btn');
 const SESSION=Math.random().toString(36).slice(2);
 let ws, activeMsg=null, activeCursor=null, activeThinking=null, showReasoning=false;
 
+// --- API key handling ----------------------------------------------------
+// SYMBION_API_KEY is required when the server has one configured. We store
+// the user's key in localStorage and send {type:'auth',key:...} as the
+// first WS frame. If the server reports unauthorized / auth timeout /
+// invalid auth frame, we clear the stored key and show the modal.
+const KEY_STORE='symbion_api_key';
+let apiKey=localStorage.getItem(KEY_STORE)||'';
+let suppressReconnect=false; // set true on auth-class close so we don't loop
+
+const keyModal=document.getElementById('key-modal');
+const keyInput=document.getElementById('key-input');
+const keyError=document.getElementById('key-error');
+const keySubmit=document.getElementById('key-submit');
+const keyClear=document.getElementById('key-clear');
+const keyBtn=document.getElementById('key-btn');
+
+function showKeyModal(errMsg){
+  keyError.textContent=errMsg||'';
+  keyInput.value=apiKey||'';
+  keyModal.classList.remove('hidden');
+  // Slight delay so iOS can focus the input after the modal paints
+  setTimeout(()=>{try{keyInput.focus();keyInput.select();}catch(e){}},50);
+}
+function hideKeyModal(){keyModal.classList.add('hidden');keyError.textContent=''}
+
+keyBtn.onclick=()=>showKeyModal('');
+keyClear.onclick=()=>{
+  localStorage.removeItem(KEY_STORE);
+  apiKey='';
+  keyInput.value='';
+  keyError.textContent='Key cleared. Enter a new one or tap Connect to try without a key (works on no-auth servers).';
+};
+keySubmit.onclick=()=>{
+  const v=keyInput.value.trim();
+  apiKey=v;
+  if(v) localStorage.setItem(KEY_STORE,v);
+  else localStorage.removeItem(KEY_STORE);
+  hideKeyModal();
+  // Force a fresh connection so the new key gets sent as the auth frame
+  suppressReconnect=false;
+  try{if(ws&&ws.readyState<2) ws.close();}catch(e){}
+  setTimeout(connect,200);
+};
+keyInput.addEventListener('keydown',e=>{if(e.key==='Enter') keySubmit.click()});
+
 function nearBottom(){return chat.scrollHeight-chat.scrollTop-chat.clientHeight<80}
 function scrollToBottom(force){if(force||nearBottom())chat.scrollTop=chat.scrollHeight}
 
@@ -241,10 +348,36 @@ thinkBtn.onclick=()=>{
 function connect(){
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/ws/${SESSION}`);
-  ws.onopen=()=>{document.getElementById('dot').classList.remove('dead')};
-  ws.onclose=()=>{document.getElementById('dot').classList.add('dead');setTimeout(connect,3000)};
+  ws.onopen=()=>{
+    document.getElementById('dot').classList.remove('dead');
+    // Send the auth frame as the first message if we have a key. The
+    // server treats this frame as required when SYMBION_API_KEY is set
+    // and ignores it harmlessly when the server has no key configured,
+    // so it's safe to always send it (the server's main loop drops
+    // unknown type:'auth' frames). If we have no key stored, send
+    // nothing — let the server tell us whether it needs one.
+    if(apiKey){
+      try{ws.send(JSON.stringify({type:'auth',key:apiKey}));}catch(e){}
+    }
+  };
+  ws.onclose=()=>{
+    document.getElementById('dot').classList.add('dead');
+    if(suppressReconnect){
+      // Last close was auth-related — don't auto-reconnect, the user
+      // needs to fix the key first via the modal.
+      return;
+    }
+    setTimeout(connect,3000);
+  };
   ws.onmessage=e=>{
     const d=JSON.parse(e.data);
+    // Any non-error frame from the server means we're connected and
+    // authorized — auto-hide the key modal if it's open. Covers both
+    // the with-key-server case (auth_ok comes first) and the no-key-
+    // server case (status frame comes first, no auth_ok involved).
+    if(d.t!=='error' && !keyModal.classList.contains('hidden')){
+      hideKeyModal();
+    }
     if(d.t==='tok'){
       if(!activeMsg) startMsg();
       appendTok(d.v);
@@ -267,6 +400,25 @@ function connect(){
       btn.disabled=false;
     } else if(d.t==='status'){
       updateStatus(d);
+    } else if(d.t==='auth_ok'){
+      // Server confirmed our auth frame. The status frame that follows
+      // will populate the header pills.
+    } else if(d.t==='error'){
+      const msg=String(d.v||'');
+      const isAuthErr=msg==='unauthorized'||msg==='auth timeout'||msg==='invalid auth frame';
+      if(isAuthErr){
+        // The stored key was wrong, missing, or expired. Block
+        // auto-reconnect (would just fail again) and prompt the user.
+        suppressReconnect=true;
+        const prettyMsg=msg==='unauthorized'?'Wrong API key — try again.'
+                       :msg==='auth timeout'?'Server timed out waiting for an auth frame. The key field above sends one.'
+                       :'The browser sent a malformed auth frame. Try again.';
+        showKeyModal(prettyMsg);
+      } else {
+        // Non-auth error (e.g. rate limit) — surface inline if we have
+        // an active message context, otherwise drop on the floor.
+        if(activeMsg) appendTok(`[error: ${msg}]`);
+      }
     }
   };
 }
@@ -416,6 +568,14 @@ inp.addEventListener('input',()=>{
   inp.style.height='auto';
   inp.style.height=Math.min(inp.scrollHeight,140)+'px';
 });
+// Show the key modal up-front if we have no stored key. We still kick
+// off connect() in parallel — on a no-auth server the first status
+// frame will auto-dismiss the modal without the user having to do
+// anything. On an auth-required server the modal stays put until the
+// user enters a key.
+if(!apiKey){
+  showKeyModal('Enter your server’s SYMBION_API_KEY, or tap Connect without one if the server doesn’t require auth.');
+}
 connect();
 </script>
 </body>
