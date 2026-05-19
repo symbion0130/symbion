@@ -276,9 +276,22 @@ class SymbionConfig:
     web_host: str = "0.0.0.0"
     web_port: int = 8000
     api_key:  str = field(default_factory=lambda: os.getenv("SYMBION_API_KEY",""))
-    rate_limit_per_minute: int = 30
+    # Per-(IP, active_user) bucket. 30/min was per-IP and would throttle
+    # two users on the same household IP sharing a single iPhone or
+    # bouncing between aaron + lala. 120/min per (IP, user) gives each
+    # bucket comfortable headroom for active chat (~10-15 msgs/min) AND
+    # bursts of repeated commands while leaving plenty of margin before
+    # any real abuse becomes possible.
+    rate_limit_per_minute: int = 120
 
-    max_retries:        int   = 2
+    # Retry budget for LLM provider calls. 2 was tight when the user's
+    # Anthropic account hit a transient 429/529 — a single retry would
+    # often re-hit the same throttle window. 4 with exponential backoff
+    # (1.5x per step) gives a max total wait of ~1+1.5+2.25+3.4 = ~8.2s
+    # spread across 4 attempts, which absorbs short tier-throttle bursts
+    # without making the user wait noticeably longer on a successful first
+    # try (still <100ms when no retries fire).
+    max_retries:        int   = 4
     retry_backoff:      float = 1.5
     circuit_open_after: int   = 4
 
@@ -6009,9 +6022,15 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         if req.headers.get("X-API-Key","") != symbion.cfg.api_key:
             raise HTTPException(401,"Invalid API key")
 
-    def _rate(req: Request):
+    def _rate(req: Request, user: str = "_rest"):
+        # Rate limit bucket keyed by (IP, user) so two users on the same
+        # household IP (e.g. aaron's laptop and lala's iPhone both NATing
+        # through the same public IP) get independent buckets. REST has
+        # no per-request user (no session id), so it falls back to the
+        # placeholder '_rest' — REST clients still share one bucket per IP.
         ip = req.client.host if req.client else "unknown"
-        if not rate_lm.allow(ip): raise HTTPException(429,"Rate limit exceeded")
+        if not rate_lm.allow(f"{ip}|{user}"):
+            raise HTTPException(429,"Rate limit exceeded")
 
     def _health_dict():
         m = symbion.health
@@ -6221,9 +6240,11 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             while True:
                 data    = await websocket.receive_text()
                 # Per-client-host rate limit — same RateLimiter the REST
-                # endpoints use, keyed on remote host. Soft-fail by sending
-                # an error frame rather than closing so the user can retry.
-                if not rate_lm.allow(client_host):
+                # endpoints use, keyed on (remote host, active user) so
+                # multiple users on the same household IP get independent
+                # buckets. Soft-fail by sending an error frame rather than
+                # closing so the user can retry.
+                if not rate_lm.allow(f"{client_host}|{symbion._active_user(session_id)}"):
                     await send({"t":"error","v":"rate limit exceeded"})
                     continue
                 payload = json.loads(data)
