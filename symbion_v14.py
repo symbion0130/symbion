@@ -7390,6 +7390,24 @@ Examples:
         # frames. Multi-large-image use cases that exceed this can split
         # across multiple frames; the per-image checks inside the handler
         # still bound individual decoded sizes.
+        # Suppress uvicorn's "ERROR: Cancel N running task(s), timeout
+        # graceful shutdown exceeded" log line on Ctrl+C. That message
+        # fires every time the timeout_graceful_shutdown cap hits —
+        # which is the INTENDED behavior of the cap, not an error
+        # condition for our use case. It's harmless but reads as a
+        # scary red error every clean shutdown. Filter it out at the
+        # logger level so we still see real uvicorn errors.
+        import logging as _logging_mod
+        class _UvicornShutdownNoise(_logging_mod.Filter):
+            def filter(self, record):
+                msg = record.getMessage().lower()
+                if "timeout graceful shutdown" in msg:
+                    return False
+                return True
+        _shutdown_filter = _UvicornShutdownNoise()
+        for _name in ("uvicorn", "uvicorn.error", "uvicorn.server"):
+            _logging_mod.getLogger(_name).addFilter(_shutdown_filter)
+
         # Hard-force second Ctrl+C: if the user hits Ctrl+C and uvicorn's
         # graceful path is still draining, a SECOND Ctrl+C should kill
         # the process immediately. We replace Python's default SIGINT
