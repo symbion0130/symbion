@@ -1,10 +1,49 @@
 # Symbion setup guide
 
-How to go from a fresh machine to a running Symbion. Three paths depending on what you have on hand.
+How to go from a fresh machine to a running Symbion. Four paths depending on what you have on hand.
 
 ---
 
-## Quickest path: portable drive (no system Python needed)
+## Fastest path: Cloudflare Worker one-liner (zero prerequisites)
+
+For when you have a brand-new Windows machine and want everything — git, portable Python, Symbion source, dependencies, API keys — set up automatically. Paste one line and walk away.
+
+The installer is served by a Cloudflare Worker that injects keys into `install.ps1` on the fly; the token in the URL gates access to the private repo.
+
+```powershell
+# Default - works on machines where ExecutionPolicy allows scripts
+irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex
+```
+
+```powershell
+# Locked-down machine - use this if the above fails with "running scripts is disabled"
+powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex"
+```
+
+What it does, in order:
+
+1. **Clones the repo** to `%USERPROFILE%\symbion` (install git via winget first if missing — requires UAC approval one time).
+2. **Bootstraps portable Python** via `scripts\bootstrap-portable.bat` (~5 min, ~100 MB into `.python\`).
+3. **Seeds `.env`** with `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`, `SYMBION_API_KEY` from the Worker's injected secrets. (OneDrive seed, if synced, wins over Worker injection and provides Kimi/DeepSeek too.)
+4. **Launches Symbion** in a new window via the `symbion` shim.
+
+`SYMBION_INSTALL_DIR` overrides the install directory if you want it somewhere other than `%USERPROFILE%\symbion`. Re-running on a machine that already has Symbion is safe — it does a `git pull` and skips already-installed Python deps.
+
+After the first install on a machine, use the `.cmd` shim for refreshes (no ExecutionPolicy concerns, sidesteps the long URL):
+
+```cmd
+%USERPROFILE%\symbion\scripts\install-web.cmd
+```
+
+For an in-repo refresh that hits the local `install.ps1` directly without going through the Worker (no fresh download, no temporary clone):
+
+```cmd
+%USERPROFILE%\symbion\scripts\refresh-here.cmd
+```
+
+---
+
+## Quickest path (if you already have the repo): portable drive (no system Python needed)
 
 For when Symbion lives on an external drive and you want to plug it into any x64 Windows machine.
 

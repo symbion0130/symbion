@@ -10,9 +10,9 @@ Symbion is a **single-file async Python AI assistant** that wraps a frontier LLM
 
 ---
 
-## Current state (as of April 2026)
+## Current state (as of May 2026)
 
-- **Stable working version:** `symbion_v14.py` — ~5,300 lines, single file. Cloned forward from `symbion_v13.py`; behaviorally identical at the v13→v14 cutover.
+- **Stable working version:** `symbion_v14.py` — ~6,650 lines, single file. Cloned forward from `symbion_v13.py`; behaviorally identical at the v13→v14 cutover, then grown.
 - **Frozen snapshots:** `symbion_v3.py`..`symbion_v13.py` (incl. `symbion_v13.py.orig`) live in `archive/legacy_versions/` for local diffing. The whole `archive/` tree is gitignored; not part of the repo on GitHub. v13 was a deliberate **simplification** of v12, not an expansion.
 
 ### The v12 → v13 design shift

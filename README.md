@@ -4,12 +4,19 @@ Symbion is an async Python AI assistant with multi-provider LLM support, SQLite 
 
 ## Install
 
-See **[SETUP.md](SETUP.md)** for the full setup guide — three install paths (portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
+See **[SETUP.md](SETUP.md)** for the full setup guide — four install paths (Worker one-liner, portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
 
 TL;DR:
 
+```powershell
+# Fresh Windows machine — Worker one-liner (clone + bootstrap + key seed in one paste)
+irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex
+# Locked-down machine variant if the above errors with "running scripts is disabled":
+powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex"
+```
+
 ```bash
-# System Python (the common case)
+# System Python (dev clone)
 pip install -e .[web]
 python -m symbion --setup        # interactive: writes API keys to .env
 python -m symbion --web          # http://localhost:8000

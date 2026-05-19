@@ -106,6 +106,57 @@ symbion_transparency.log    # legacy per-turn audit log (append-only)
 pyproject.toml              # pip install -e .
 ```
 
+## Deployment / fresh-machine install
+
+The fresh-machine install runs through a Cloudflare Worker that gates access via a bearer token and injects provider keys into the served `install.ps1` before delivery.
+
+**The three install commands** (canonical reference is `install.ps1`'s `.EXAMPLE` blocks):
+
+```powershell
+# 1. Default - first install where ExecutionPolicy permits scripts
+irm https://symbion-installer.symbion-0130.workers.dev?t=<token> | iex
+
+# 2. Locked-down - first install where (1) errors "running scripts is disabled"
+powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=<token> | iex"
+
+# 3. Refresh - Symbion already installed
+%USERPROFILE%\symbion\scripts\install-web.cmd
+```
+
+The Worker performs string-replace on four placeholders before serving:
+
+| Placeholder in `install.ps1` | Worker Secret | Used by `install.ps1` for |
+|---|---|---|
+| `__SYMBION_PAT_INJECTED__` | `GITHUB_PAT` | `git clone` (Contents:read on symbion0130/symbion) |
+| `__SYMBION_ANTHROPIC_KEY_INJECTED__` | `ANTHROPIC_API_KEY` | seed `.env` |
+| `__SYMBION_BRAVE_KEY_INJECTED__` | `BRAVE_API_KEY` | seed `.env` |
+| `__SYMBION_API_KEY_INJECTED__` | `SYMBION_API_KEY` | seed `.env` |
+
+Kimi and DeepSeek were deliberately removed from Worker injection on 2026-05-19 to reduce blast radius if the install token leaks. Those keys ride the OneDrive seed path or manual `--setup` when needed — *don't re-add them to the Worker without a paired decision in commit message.*
+
+**Phase 3 `.env` source priority** in `install.ps1` (first match wins):
+
+1. Existing `<repo>\.env` — leave alone, skip
+2. OneDrive seed at `%OneDrive%\Symbion\sync\.env` — copy in (full multi-key set)
+3. Worker-injected keys — write the 3 keys above as a fresh `.env`
+4. Interactive `python -m symbion --setup` — paste by hand
+
+**Tooling around the Worker:**
+
+| Script | Purpose |
+|---|---|
+| `scripts/install-web.cmd` | Runs the Worker one-liner via `powershell -ExecutionPolicy Bypass`. Sidesteps locked-down ExecutionPolicy. Use for refresh. |
+| `scripts/refresh-here.cmd` | Runs the *local* `install.ps1` (in-repo mode via `$PSScriptRoot`) — no Worker round-trip. Use to refresh the clone in place. |
+| `scripts/verify-worker.ps1` | 11-check smoke test of the Worker (gate behaviour + placeholder substitution + key presence). Run after any Worker change. Never echoes secrets. |
+| `scripts/push-env.ps1` | Push local `.env` → `%OneDrive%\Symbion\sync\.env` so future installs on other machines pull it. `-Pull` reverses direction. |
+
+**Edit constraints when touching install/deploy:**
+
+- Adding a new Worker-injected key requires changes in three places that must stay in sync: `install.ps1` (placeholder string + `Resolve-InjectedKey` call + Phase 3 `$injected` hashtable), the Worker source (new `.replaceAll` line + reference the new Secret), and `verify-worker.ps1` (new entry in `$extraKeys`). Also add the matching Cloudflare Secret in the dashboard.
+- The install token is hard-coded into `install.ps1`'s `.DESCRIPTION` / `.EXAMPLE`. Acceptable because the repo is private — anyone who can read `install.ps1` already has clone access via the PAT.
+- The Worker source lives only in the Cloudflare dashboard inline editor (no `wrangler.toml` in this repo). Five Secrets required there: `GITHUB_PAT`, `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`, `SYMBION_API_KEY`, `INSTALL_TOKEN`.
+- The zip-via-`archive/refs/heads/main.zip` fallback is intentionally absent from `install.ps1` — GitHub 302s archive requests to `codeload.github.com` and PowerShell drops the `Authorization` header across hosts, so private-repo zip auth always 404s. If the repo ever goes public, the zip path can come back (it's in git history).
+
 ## Architectural layers (top to bottom in symbion_v14.py)
 
 ```
