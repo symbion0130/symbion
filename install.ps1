@@ -81,14 +81,20 @@ function Write-Section($msg) {
 # Repo is private, so all fetches (initial irm of install.ps1, git clone,
 # zip download) need a fine-grained Personal Access Token with read-only
 # Contents permission. Order of preference:
-#   1. $env:SYMBION_PAT (user pastes via env var on the install command)
-#   2. %OneDrive%\Symbion\sync\.pat (cached from a prior install on any
+#   1. Worker-injected PAT (placeholder below gets find/replaced by the
+#      Cloudflare Worker before this script is served, so the one-line
+#      `irm bit.ly/symbioninstalls | iex` command works on any fresh
+#      machine with no env var typing). When read directly from disk,
+#      the placeholder stays literal and the StartsWith check below
+#      falls through to source #2.
+#   2. $env:SYMBION_PAT (set manually if not using the Worker)
+#   3. %OneDrive%\Symbion\sync\.pat (cached from a prior install on any
 #      machine signed into the same OneDrive account)
-# We DO NOT prompt -- if neither source has a PAT, the irm fetching this
-# very script would have failed before we got here. If it didn't (e.g.
-# the repo was just made public), we proceed without a PAT and let git
-# clone try anonymously.
+# We DO NOT prompt -- if no source has a PAT, the git clone fails with
+# a clear error.
 function Resolve-Pat {
+    $injected = '__SYMBION_PAT_INJECTED__'
+    if (-not $injected.StartsWith('__SYMBION')) { return $injected }
     if ($env:SYMBION_PAT) { return $env:SYMBION_PAT }
     $oneDrive = if ($env:OneDrive) { $env:OneDrive } else { $env:OneDriveConsumer }
     if ($oneDrive) {
