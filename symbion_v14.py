@@ -5473,7 +5473,7 @@ def validate_and_report(cfg) -> list:
 WEB_HTML = (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").read_text(encoding="utf-8") if (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").exists() else "<h1>Symbion v14</h1><p>Template not found</p>"
 
 
-def _origin_allowed(origin: str, expected_port: int) -> bool:
+def _origin_allowed(origin: str, expected_port: int, require_loopback: bool = False) -> bool:
     """Validate the WebSocket Origin header against a same-host policy.
 
     CORS does not protect WebSockets the way it protects fetch(). A
@@ -5486,11 +5486,19 @@ def _origin_allowed(origin: str, expected_port: int) -> bool:
         scripts that don't send Origin; they're authenticated by virtue
         of running on the same machine + optional API key).
       - Origin port must match the server's port.
-      - Origin host must be loopback (127.0.0.1, ::1, localhost) or a
-        private RFC1918 address (10.x, 172.16-31.x, 192.168.x). This
-        blocks https://evil.com:<port> drive-bys, including DNS-rebinding
-        attempts where the resolved IP is loopback but Origin still
-        carries the attacker's hostname.
+      - Origin host must be loopback (127.0.0.1, ::1, localhost). If
+        require_loopback is False, RFC1918 private addresses (10.x,
+        172.16-31.x, 192.168.x) are also allowed — used when the API
+        key gate is active so the auth frame is the primary defense
+        and we just want to filter out public-Internet drive-bys.
+      - When require_loopback is True (no-API-key mode), private LAN
+        origins like http://192.168.1.50:8000 are REJECTED. Without
+        this, a malicious page served from another machine on the same
+        LAN could open ws://127.0.0.1:<port>/ws/... and drive Symbion
+        because Origin would carry the attacker's LAN IP, which my
+        prior implementation accepted on the basis of "it's private,
+        not public-Internet" — but private-without-auth is exactly
+        the unprotected window the no-key localhost mode opens up.
     """
     if not origin:
         return True
@@ -5512,7 +5520,11 @@ def _origin_allowed(origin: str, expected_port: int) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return ip.is_loopback or ip.is_private
+    if ip.is_loopback:
+        return True
+    if require_loopback:
+        return False
+    return ip.is_private
 
 
 def build_web_app(symbion: "SYMBION") -> "FastAPI":
@@ -5672,12 +5684,18 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         # Origin allowlist. CORS does not protect WebSocket connections the
         # way it protects fetch — without this check, a malicious page in
         # the same browser could open ws://127.0.0.1:<port>/ws/... and
-        # drive the agent loop (including machine-wide read_file). Allows
-        # empty Origin (non-browser clients) and same-port loopback /
-        # RFC1918 hosts; rejects everything else (close code 1008 =
-        # policy violation).
+        # drive the agent loop (including machine-wide read_file).
+        #
+        # Policy depends on whether the API key gate is active:
+        #   - api_key set: RFC1918 + loopback allowed. Auth frame is the
+        #     primary defense, so we just filter out public origins.
+        #   - api_key empty: loopback ONLY. Without an auth frame, a
+        #     malicious page on http://192.168.1.50:<port> could otherwise
+        #     drive Symbion via ws://127.0.0.1:<port>/ws/... — the prior
+        #     'private IP is fine' policy left this hole open.
         origin = websocket.headers.get("origin", "")
-        if not _origin_allowed(origin, symbion.cfg.web_port):
+        require_loopback = not symbion.cfg.api_key
+        if not _origin_allowed(origin, symbion.cfg.web_port, require_loopback=require_loopback):
             await websocket.close(code=1008)
             return
         await websocket.accept()
