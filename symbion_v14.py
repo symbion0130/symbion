@@ -5706,6 +5706,14 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             try: await websocket.send_text(json.dumps(d, default=str))
             except Exception: pass
 
+        # Local helper: close the socket if it's still open; swallow errors
+        # from closing-already-closed sockets so a mid-handshake client
+        # disconnect doesn't surface as a 'Unexpected ASGI message
+        # websocket.close, after sending websocket.close' RuntimeError.
+        async def _safe_close(code: int):
+            try: await websocket.close(code=code)
+            except Exception: pass
+
         # First-message auth gate. When SYMBION_API_KEY is set, the client
         # must send {"type":"auth","key":"<key>"} before anything else.
         # Mirrors the /api/chat X-API-Key check — without this, anyone on the
@@ -5717,15 +5725,19 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 fp = json.loads(first)
             except asyncio.TimeoutError:
                 await send({"t":"error","v":"auth timeout"})
-                await websocket.close(code=1008)
+                await _safe_close(1008)
+                return
+            except WebSocketDisconnect:
+                # Client hung up before sending the auth frame. Nothing to
+                # close or report — the socket is already gone.
                 return
             except Exception:
                 await send({"t":"error","v":"invalid auth frame"})
-                await websocket.close(code=1008)
+                await _safe_close(1008)
                 return
             if fp.get("type") != "auth" or fp.get("key","") != symbion.cfg.api_key:
                 await send({"t":"error","v":"unauthorized"})
-                await websocket.close(code=1008)
+                await _safe_close(1008)
                 return
             await send({"t":"auth_ok"})
 
