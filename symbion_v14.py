@@ -6052,7 +6052,35 @@ def validate_and_report(cfg) -> list:
 #  WEB UI  -- v12
 # ==============================================================================
 
-WEB_HTML = (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").read_text(encoding="utf-8") if (Path(__file__).parent / "symbion" / "web" / "templates" / "index.html").exists() else "<h1>Symbion v14</h1><p>Template not found</p>"
+# Template path + mtime-tracked cache. Re-reads from disk only when the
+# file's mtime changes, so live edits go live on the next browser refresh
+# without needing a server restart. Steady-state cost is one stat() call
+# per page load (cached by the OS) -- effectively free.
+_WEB_TEMPLATE_PATH = Path(__file__).parent / "symbion" / "web" / "templates" / "index.html"
+_WEB_TEMPLATE_FALLBACK = "<h1>Symbion v14</h1><p>Template not found</p>"
+_WEB_TEMPLATE_CACHE = {"mtime": 0.0, "html": ""}
+
+
+def _load_web_html() -> str:
+    """Return the index.html body, re-reading from disk if it's been
+    modified since last load. Falls back to a minimal inline HTML when
+    the template file is missing (legacy / partial-install paths)."""
+    try:
+        mtime = _WEB_TEMPLATE_PATH.stat().st_mtime
+    except OSError:
+        return _WEB_TEMPLATE_FALLBACK
+    if mtime != _WEB_TEMPLATE_CACHE["mtime"]:
+        try:
+            _WEB_TEMPLATE_CACHE["html"]  = _WEB_TEMPLATE_PATH.read_text(encoding="utf-8")
+            _WEB_TEMPLATE_CACHE["mtime"] = mtime
+        except OSError:
+            # Stat succeeded but read failed (transient AV / indexer hold)
+            # -- serve the previously-cached HTML rather than the fallback
+            # so we degrade gracefully under flaky filesystems.
+            if _WEB_TEMPLATE_CACHE["html"]:
+                return _WEB_TEMPLATE_CACHE["html"]
+            return _WEB_TEMPLATE_FALLBACK
+    return _WEB_TEMPLATE_CACHE["html"]
 
 
 def _origin_allowed(origin: str, expected_port: int, require_loopback: bool = False) -> bool:
@@ -6181,7 +6209,7 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         }
 
     @app.get("/", response_class=HTMLResponse)
-    async def index(): return WEB_HTML
+    async def index(): return _load_web_html()
 
     @app.get("/health")
     async def health():
