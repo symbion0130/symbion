@@ -243,6 +243,18 @@ footer{
   flex-shrink:0;
 }
 .key-btn:hover{color:var(--text);border-color:var(--muted)}
+
+/* User-picker modal — shown on first connect when no USER_STORE is set.
+   Reuses the .key-modal layout so styling stays consistent. */
+.user-choices{display:flex;flex-direction:column;gap:.4rem}
+.user-choice{
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);font-size:.95rem;
+  padding:.75rem .9rem;border-radius:8px;text-align:left;cursor:pointer;
+  font-family:inherit;
+}
+.user-choice:hover{border-color:var(--sym);color:var(--text)}
+.user-choice .sub{display:block;color:var(--muted);font-size:.72rem;margin-top:.15rem}
 </style>
 </head>
 <body>
@@ -257,6 +269,15 @@ footer{
   </div>
   <button id="key-btn" class="key-btn" title="Change or clear API key" aria-label="API key">key</button>
 </header>
+
+<div id="user-modal" class="key-modal hidden" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
+  <div class="key-modal-card">
+    <h2 id="user-modal-title">Who's there?</h2>
+    <p class="key-modal-sub">Symbion attributes memory per user. Pick yourself so cross-session history surfaces correctly.</p>
+    <div id="user-choices" class="user-choices"></div>
+    <p class="key-modal-hint">Stored locally in this browser. Tap a name or use <code>/user &lt;name&gt;</code> any time.</p>
+  </div>
+</div>
 
 <div id="key-modal" class="key-modal hidden" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
   <div class="key-modal-card">
@@ -319,6 +340,29 @@ const keyError=document.getElementById('key-error');
 const keySubmit=document.getElementById('key-submit');
 const keyClear=document.getElementById('key-clear');
 const keyBtn=document.getElementById('key-btn');
+
+// User-picker modal (first-connect prompt). Populated from the `user_init`
+// WS frame; suppressed if USER_STORE is already set in localStorage.
+const userModal=document.getElementById('user-modal');
+const userChoices=document.getElementById('user-choices');
+function showUserModal(known, current){
+  userChoices.innerHTML='';
+  (known||[]).forEach(name=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='user-choice';
+    b.innerHTML=`${name}${name===current?' <span class="sub">(current default)</span>':''}`;
+    b.onclick=()=>{
+      localStorage.setItem(USER_STORE, name);
+      if(ws && ws.readyState===1){
+        try{ws.send(JSON.stringify({type:'set_user', name:name}));}catch(e){}
+      }
+      userModal.classList.add('hidden');
+    };
+    userChoices.appendChild(b);
+  });
+  userModal.classList.remove('hidden');
+}
 
 function showKeyModal(errMsg){
   keyError.textContent=errMsg||'';
@@ -430,6 +474,22 @@ function connect(){
       addSymStatic(lines.join('\n'));
     } else if(d.t==='history'){
       renderHistory(d.messages||[]);
+    } else if(d.t==='user_init'){
+      // Server-advertised user roster. Prompt once per browser; if the
+      // user has already picked (USER_STORE present), just confirm the
+      // server-side attribution matches. Skip the modal entirely when
+      // only one known user is configured (no choice to make).
+      const known   = (d.known||[]).filter(Boolean);
+      const stored  = localStorage.getItem(USER_STORE);
+      if(!stored && known.length > 1){
+        showUserModal(known, d.current||'aaron');
+      } else if(stored && stored !== (d.current||'aaron')){
+        // localStorage says lala but server-side session still on default.
+        // Re-send the set_user frame so attribution lines up.
+        try{ws.send(JSON.stringify({type:'set_user', name:stored}));}catch(e){}
+      }
+    } else if(d.t==='user_ok'){
+      // Server acknowledged the set_user frame. No UI change needed.
     } else if(d.t==='summarize_ok'){
       // Session was flushed to a summary server-side. Start a fresh
       // conversation: clear the chat, generate a new SESSION, reconnect.

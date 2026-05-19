@@ -3587,7 +3587,8 @@ class SymbionMemory:
     def get_relevant_messages_cross_session(
             self, query: str, exclude_session: str,
             k: int = 3, candidate_pool: int = 500,
-            min_chars: int = 40) -> List[Dict]:
+            min_chars: int = 40,
+            user: Optional[str] = None) -> List[Dict]:
         """Pull a few specific message exchanges from PAST sessions that are
         BM25-relevant to the current query. The summary retrieval already
         gives the model the gist of past sessions; this gives it actual
@@ -3598,13 +3599,25 @@ class SymbionMemory:
         Skips current session (already covered by get_recent), skips trivial
         messages under min_chars (yes/no/ok noise), pulls latest N messages
         as candidates so we don't BM25 against the entire history.
+
+        When `user` is provided, only messages tagged to that user are
+        eligible — keeps lala's cross-session quotes out of aaron's
+        retrieval and vice versa. Legacy callers (no user arg) get the
+        unscoped behaviour.
         """
         with sqlite3.connect(self.db) as c:
-            rows = c.execute(
-                "SELECT timestamp, session, role, content FROM messages "
-                "WHERE session != ? AND length(content) >= ? "
-                "ORDER BY id DESC LIMIT ?",
-                (exclude_session, min_chars, candidate_pool)).fetchall()
+            if user:
+                rows = c.execute(
+                    "SELECT timestamp, session, role, content FROM messages "
+                    "WHERE session != ? AND length(content) >= ? AND user=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (exclude_session, min_chars, user, candidate_pool)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT timestamp, session, role, content FROM messages "
+                    "WHERE session != ? AND length(content) >= ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (exclude_session, min_chars, candidate_pool)).fetchall()
         if not rows:
             return []
         contents = [r[3] for r in rows]
@@ -3897,12 +3910,16 @@ class SymbionMemory:
                       query: str = "",
                       query_embedding: Optional[List[float]] = None,
                       user: str = "aaron") -> "Tuple[List[Dict],str]":
-        # Reads are UNSCOPED — every user sees the shared session + cross-
-        # session pool. Only the profile layer is user-aware: the active
-        # user's prefixed entries override the shared base. This matches
-        # the design choice 'memory is categorized differently, not a
-        # clean slate' — Aaron's history is visible to Lala, but new
-        # writes get tagged with the active user for future categorization.
+        # Hybrid scoping (2026-05-19): SAME-session reads stay shared so
+        # two people on one chat can collaborate (each other's messages
+        # get prefixed '[<name> said]' via the recent-loop below). But
+        # CROSS-session retrieval — summaries and message quotes — is
+        # scoped to the active user, so lala asking "what were we talking
+        # about earlier" doesn't surface aaron's NBA/web-UI history just
+        # because his sessions are more recent. Profile is also user-
+        # scoped. Was fully UNSCOPED in pre-2026-05-19 builds; the rapport-
+        # confusion bug (lala had to name a topic for her own history to
+        # surface) drove this change.
         raw_recent      = self.get_recent(session, n=10)
         # Per-message author attribution: when the shared pool contains
         # turns from multiple users (e.g. aaron's chat + lala's later
@@ -3976,18 +3993,21 @@ class SymbionMemory:
             parts.append("Earlier in this conversation:\n"+"\n\n".join(summaries))
 
         # Relevant cross-session summaries: hybrid (BM25 + cosine) when a
-        # query embedding is supplied, lexical-only otherwise.
+        # query embedding is supplied, lexical-only otherwise. Scoped to
+        # the active user — see the hybrid-scoping note at the top of
+        # build_context. Without this, lala asking "what were we talking
+        # about" gets BM25-matched against aaron's denser session pool.
         if query:
-            # Cross-session retrieval is also unscoped — shared memory pool.
             if query_embedding is not None:
                 relevant = self.get_relevant_summaries_hybrid(
                     query, query_embedding, k=2,
                     bm25_weight=self.cfg.embedding_bm25_weight,
                     cosine_weight=self.cfg.embedding_cosine_weight,
                     recency_half_life_days=self.cfg.embedding_recency_half_life_days,
-                    recency_weight=self.cfg.embedding_recency_weight)
+                    recency_weight=self.cfg.embedding_recency_weight,
+                    user=user)
             else:
-                relevant = self.get_relevant_summaries(query, k=2)
+                relevant = self.get_relevant_summaries(query, k=2, user=user)
             # Deduplicate against session summaries
             existing = set(summaries)
             relevant = [s for s in relevant if s not in existing]
@@ -3998,9 +4018,10 @@ class SymbionMemory:
         # this gives the model verbatim "what was actually said" — the depth
         # that makes cross-session continuity feel like memory rather than
         # synopsis. Trimmed to 280 chars per message to bound context cost.
+        # Scoped to active user (same reason as summaries above).
         if query:
             msg_snippets = self.get_relevant_messages_cross_session(
-                query, exclude_session=session, k=3)
+                query, exclude_session=session, k=3, user=user)
             if msg_snippets:
                 lines = []
                 for m in msg_snippets:
@@ -6338,6 +6359,21 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 logger.warning(f"WS history fetch failed: {ex}")
                 hist = []
             await send({"t":"history","messages":hist})
+
+            # Surface the known-users roster + currently-attributed user so
+            # the client can prompt on first connect (no USER_STORE in
+            # localStorage yet) instead of silently defaulting to aaron.
+            # Cross-session retrieval is now user-scoped (build_context,
+            # 2026-05-19), so picking the right user at session start is
+            # what makes lala see lala's history rather than aaron's.
+            try:
+                await send({
+                    "t": "user_init",
+                    "current": symbion._active_user(session_id),
+                    "known": list(symbion.cfg.known_users or ["aaron"]),
+                })
+            except Exception as ex:
+                logger.warning(f"WS user_init send failed: {ex}")
 
             m = symbion.health; mn,_ = m.mood()
             await send({"t":"status","mood":mn,"coh":"--",
