@@ -9,6 +9,8 @@ description = "Async AI assistant with multi-provider LLM support, behavioral sa
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.24",
+    "prompt_toolkit>=3.0",  # terminal REPL line editing (arrow keys move cursor
+                            # instead of cycling Windows console history)
 ]
 
 [project.optional-dependencies]

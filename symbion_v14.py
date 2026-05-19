@@ -35,6 +35,29 @@ try:
     _FASTAPI = True
 except ImportError: _FASTAPI = False
 
+# Optional: prompt_toolkit gives the terminal REPL proper line editing —
+# arrow keys move the cursor inside the current line instead of cycling
+# through Windows console input history (which was overwriting whatever
+# the user was mid-typing). Falls back to bare input() if missing; users
+# get the old behavior. Install with: pip install prompt_toolkit
+try:
+    from prompt_toolkit import prompt as _pt_prompt
+    from prompt_toolkit.formatted_text import ANSI as _PTAnsi
+    from prompt_toolkit.key_binding import KeyBindings as _PTKeyBindings
+    # Bind Up/Down to no-op. Default prompt_toolkit behavior is to
+    # navigate history on Up/Down even when cursor would normally be
+    # on the first/last line — which is the exact bug the user
+    # reported ('arrow keys insert previous text instead of moving
+    # cursor'). Left/Right keep their default cursor-move behavior.
+    _PT_KB = _PTKeyBindings()
+    @_PT_KB.add("up")
+    def _(_event): pass
+    @_PT_KB.add("down")
+    def _(_event): pass
+    _PROMPT_TOOLKIT = True
+except ImportError:
+    _PROMPT_TOOLKIT = False
+
 
 # Anchor every relative path Symbion touches to the repo, not the launch
 # CWD. Without this, `python -m symbion` from another directory loads
@@ -6419,8 +6442,29 @@ def _read_input_multiline(prompt_text: str, paste_window: float = 0.08) -> str:
 
     Also handles `/paste`: when the first line is exactly `/paste`, we read
     subsequent lines until a line equal to `///` (explicit multi-line mode).
+
+    Uses prompt_toolkit when available so arrow keys move the cursor within
+    the line instead of cycling Windows console history (which was the
+    'arrow keys insert previous text' bug the user reported). prompt_toolkit
+    still gives intentional history via PageUp / Ctrl+R, just not on the
+    bare arrow keys. Falls back to input() when prompt_toolkit is missing.
     """
-    first = input(prompt_text)
+    if _PROMPT_TOOLKIT:
+        try:
+            # ANSI wrapper so the colored prompt renders correctly inside
+            # prompt_toolkit (which would otherwise show the raw escape
+            # codes). key_bindings overrides Up/Down to no-op so arrow
+            # keys never auto-insert prior input.
+            first = _pt_prompt(_PTAnsi(prompt_text), key_bindings=_PT_KB)
+        except (KeyboardInterrupt, EOFError):
+            raise
+        except Exception:
+            # Fallback if prompt_toolkit hits something weird (rare — e.g.
+            # not a real TTY, redirected stdin). Bare input() preserves
+            # piped-stdin testing flows.
+            first = input(prompt_text)
+    else:
+        first = input(prompt_text)
     if first.strip() == "/paste":
         print(dim("  (paste now; end with a line containing only '///')"))
         lines: list = []
