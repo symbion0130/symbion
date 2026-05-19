@@ -7249,15 +7249,22 @@ Examples:
         import atexit, subprocess as _subp
         def _sync_push_on_exit():
             try:
-                print(dim("\n  Syncing state to OneDrive..."))
+                print(dim("\n  Syncing state to OneDrive... (Ctrl+C to skip)"))
                 r = _subp.run(
                     [sys.executable, str(_sync_path), "push"],
-                    cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120,
+                    cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=30,
                 )
                 for line in (r.stdout + r.stderr).splitlines():
                     if line.strip(): print(f"  {line}")
                 if r.returncode != 0:
                     print(yellow(f"  !  sync push exited {r.returncode}"))
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C during sync push — they want OUT,
+                # not to keep waiting. State will push on next clean exit.
+                print(yellow("\n  !  sync push interrupted. State stays local — "
+                             "will push on next clean exit."))
+            except _subp.TimeoutExpired:
+                print(yellow("  !  sync push timed out (30s). State stays local."))
             except Exception as ex:
                 print(yellow(f"  !  sync push failed: {type(ex).__name__}: {ex}"))
         atexit.register(_sync_push_on_exit)
@@ -7300,15 +7307,45 @@ Examples:
         # frames. Multi-large-image use cases that exceed this can split
         # across multiple frames; the per-image checks inside the handler
         # still bound individual decoded sizes.
+        # Hard-force second Ctrl+C: if the user hits Ctrl+C and uvicorn's
+        # graceful path is still draining, a SECOND Ctrl+C should kill
+        # the process immediately. We replace Python's default SIGINT
+        # handler so the second hit bypasses uvicorn entirely.
+        import signal as _signal_mod
+        _ctrlc_count = [0]
+        _prev_sigint = _signal_mod.getsignal(_signal_mod.SIGINT)
+        def _on_sigint(signum, frame):
+            _ctrlc_count[0] += 1
+            if _ctrlc_count[0] >= 2:
+                print(red("\n  Force-exiting (second Ctrl+C)."))
+                import os as _os
+                _os._exit(130)  # 128 + SIGINT
+            # First Ctrl+C: let uvicorn handle it normally. Restore its
+            # handler so uvicorn's machinery fires; if it stalls, the
+            # next Ctrl+C above will hard-exit.
+            if callable(_prev_sigint):
+                try: _prev_sigint(signum, frame)
+                except KeyboardInterrupt: raise
+        _signal_mod.signal(_signal_mod.SIGINT, _on_sigint)
         try:
+            # timeout_graceful_shutdown=3 caps how long uvicorn waits for
+            # in-flight WS / HTTP requests to drain after a shutdown
+            # signal. Without it uvicorn can wait indefinitely (the user
+            # reported Ctrl+C 'isn't killing the server' — almost certainly
+            # an active iPhone WS connection holding the loop open).
             uvicorn.run(app, host=cfg.web_host, port=cfg.web_port,
-                        log_level="warning", ws_max_size=32 * 1024 * 1024)
+                        log_level="warning", ws_max_size=32 * 1024 * 1024,
+                        timeout_graceful_shutdown=3)
         except KeyboardInterrupt:
             # uvicorn re-raises SIGINT after its own cleanup. Catching it
             # here suppresses Python's default 'KeyboardInterrupt' traceback
             # so Ctrl+C in the same terminal exits cleanly instead of
             # printing the multi-line stack from asyncio + uvicorn shutdown.
             pass
+        # Restore default SIGINT in case anything else in interpreter shutdown
+        # wants the standard behavior.
+        try: _signal_mod.signal(_signal_mod.SIGINT, _signal_mod.default_int_handler)
+        except Exception: pass
         print(green("\n  OK Symbion shut down."))
         # OneDrive push is handled by the atexit hook registered above,
         # so it runs uniformly for both --web (this branch) and terminal
