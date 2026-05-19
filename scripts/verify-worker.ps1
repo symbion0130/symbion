@@ -3,18 +3,23 @@
     Smoke-test the Symbion install Worker.
 
 .DESCRIPTION
-    Confirms four behaviours of the Cloudflare Worker that serves install.ps1:
+    Confirms behaviours of the Cloudflare Worker that serves install.ps1:
 
       1. No token            -> 403
       2. Wrong token         -> 403
       3. Correct token       -> 200
-      4. Served script has   -> __SYMBION_PAT_INJECTED__ replaced
-                             -> __SYMBION_ANTHROPIC_KEY_INJECTED__ replaced
-                             -> sk-ant-api03- prefix present (key injected)
-                             -> GitHub PAT prefix present (PAT injected)
+      4. Served script has all six Worker-injected placeholders
+         substituted, and each substituted value is non-empty:
+           - __SYMBION_PAT_INJECTED__              (+ github_pat_ prefix check)
+           - __SYMBION_ANTHROPIC_KEY_INJECTED__    (+ sk-ant-api03- prefix check)
+           - __SYMBION_BRAVE_KEY_INJECTED__
+           - __SYMBION_KIMI_KEY_INJECTED__
+           - __SYMBION_DEEPSEEK_KEY_INJECTED__
+           - __SYMBION_API_KEY_INJECTED__
 
     Never prints the token, the served script body, or the substituted
-    secrets. Probes are substring/regex matches that only emit booleans.
+    secrets. Probes are substring/regex matches that only emit booleans
+    and value lengths.
 
 .PARAMETER WorkerUrl
     Base URL of the Worker. Default:
@@ -128,6 +133,51 @@ try {
     $hasGhPat = ($body -match 'github_pat_') -or ($body -match 'ghp_')
     Add-Result 'gh-pat-injected' $hasGhPat `
         $(if ($hasGhPat) { 'GitHub PAT prefix found' } else { 'no GitHub PAT prefix in served script' })
+
+    # Loop through the four additional injected provider keys (Brave,
+    # Kimi, DeepSeek, Symbion-internal). For each:
+    #   (a) the placeholder string must be absent from the served body;
+    #   (b) the value substituted into the Resolve-InjectedKey call must
+    #       be non-empty (catches the case where the Worker secret is
+    #       unset and the `|| ''` fallback wrote an empty string).
+    # No format/prefix checks: Brave/Kimi/DeepSeek/Symbion don't have a
+    # universal canonical prefix that's safe to grep for.
+    $extraKeys = [ordered]@{
+        'brave'    = @{ placeholder = '__SYMBION_BRAVE_KEY_INJECTED__';    envName = 'BRAVE_API_KEY'    }
+        'kimi'     = @{ placeholder = '__SYMBION_KIMI_KEY_INJECTED__';     envName = 'KIMI_API_KEY'     }
+        'deepseek' = @{ placeholder = '__SYMBION_DEEPSEEK_KEY_INJECTED__'; envName = 'DEEPSEEK_API_KEY' }
+        'symbion'  = @{ placeholder = '__SYMBION_API_KEY_INJECTED__';      envName = 'SYMBION_API_KEY'  }
+    }
+    foreach ($entry in $extraKeys.GetEnumerator()) {
+        $shortname   = $entry.Key
+        $placeholder = $entry.Value.placeholder
+        $envVar      = $entry.Value.envName
+
+        $stillThere = $body.Contains($placeholder)
+        Add-Result "$shortname-placeholder-substituted" (-not $stillThere) `
+            $(if ($stillThere) { 'placeholder STILL present in served script' } else { 'placeholder absent' })
+
+        # Match the Resolve-InjectedKey call for this env name and
+        # capture the substituted Placeholder argument value.
+        $pattern = "-Placeholder\s+'([^']*)'\s+-EnvVarName\s+'$([regex]::Escape($envVar))'"
+        if ($body -match $pattern) {
+            $value = $Matches[1]
+            # "Injected" means: non-empty AND not the literal placeholder.
+            # The literal-placeholder check catches the case where the
+            # Worker hasn't been updated yet to substitute this key.
+            $injected = (-not [string]::IsNullOrWhiteSpace($value)) -and (-not $value.StartsWith('__SYMBION'))
+            $detail = if ($injected) {
+                "non-empty value substituted (len=$($value.Length))"
+            } elseif ($value.StartsWith('__SYMBION')) {
+                'value is still the literal placeholder (Worker not updated?)'
+            } else {
+                'empty value (Worker secret missing?)'
+            }
+            Add-Result "$shortname-key-injected" $injected $detail
+        } else {
+            Add-Result "$shortname-key-injected" $false "could not locate Resolve-InjectedKey call for $envVar"
+        }
+    }
 } catch {
     Add-Result 'good-token-200' $false "network/exception: $($_.Exception.Message)"
 }
