@@ -176,6 +176,37 @@ if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'symbion
         # Private repo: PAT goes into the clone URL as the x-access-token
         # user. GitHub accepts this format for both raw and git endpoints.
         $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
+
+        # Auto-install git via winget if missing. Winget ships with Win10
+        # 21H2+ and Win11 by default. We do this BEFORE falling back to the
+        # zip download because the zip path is broken for private repos:
+        # github.com/<repo>/archive/...zip 302-redirects to codeload.github.
+        # com, and PowerShell strips the Authorization header on cross-host
+        # redirects, so the codeload request returns 404. Installing git
+        # sidesteps the whole problem because the PAT travels embedded in
+        # the clone URL, not as a header.
+        if (-not $hasGit -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Section "Installing git (required to clone private repo)"
+            try {
+                & winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
+                # winget doesn't refresh the current shell's PATH; probe
+                # the default install location and add it ourselves so the
+                # very next Get-Command finds the new binary.
+                $gitProbe = "$env:ProgramFiles\Git\cmd"
+                if (Test-Path -LiteralPath (Join-Path $gitProbe 'git.exe')) {
+                    $env:Path = "$gitProbe;$env:Path"
+                }
+                $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
+                if ($hasGit) {
+                    Write-Host "git installed: $((Get-Command git).Source)"
+                } else {
+                    Write-Host "[warn] winget install completed but git is still not on PATH"
+                }
+            } catch {
+                Write-Host "[warn] winget install of git failed: $($_.Exception.Message)"
+            }
+        }
+
         if ($hasGit) {
             $cloneUrl = if ($Pat) {
                 "https://x-access-token:$Pat@github.com/symbion0130/symbion.git"
