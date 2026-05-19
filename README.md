@@ -4,7 +4,7 @@ Symbion is an async Python AI assistant with multi-provider LLM support, SQLite 
 
 ## Install
 
-See **[SETUP.md](SETUP.md)** for the full setup guide — four install paths (Worker one-liner, portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
+See **[docs/SETUP.md](docs/SETUP.md)** for the full setup guide — four install paths (Worker one-liner, portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
 
 TL;DR:
 

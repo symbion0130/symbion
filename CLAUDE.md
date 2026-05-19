@@ -98,6 +98,11 @@ scripts/
 tests/
   conftest.py               # StubClient fixture (BaseClient test double)
   test_tools.py             # calculator, sandbox, SSRF, _parse_json
+docs/                       # user-facing markdown docs: SETUP, COMMANDS,
+                            #   CHANGELOG, SYMBION_OVERVIEW. README.md +
+                            #   CLAUDE.md stay at the root by convention.
+                            #   Don't confuse with archive/docs/, which
+                            #   holds gitignored pre-v14 planning material.
 symbion.json                # config (non-secret fields)
 .env                        # API keys (UTF-8, no BOM)
 symbion.db                  # SQLite store
