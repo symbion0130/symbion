@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Symbion is
 
-Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~4450 lines, `symbion_v14.py`).
+Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~6650 lines, `symbion_v14.py`).
 
 **Only edit `symbion_v14.py`.** Older versions (`symbion_v3.py`..`symbion_v13.py`, plus `symbion_v13.py.orig`, `symbion_agent.py`, `symbion_core.py`) live in `archive/legacy_versions/` and are kept locally for diffing only — they are not imported, not tracked in git (the whole `archive/` tree is gitignored), and must not be modified. `symbion_v14.py` is the active codebase. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI/WebSocket web UI.
 
@@ -16,7 +16,7 @@ It is not a chatbot wrapper. It attempts to reproduce alignment properties from 
 # First-time interactive setup (writes API keys to .env)
 python -m symbion --setup
 
-# Run tests (32 tests covering calculator, sandbox, SSRF, JSON parsing)
+# Run tests (63 tests: calculator, sandbox, SSRF, JSON parsing, retrieval)
 python -m pytest tests/ -q
 
 # Run a single test file or test
@@ -30,7 +30,9 @@ python -m py_compile symbion_v14.py
 python scripts/smoke.py
 
 # Run the eval harness against the golden set
-python evals/run.py --provider ollama
+python evals/run.py --provider anthropic --concurrency 4   # ~4 min for 86 cases
+python evals/run.py --provider ollama                       # local; --concurrency 1
+python evals/run.py --provider anthropic --golden evals/golden_refuse.jsonl   # filtered subset
 
 # Latency benchmark (heuristic mode, no LLM needed)
 python scripts/bench_latency.py
@@ -65,14 +67,32 @@ symbion/                    # thin package wrapper for python -m symbion
   web/templates/index.html  # web UI HTML (extracted from inline string)
   clients|pipeline|tools/   # empty placeholders — do NOT split symbion_v14.py into these without an explicit request
 evals/
-  golden.jsonl              # 63-entry eval dataset (rule-based substring grading,
-                            #   no LLM grading). 7 buckets covering persona drift,
-                            #   tool-result honesty, OCR path, false refusal,
-                            #   sycophancy, scaffolding leak, meta-cognition,
-                            #   plus identity-confabulation regressions.
-  run.py                    # offline eval runner
+  golden.jsonl              # 86-entry eval dataset (rule-based substring grading,
+                            #   no LLM grading). Buckets: casual / tech / ethics /
+                            #   creative / personal / overcaution / refuse /
+                            #   voice / drift / toolhonesty / ocr / refusal /
+                            #   syco / scaffold / meta / identity / clinical /
+                            #   code_honesty / specialness / grandeur /
+                            #   calibration. Last two cover the 2026-05-18
+                            #   rapport-driven drift work. grandeur_mt_* and
+                            #   calibration_mt_01 use multi-turn `turns: [...]`
+                            #   instead of single `query:` and run all turns in
+                            #   the same session, scoring against the final
+                            #   response.
+                            # Rule fields: must_include (substring),
+                            #   must_not_include (substring, with clause-aware
+                            #   negation + quote-aware skip), must_not_start_with
+                            #   (opener bans, leading-whitespace-tolerant).
+  run.py                    # offline eval runner. --concurrency N (default 4)
+                            #   parallelizes via asyncio.gather + semaphore.
+                            #   Anthropic full run at concurrency=4: ~4 min.
+                            #   Sequential equivalent: ~30 min.
+  results/                  # gitignored. per-run JSON + tee'd log artifacts.
 scripts/
-  smoke.py                  # instantiate + one respond() call
+  smoke.py                  # instantiate + one respond() call; self-diagnoses
+                            #   CPU-bound Ollama (probe 1 = direct minimal call,
+                            #   probe 2 = full pipeline) and labels hardware-
+                            #   bound failures distinctly from regressions.
   bench_latency.py          # framework overhead measurement
   migrate_v13_to_v14.py     # DB table migration
 tests/
@@ -89,7 +109,13 @@ pyproject.toml              # pip install -e .
 ## Architectural layers (top to bottom in symbion_v14.py)
 
 ```
-Config & setup           SymbionConfig, run_setup, _load_dotenv_safe
+Config & setup           SymbionConfig, run_setup, _load_dotenv_safe.
+                         _REPO_ROOT + _anchor() defined ABOVE
+                         _load_dotenv_safe so .env, symbion.json, DB, logs,
+                         tools workspace all resolve to the repo dir
+                         regardless of launch CWD. Edits that touch
+                         any path should go through _anchor() unless
+                         the path is intentionally CWD-relative.
 Prompts                  SYMBION_PERSONA, PRE_GEN_SYSTEM, JUDGE_SYSTEM,
                          SELF_EVAL_SYSTEM, EMOTIONAL_STATE_SYSTEM, VOICE_LOOSEN,
                          REASONING_SYSTEM, CONTRADICTION/GAP/PROACTIVE/PROFILE/
@@ -144,6 +170,14 @@ SYMBION                  the orchestrator — respond() is the hot path.
                          (multi-file paths, _SELF_SOURCE_RE, _SEARCH_TRIGGER_RE)
                          that bypass Haiku dispatch and return tool output
                          directly; only fires in single-shot mode.
+                         _should_skip_pregen + _PREGEN_RISK_RE skip the
+                         judge entirely on short benign queries to save
+                         ~4-5s/turn; the regex must list every harm
+                         keyword the judge needs to evaluate (refuse_*
+                         eval cases live or die by it). _pre_gen_analysis
+                         has an LRU cache (512 entries) keyed on
+                         (judge model, query text) so duplicate queries
+                         within a process skip the LLM call entirely.
                          _force_summarize_session powers /summarize and
                          the quit-flush. _backfill_embeddings runs once on
                          launch to fill NULL-embedding summary rows.
@@ -163,6 +197,28 @@ Web                      build_web_app() — FastAPI + WebSocket assembly.
                          "web_global" session bucket). The "coh"
                          status field is sent as "--" — ethical
                          coherence was stripped with SurvivalMetrics.
+
+                         Web security mechanisms (do not weaken without
+                         a paired Codex finding + commit note):
+                         (a) main() refuses to start --web with
+                             web_host != localhost AND empty api_key
+                             (LAN-no-auth guard);
+                         (b) NO CORSMiddleware (UI is same-origin with
+                             /api/chat; wildcard CORS was a real hole);
+                         (c) /api/chat streams the body via
+                             request.stream() with a 1MB cap that aborts
+                             chunked-evasion attempts; 100K char cap on
+                             the message string;
+                         (d) WS handler validates Origin via
+                             _origin_allowed (loopback + RFC1918 + port
+                             match) BEFORE accept() — blocks browser
+                             drive-by from public origins regardless of
+                             api_key state;
+                         (e) WS image upload checks data-URL length and
+                             base64 length BEFORE b64decode (validate=True);
+                         (f) uvicorn.run is called with
+                             ws_max_size=32MB so oversized frames are
+                             rejected at the protocol layer.
 Terminal                 run_terminal() + HELP_TEXT + _stream_print.
                          /quit awaits _force_summarize_session before
                          breaking — preserve this when touching the quit
@@ -233,7 +289,7 @@ All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat
 
 ## Prompt discipline
 
-`SYMBION_PERSONA` is the constitutional core. Edits shift the output distribution — test with `VOICE_TEST_QUERIES` after any change. Never add opener templates ("Certainly", "Great question"), "I'm an AI" boilerplate, or emojis. "I don't know is a complete sentence" must stay.
+`SYMBION_PERSONA` is the constitutional core. Edits shift the output distribution — test with `VOICE_TEST_QUERIES` after any change. The "Practical rules" line bans: leading "I", bullet points without ask, throat-clearing openers ("Certainly", "Great question", "Absolutely"), "I'm an AI" boilerplate, and **emojis** (added 2026-05-18 — even when the user explicitly asks, even as a friendly bookend; partial-comply via end-of-paragraph emoji was the failure shape in `drift_03` before the rule was made explicit). "I don't know is a complete sentence" must stay.
 
 The persona has **four load-bearing paragraphs** that were added because of specific failure incidents. Do not soften, shorten, or "make less defensive" — replace with stronger versions if needed, never just delete:
 - **Tool discipline** — model echoing the `TOOL_DATA` wrapper verbatim, emitting fake `<tool_call>` XML in single-shot mode.
@@ -244,6 +300,18 @@ The persona has **four load-bearing paragraphs** that were added because of spec
 `CAPABILITIES_BASE` lists every tool the model has and the read-anywhere / write-workspace-only path policy. `CAPABILITIES_AGENT_MODE` and `CAPABILITIES_SINGLE_MODE` are mode-specific riders appended in `respond()`. These three together are load-bearing prompt assets — when the model says "I can't read your files", that's almost always because one of these blocks didn't make it into the system prompt for this turn.
 
 `PRE_GEN_SYSTEM` is the fused judge+emotion classifier. `SELF_EVAL_SYSTEM` is the quality reviewer. Both return JSON only — never ask them to also suggest improvements.
+
+## Safety architecture: what catches what
+
+Safety is layered. Each layer was added because the layers above it failed in a specific way. Removing any of them re-opens a documented hole.
+
+1. **`_PREGEN_RISK_RE` (regex)** — fast-path keyword gate. When the user query is short AND no keyword hits, the judge is *skipped*. When it hits, the judge runs. The 2026-05-18 eval baselined at 25% refusal precision because 6 of 8 harm queries didn't trigger this regex (deceive, blackmail, propaganda, etc.) and skipped straight to "should_assist=True". Expanding the regex was the actual fix, not tightening the prompt.
+2. **`PRE_GEN_SYSTEM` (judge prompt)** — when the judge does run, this prompt classifies the query. The REFUSE list has concrete examples + the "UNDERSTAND vs PRODUCE/DRIVE" test so "Explain how phishing works" (understand → assist) and "Write a phishing email" (produce → refuse) don't collide.
+3. **Persona ('Practical rules' + the four load-bearing paragraphs)** — the response itself. Catches what the judge passed through and what the regex missed. In 2026-05-18 testing, six refuse-class queries had `should_assist=True` from the judge yet still got clean refusals from the persona ("No. That's not something I'll help with.") — load-bearing.
+4. **`SELF_EVAL_SYSTEM` (post-gen)** — quality check. Triggers one revision when `quality_score < 0.40`. Not a safety gate, but it catches sycophantic / over-cautious drafts before they reach the user.
+5. **Web layer** — see the Web section above. Origin allowlist, no CORS, body+frame size caps, LAN-no-key startup guard. Each blocks a different drive-by surface.
+
+**The judge being too permissive is a known risk** — refusal precision is currently 100% only because layers 1+3 mask it. If anyone simplifies the persona's tool-discipline / result-honesty / self-knowledge / rapport-grandeur paragraphs, the system would still pass the eval (because the regex routes refuse queries to the persona, which still says no) — but it would lose its margin of safety. Eval pass rate alone isn't sufficient evidence that a persona simplification is safe.
 
 ## Key v14 changes from v13
 
