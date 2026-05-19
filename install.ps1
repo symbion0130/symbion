@@ -176,23 +176,43 @@ try {
 }
 
 # ------------------------------------------------------------------------
-# Phase 3: API key setup (interactive)
+# Phase 3: .env handling
+#   Order of preference:
+#     1. Existing <repo>\.env -- already present, leave alone
+#     2. OneDrive seeded copy at %OneDrive%\Symbion\sync\.env -- copy in
+#     3. Interactive --setup prompt (last resort, paste keys by hand)
+#   The OneDrive path makes the cross-machine flow zero-prompt: seed once
+#   on your dev machine via scripts\push-env.ps1, then every fresh install
+#   pulls keys automatically.
 # ------------------------------------------------------------------------
-if (-not $SkipSetup) {
-    Write-Section "API key setup"
-    $py = Join-Path $RepoDir '.python\python.exe'
-    if (Test-Path -LiteralPath $py) {
-        Push-Location $RepoDir
-        try {
-            & $py -m symbion --setup
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[warn] --setup exited non-zero. You can re-run it with: $py -m symbion --setup"
+$envDest = Join-Path $RepoDir '.env'
+if (Test-Path -LiteralPath $envDest) {
+    Write-Section ".env already present (skipping setup)"
+} else {
+    $oneDrive = if ($env:OneDrive) { $env:OneDrive } else { $env:OneDriveConsumer }
+    $envSrc   = if ($oneDrive) { Join-Path $oneDrive 'Symbion\sync\.env' } else { $null }
+
+    if ($envSrc -and (Test-Path -LiteralPath $envSrc)) {
+        Write-Section "Pulling .env from OneDrive"
+        Copy-Item -LiteralPath $envSrc -Destination $envDest -Force
+        Write-Host "Copied $envSrc -> $envDest"
+    } elseif (-not $SkipSetup) {
+        Write-Section "API key setup (no OneDrive .env found)"
+        Write-Host "Tip: run scripts\push-env.ps1 on your main machine to seed OneDrive so future installs skip this prompt."
+        $py = Join-Path $RepoDir '.python\python.exe'
+        if (Test-Path -LiteralPath $py) {
+            Push-Location $RepoDir
+            try {
+                & $py -m symbion --setup
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "[warn] --setup exited non-zero. Re-run with: $py -m symbion --setup"
+                }
+            } finally {
+                Pop-Location
             }
-        } finally {
-            Pop-Location
+        } else {
+            Write-Host "[warn] $py missing; skipping --setup. Run it manually after bootstrap finishes."
         }
-    } else {
-        Write-Host "[warn] $py missing; skipping --setup. Run it manually after bootstrap finishes."
     }
 }
 
