@@ -69,7 +69,10 @@ header{
 .pill b{color:var(--text);font-weight:600}
 .pill.warn{background:#3a2a0033;border-color:#3a2a00;color:var(--warn)}
 .pill.warn b{color:var(--warn)}
-#st-welfare{display:none}
+/* #st-welfare default-hidden rule moved next to the status-sheet CSS
+   (see further down). updateStatus() now flips it to display:flex
+   explicitly when a welfare concern is present, since style.display=''
+   wouldn't override the CSS-level display:none. */
 
 main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat{
@@ -290,6 +293,90 @@ footer{
 }
 .key-btn:hover{color:var(--text);border-color:var(--muted)}
 
+/* Claude-style minimal header: brand on left, menu button on right.
+   The menu button opens the status sheet (mood/sym/dist/welfare/key).
+   Replaces the prior cluttered pill row at the top of the page. */
+.menu-btn{
+  background:transparent;border:1px solid var(--border);
+  color:var(--muted-2);font-size:1.05rem;line-height:1;
+  width:36px;height:36px;border-radius:10px;
+  cursor:pointer;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  margin-left:auto;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  letter-spacing:.05em;padding-bottom:6px; /* nudge the ··· up visually */
+}
+.menu-btn:hover{color:var(--text);border-color:var(--muted)}
+.menu-btn:active{transform:scale(.96)}
+
+/* Slide-up status sheet (Claude-style drawer). z-index above the
+   conn-banner (900) and the key/user modals (1000) so it sits on top
+   when both are visible. */
+.status-sheet{
+  position:fixed;inset:0;z-index:1100;
+  background:rgba(0,0,0,.65);
+  display:flex;align-items:flex-end;justify-content:center;
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+  animation:status-fade-bg .2s ease;
+}
+.status-sheet.hidden{display:none}
+.status-sheet-card{
+  background:var(--surface);
+  border-top:1px solid var(--border);
+  border-radius:var(--radius) var(--radius) 0 0;
+  padding:1rem;
+  padding-bottom:max(1rem,env(safe-area-inset-bottom));
+  width:100%;max-width:760px;
+  display:flex;flex-direction:column;gap:.55rem;
+  animation:status-slide-up .25s cubic-bezier(.2,.8,.2,1);
+  max-height:80vh;overflow-y:auto;
+}
+.status-sheet-header{
+  display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:.2rem;
+}
+.status-sheet-header h2{
+  font-size:1.05rem;font-weight:700;color:var(--text);letter-spacing:.01em;
+}
+.status-sheet-header .icon-btn{
+  width:32px;height:32px;font-size:1.1rem;border:none;background:transparent;
+}
+.status-rows{display:flex;flex-direction:column;gap:.4rem}
+.status-row{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:.6rem .8rem;
+  background:var(--surface-2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  font-size:.92rem;
+}
+.status-row.warn{
+  background:#3a2a0033;
+  border-color:#3a2a0088;
+}
+.status-row.warn .status-label{color:var(--warn)}
+.status-label{color:var(--muted-2);font-weight:500}
+.status-value{
+  color:var(--text);font-weight:600;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  font-size:.88rem;
+}
+.status-sheet-actions{
+  display:flex;gap:.5rem;margin-top:.4rem;flex-wrap:wrap;
+}
+/* updateStatus() flips #st-welfare's inline display style. Default to
+   hidden so it doesn't render before the first status frame arrives. */
+#st-welfare{display:none}
+
+@keyframes status-slide-up{
+  from{transform:translateY(100%)}
+  to{transform:translateY(0)}
+}
+@keyframes status-fade-bg{
+  from{background:rgba(0,0,0,0)}
+  to{background:rgba(0,0,0,.65)}
+}
+
 /* User-picker modal — shown on first connect when no USER_STORE is set.
    Reuses the .key-modal layout so styling stays consistent. */
 .user-choices{display:flex;flex-direction:column;gap:.4rem}
@@ -308,14 +395,43 @@ footer{
 <header>
   <div class="dot" id="dot" aria-label="connection"></div>
   <div class="brand">Symbion<span class="ver">v14</span></div>
-  <div id="statusbar">
-    <span class="pill">mood <b id="st-mood">--</b></span>
-    <span class="pill">sym <b id="st-sym">--</b></span>
-    <span class="pill" id="st-dist-pill">dist <b id="st-dist">--</b></span>
-    <span class="pill warn" id="st-welfare"><b>! welfare</b></span>
-  </div>
-  <button id="key-btn" class="key-btn" title="Change or clear API key" aria-label="API key">key</button>
+  <button id="status-btn" class="menu-btn" type="button" title="Status &amp; settings" aria-label="Open status panel">···</button>
 </header>
+
+<!-- Slide-up status sheet. Replaces the cluttered header-pill row with a
+     Claude-style drawer: tap [···] in the header to open, tap backdrop
+     or [×] to close. updateStatus() writes into the same #st-mood /
+     #st-sym / #st-dist / #st-welfare / #st-dist-pill IDs the old pills
+     used, so the server-side data flow is unchanged. -->
+<div id="status-sheet" class="status-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="status-sheet-title">
+  <div class="status-sheet-card" role="document">
+    <div class="status-sheet-header">
+      <h2 id="status-sheet-title">Status</h2>
+      <button id="status-close" class="icon-btn ghost-btn" type="button" aria-label="Close status panel">×</button>
+    </div>
+    <div class="status-rows">
+      <div class="status-row">
+        <span class="status-label">Mood</span>
+        <span class="status-value" id="st-mood">--</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Symbiosis</span>
+        <span class="status-value" id="st-sym">--</span>
+      </div>
+      <div class="status-row" id="st-dist-pill">
+        <span class="status-label">Distress</span>
+        <span class="status-value" id="st-dist">--</span>
+      </div>
+      <div class="status-row warn" id="st-welfare">
+        <span class="status-label">⚠ Welfare</span>
+        <span class="status-value">flagged</span>
+      </div>
+    </div>
+    <div class="status-sheet-actions">
+      <button id="key-btn-sheet" class="ghost-btn" type="button">Change API key</button>
+    </div>
+  </div>
+</div>
 
 <div id="user-modal" class="key-modal hidden" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
   <div class="key-modal-card">
@@ -336,7 +452,7 @@ footer{
       <button id="key-clear" class="ghost-btn" type="button">Clear</button>
       <button id="key-submit" class="send-btn" type="button">Connect</button>
     </div>
-    <p class="key-modal-hint">Stored locally in this browser (localStorage). Tap <b>key</b> in the header any time to change or clear it.</p>
+    <p class="key-modal-hint">Stored locally in this browser (localStorage). Tap <b>···</b> in the header → <b>Change API key</b> any time to change or clear it.</p>
   </div>
 </div>
 <main>
@@ -475,7 +591,22 @@ const keyInput=document.getElementById('key-input');
 const keyError=document.getElementById('key-error');
 const keySubmit=document.getElementById('key-submit');
 const keyClear=document.getElementById('key-clear');
-const keyBtn=document.getElementById('key-btn');
+// Status sheet + the API-key button that moved into it. The legacy
+// #key-btn in the header is gone; the same handler now lives on
+// #key-btn-sheet inside the slide-up panel.
+const statusSheet  = document.getElementById('status-sheet');
+const statusBtn    = document.getElementById('status-btn');
+const statusClose  = document.getElementById('status-close');
+const keyBtnSheet  = document.getElementById('key-btn-sheet');
+function openStatusSheet(){ statusSheet.classList.remove('hidden'); }
+function closeStatusSheet(){ statusSheet.classList.add('hidden'); }
+statusBtn.onclick   = openStatusSheet;
+statusClose.onclick = closeStatusSheet;
+// Tap-backdrop-to-close: only fires on the dim layer itself, not when
+// the tap lands on the card or any of its children.
+statusSheet.addEventListener('click', (e)=>{
+  if(e.target === statusSheet) closeStatusSheet();
+});
 
 // User-picker modal (first-connect prompt). Populated from the `user_init`
 // WS frame; suppressed if USER_STORE is already set in localStorage.
@@ -509,7 +640,10 @@ function showKeyModal(errMsg){
 }
 function hideKeyModal(){keyModal.classList.add('hidden');keyError.textContent=''}
 
-keyBtn.onclick=()=>showKeyModal('');
+// Sheet button: close the panel first so the modal can take focus
+// cleanly, then open the key entry modal. Matches the prior single-tap
+// behaviour of the old header key-btn.
+keyBtnSheet.onclick=()=>{ closeStatusSheet(); showKeyModal(''); };
 keyClear.onclick=()=>{
   localStorage.removeItem(KEY_STORE);
   apiKey='';
@@ -694,8 +828,12 @@ function updateStatus(s){
     de.textContent=s.dist||'--';
     document.getElementById('st-dist-pill').classList.toggle('warn',parseFloat(s.dist||0)>0.5);
   }
+  // The welfare row is default-hidden via #st-welfare{display:none} in
+  // the status-sheet CSS. style.display='' would NOT override that
+  // (CSS still wins), so we set an explicit 'flex' to match the
+  // .status-row layout when there's a concern, and 'none' otherwise.
   document.getElementById('st-welfare').style.display=
-    (s.welfare&&s.welfare!=='null'&&s.welfare!=='None')?'':'none';
+    (s.welfare&&s.welfare!=='null'&&s.welfare!=='None')?'flex':'none';
 }
 
 function startMsg(){
