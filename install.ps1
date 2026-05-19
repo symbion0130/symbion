@@ -9,9 +9,9 @@
 
     What it does (no other steps required from the user):
       1. Detects whether you're inside an existing clone or running remotely.
-         Remote case: clones (or downloads zip if git is absent) the repo to
-         $env:USERPROFILE\symbion -- or a path you override via the
-         SYMBION_INSTALL_DIR env var.
+         Remote case: installs git via winget if missing (requires admin),
+         then clones the repo to $env:USERPROFILE\symbion -- or a path you
+         override via the SYMBION_INSTALL_DIR env var.
       2. Runs scripts\bootstrap-portable.bat to install portable Python +
          deps + the `symbion` command shim.
       3. Runs `python -m symbion --setup` so the user can paste API keys
@@ -33,7 +33,7 @@
     Ignored when running from inside an existing clone.
 
 .PARAMETER Branch
-    Git branch / zip ref to install. Defaults to main.
+    Git branch to install. Defaults to main.
 
 .PARAMETER SkipSetup
     Skip the --setup API-key prompt. Useful for CI / unattended installs.
@@ -70,17 +70,22 @@ if (-not $Branch)     { $Branch     = $env:SYMBION_INSTALL_BRANCH }
 if (-not $Branch)     { $Branch     = 'main' }
 
 $RepoUrl = 'https://github.com/symbion0130/symbion'
-$ZipUrl  = "$RepoUrl/archive/refs/heads/$Branch.zip"
 
 function Write-Section($msg) {
     Write-Host ''
     Write-Host "=== $msg ===" -ForegroundColor Cyan
 }
 
+function Test-IsElevated {
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole(
+        [System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 # --- PAT resolution -----------------------------------------------------
-# Repo is private, so all fetches (initial irm of install.ps1, git clone,
-# zip download) need a fine-grained Personal Access Token with read-only
-# Contents permission. Order of preference:
+# Repo is private, so the initial irm of install.ps1 and the git clone both
+# need a fine-grained Personal Access Token with read-only Contents
+# permission. Order of preference:
 #   1. Worker-injected PAT (placeholder below gets find/replaced by the
 #      Cloudflare Worker before this script is served, so the one-line
 #      `irm bit.ly/symbioninstalls | iex` command works on any fresh
@@ -176,89 +181,80 @@ if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'symbion
             exit 1
         }
     } else {
-        # Fresh fetch. Prefer git (lighter, supports future pulls). Fall
-        # back to GitHub's zip if git isn't installed so this script works
-        # on machines with literally nothing pre-installed.
-        # Private repo: PAT goes into the clone URL as the x-access-token
-        # user. GitHub accepts this format for both raw and git endpoints.
+        # Fresh fetch. Symbion is a private repo so we need git + a PAT.
+        # The old zip-via-archive fallback was removed: GitHub's archive
+        # URL 302-redirects to codeload.github.com and PowerShell drops
+        # the Authorization header across hosts, so private-repo archive
+        # downloads always 404. If the repo ever goes public, the zip
+        # fallback can come back -- it's in git history.
+
+        if (-not $Pat) {
+            Write-Error @"
+No GitHub PAT available. The symbion repo is private and requires a token to clone.
+
+Provide one of:
+  - `$env:SYMBION_PAT  (set before running this script)
+  - %OneDrive%\Symbion\sync\.pat  (cached file, auto-picked up on this machine)
+  - Bake one into the script via the Cloudflare Worker placeholder
+"@
+            exit 1
+        }
+
         $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
 
-        # Auto-install git via winget if missing. Winget ships with Win10
-        # 21H2+ and Win11 by default. We do this BEFORE falling back to the
-        # zip download because the zip path is broken for private repos:
-        # github.com/<repo>/archive/...zip 302-redirects to codeload.github.
-        # com, and PowerShell strips the Authorization header on cross-host
-        # redirects, so the codeload request returns 404. Installing git
-        # sidesteps the whole problem because the PAT travels embedded in
-        # the clone URL, not as a header.
-        if (-not $hasGit -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Section "Installing git (required to clone private repo)"
-            try {
-                & winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
-                # winget doesn't refresh the current shell's PATH; probe
-                # the default install location and add it ourselves so the
-                # very next Get-Command finds the new binary.
-                $gitProbe = "$env:ProgramFiles\Git\cmd"
-                if (Test-Path -LiteralPath (Join-Path $gitProbe 'git.exe')) {
-                    $env:Path = "$gitProbe;$env:Path"
-                }
-                $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
-                if ($hasGit) {
-                    Write-Host "git installed: $((Get-Command git).Source)"
-                } else {
-                    Write-Host "[warn] winget install completed but git is still not on PATH"
-                }
-            } catch {
-                Write-Host "[warn] winget install of git failed: $($_.Exception.Message)"
-            }
-        }
-
-        if ($hasGit) {
-            $cloneUrl = if ($Pat) {
-                "https://x-access-token:$Pat@github.com/symbion0130/symbion.git"
-            } else {
-                "$RepoUrl.git"  # try anonymous (works only if repo is public)
-            }
-            # Echo the safe-redacted form so logs don't leak the token.
-            Write-Host "git clone <repo> ($Branch)"
-            & git clone --branch $Branch --depth 1 $cloneUrl $InstallDir
-            if ($LASTEXITCODE -ne 0) {
-                if (-not $Pat) {
-                    Write-Error "git clone failed (no PAT available). Set `$env:SYMBION_PAT before running install.ps1, or place the PAT at %OneDrive%\Symbion\sync\.pat"
-                } else {
-                    Write-Error "git clone failed. Check the PAT is valid / not expired and has Contents:read permission on symbion0130/symbion."
-                }
+        if (-not $hasGit) {
+            if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+                Write-Error "git is not installed and winget is unavailable. Install Git from https://git-scm.com/download/win and re-run."
                 exit 1
             }
-            Save-PatToOneDrive $Pat
-        } else {
-            Write-Host "git not found -- downloading zip from $ZipUrl"
-            $zipPath = Join-Path $env:TEMP "symbion-$Branch-$([Guid]::NewGuid()).zip"
-            $extractDir = Join-Path $env:TEMP "symbion-extract-$([Guid]::NewGuid())"
-            $zipHeaders = @{}
-            if ($Pat) { $zipHeaders['Authorization'] = "token $Pat" }
-            try {
-                # Force TLS 1.2 for Win10 / PS 5.1 which sometimes default
-                # to TLS 1.0 and get refused by github.com.
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-WebRequest -Uri $ZipUrl -OutFile $zipPath -UseBasicParsing -Headers $zipHeaders
-                Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-                $extracted = Get-ChildItem $extractDir -Directory | Select-Object -First 1
-                if (-not $extracted) {
-                    Write-Error "Could not locate extracted Symbion directory in $extractDir"
-                    exit 1
-                }
-                # Ensure parent of $InstallDir exists, then move.
-                $parent = Split-Path -Parent $InstallDir
-                if ($parent -and -not (Test-Path -LiteralPath $parent)) {
-                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-                }
-                Move-Item -LiteralPath $extracted.FullName -Destination $InstallDir
-            } finally {
-                if (Test-Path -LiteralPath $zipPath)    { Remove-Item -LiteralPath $zipPath -Force }
-                if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+            if (-not (Test-IsElevated)) {
+                Write-Error @"
+Git is not installed. Installing it via winget requires Administrator privileges,
+and elevating from inside a piped 'irm | iex' invocation isn't reliable.
+
+Do one of:
+  1. Right-click PowerShell -> 'Run as Administrator', then re-run the install command.
+  2. Install Git manually from https://git-scm.com/download/win and re-run.
+"@
+                exit 1
             }
+
+            Write-Section "Installing git via winget (required to clone private repo)"
+            & winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
+            $wingetExit = $LASTEXITCODE
+            if ($wingetExit -ne 0) {
+                Write-Error @"
+Git install failed (winget exit code $wingetExit).
+
+If a UAC prompt appeared and was dismissed, re-run and approve it.
+Otherwise install Git manually from https://git-scm.com/download/win and re-run.
+"@
+                exit 1
+            }
+            # winget doesn't refresh the current shell's PATH; probe the
+            # default install location and prepend it so the very next
+            # Get-Command finds the new binary.
+            $gitProbe = "$env:ProgramFiles\Git\cmd"
+            if (Test-Path -LiteralPath (Join-Path $gitProbe 'git.exe')) {
+                $env:Path = "$gitProbe;$env:Path"
+            }
+            $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
+            if (-not $hasGit) {
+                Write-Error "winget reported success but git is still not on PATH. Open a new shell and re-run."
+                exit 1
+            }
+            Write-Host "git installed: $((Get-Command git).Source)"
         }
+
+        $cloneUrl = "https://x-access-token:$Pat@github.com/symbion0130/symbion.git"
+        # Echo the safe-redacted form so logs don't leak the token.
+        Write-Host "git clone <repo> ($Branch)"
+        & git clone --branch $Branch --depth 1 $cloneUrl $InstallDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "git clone failed. Check that the PAT is valid, not expired, and has Contents:read on symbion0130/symbion."
+            exit 1
+        }
+        Save-PatToOneDrive $Pat
         $RepoDir = $InstallDir
     }
 }
