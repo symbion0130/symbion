@@ -5214,6 +5214,34 @@ class SYMBION:
 
         mode_block = CAPABILITIES_AGENT_MODE if agent_loop_active else CAPABILITIES_SINGLE_MODE
         system = SYMBION_PERSONA + "\n\n" + CAPABILITIES_BASE + "\n\n" + mode_block
+
+        # Active-user injection. Pinned to the top of the dynamic context so
+        # the model can't drift into "lala is here" mid-aaron-turn just
+        # because the prior assistant turn was responding to lala. Without
+        # this, switching /user aaron -> /user lala -> /user aaron leaves
+        # the model going by recent conversational vibes rather than the
+        # actual active user; observed in the 2026-05-19 transcript where
+        # Symbion greeted aaron as 'Hey Lala!' right after a switch back.
+        #
+        # The aaron case also gets a 'is your developer' marker so Symbion
+        # stops referring to 'your developer' in third person when aaron
+        # is right there typing. Other users get the plain identity line —
+        # for them the existing 'your developer' phrasing in the persona
+        # is correct (the developer isn't them).
+        if active_user == "aaron":
+            system += (f"\n\nCurrently talking to: aaron — this IS your developer, "
+                       f"the person who wrote the code you're running on. Address "
+                       f"them as the developer directly ('you built X'), never in "
+                       f"third person ('your developer built X'). The Self-knowledge "
+                       f"paragraph's 'code your developer wrote' is generic phrasing "
+                       f"for any user; with aaron present, the developer IS the user.")
+        else:
+            system += (f"\n\nCurrently talking to: {active_user} — NOT your developer. "
+                       f"aaron is the developer; {active_user} is a different person "
+                       f"using the same Symbion instance. Don't address {active_user} "
+                       f"as if they built you; the 'your developer' framing in the "
+                       f"persona refers to aaron (who is not in this turn).")
+
         if preamble: system += f"\n\n{preamble}"
         system += f"\n\nYour current state: {mood_add}"
 
