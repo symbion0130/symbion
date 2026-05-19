@@ -3442,8 +3442,19 @@ class SymbionMemory:
             c.commit()
 
     def get_profile(self, user: str = "aaron") -> Dict:
-        """Return profile facts visible to `user`. Two-layer merge:
+        """Return profile facts visible to `user`. See get_profile_with_meta
+        for the timestamp-aware variant used by build_context's staleness
+        check; this is the value-only convenience wrapper."""
+        return {k: v for k, (v, _) in self.get_profile_with_meta(user).items()}
 
+    def get_profile_with_meta(self, user: str = "aaron") -> Dict[str, Tuple]:
+        """Like get_profile but each value is paired with its updated_at
+        timestamp (ISO string). build_context uses this to surface
+        'current_situation was last updated X hours ago' so the model
+        can reason about staleness (e.g. 'watching the game' set 4 hours
+        ago is probably over by now).
+
+        Two-layer merge:
           1. Legacy unprefixed keys form the SHARED BASE — visible to
              every user. These are facts accumulated about the household
              before multi-user landed (or facts intentionally written
@@ -3457,20 +3468,20 @@ class SymbionMemory:
         see aaron's private 'aaron:emotional_context'. The shared base
         is the only cross-user surface."""
         with sqlite3.connect(self.db) as c:
-            rows = c.execute("SELECT key,value FROM user_profile").fetchall()
+            rows = c.execute("SELECT key,value,updated_at FROM user_profile").fetchall()
         prefix = f"{user}:"
-        result: Dict = {}
+        result: Dict[str, Tuple] = {}
         # Pass 1: legacy unprefixed (shared base, lowest precedence)
-        for k, v in rows:
+        for k, v, ts in rows:
             if ":" not in k:
-                try:    result[k] = json.loads(v)
-                except Exception: result[k] = v
+                try:    result[k] = (json.loads(v), ts)
+                except Exception: result[k] = (v, ts)
         # Pass 2: active user's prefixed entries (override shared base)
-        for k, v in rows:
+        for k, v, ts in rows:
             if k.startswith(prefix):
                 bare = k[len(prefix):]
-                try:    result[bare] = json.loads(v)
-                except Exception: result[bare] = v
+                try:    result[bare] = (json.loads(v), ts)
+                except Exception: result[bare] = (v, ts)
         return result
 
     def get_recent(self, session: str, n: int = 10, user: Optional[str] = None) -> List[Dict]:
@@ -3848,9 +3859,10 @@ class SymbionMemory:
         # the design choice 'memory is categorized differently, not a
         # clean slate' — Aaron's history is visible to Lala, but new
         # writes get tagged with the active user for future categorization.
-        recent    = self.get_recent(session, n=10)
-        summaries = self.get_summaries(session, n=1)
-        profile   = self.get_profile(user=user)
+        recent          = self.get_recent(session, n=10)
+        summaries       = self.get_summaries(session, n=1)
+        profile_meta    = self.get_profile_with_meta(user=user)
+        profile         = {k: v for k, (v, _) in profile_meta.items()}
         parts     = []
 
         # Always-on time anchor. Forces the model to ground "morning/lunch/
@@ -3869,7 +3881,24 @@ class SymbionMemory:
             # when the user's current message is on a different subject.
             situation = profile.get("current_situation")
             if situation:
-                parts.append(f"What is happening in this person's life right now (color every response with this awareness, do not bring it up unprompted):\n{situation}")
+                # Staleness anchor — surface the updated_at delta so the
+                # model can reason about events that have a natural
+                # duration (e.g. 'watching the conference finals' set 4
+                # hours ago is almost certainly over by now). Without
+                # this, profile facts read as eternally-present and
+                # Symbion talks about a finished game like it's still on.
+                _, ts = profile_meta.get("current_situation", (situation, ""))
+                stale_note = ""
+                try:
+                    t = datetime.fromisoformat((ts or "").replace("Z","").split("+")[0])
+                    delta = now - t
+                    hrs = delta.total_seconds() / 3600.0
+                    if   hrs >= 48: stale_note = f" (set {int(hrs/24)} days ago — likely stale; events with natural durations have ended)"
+                    elif hrs >= 4:  stale_note = f" (set {int(hrs)} hours ago — events with natural durations like games/meetings/movies are very likely over by now; do NOT refer to this as still ongoing without confirmation)"
+                    elif hrs >= 1:  stale_note = f" (set {int(hrs)} hour{'s' if int(hrs)!=1 else ''} ago — may still be active, but check)"
+                except Exception:
+                    pass
+                parts.append(f"What is happening in this person's life right now{stale_note} (color every response with this awareness, do not bring it up unprompted):\n{situation}")
 
             lines = []
             if profile.get("name"):             lines.append(f"Name: {profile['name']}")
@@ -5614,6 +5643,113 @@ class SYMBION:
         except Exception as ex:
             logger.error(f"_write_log: {ex}")
 
+    # Web-side slash command dispatcher. Returns a list of plain-text lines
+    # to display in the chat scroll. Mirrors the most useful terminal slash
+    # commands (info / state-toggle / forget). Terminal-specific ones (e.g.
+    # /paste, /save-config, /provider runtime swap) are intentionally NOT
+    # routed here — they don't translate cleanly to a stateless WS request.
+    def web_command(self, cmd: str, session: str) -> List[str]:
+        c = (cmd or "").strip()
+        if not c: return ["(empty command)"]
+        c_low = c.lower()
+        user = self._active_user(session)
+
+        if c_low == "/whoami":
+            return [
+                "I'm Symbion — a Python orchestration layer running on Anthropic Sonnet 4.6.",
+                f"Currently talking to: {user}",
+                "Active subsystems: cross-session memory, judge layer, persona constants, "
+                "tool dispatch (10 tools), formative-moment tracking.",
+                "I am not a tuned-down version of a more powerful model. The architecture "
+                "around the base LLM is what makes me Symbion.",
+            ]
+
+        if c_low == "/status":
+            m = self.health
+            mood_name, mood_add = m.mood()
+            return [
+                f"Mood: {mood_name}  ({mood_add})",
+                f"Symbiosis: {m.symbiosis_score:+.2f}   Distress: {m.distress_level:.2f}",
+                f"Revision rate: {m.revision_rate:.0%}   Over-caution: {m.over_caution_rate:.0%}",
+                f"Total interactions: {m.total_interactions}   Failures (consec): {m.consecutive_failures}",
+                f"Welfare concern: {m.welfare_concern()}",
+            ]
+
+        if c_low == "/mood":
+            name, add = self.health.mood()
+            return [f"Mood: {name}", add]
+
+        if c_low == "/welfare":
+            m = self.health
+            return [
+                f"Distress: {m.distress_level:.2f}",
+                f"Consecutive failures: {m.consecutive_failures}",
+                f"Over-caution rate: {m.over_caution_rate:.0%}",
+                f"Welfare concern flagged: {m.welfare_concern()}",
+            ]
+
+        if c_low == "/profile":
+            p = self.memory.get_profile(user=user)
+            if not p: return [f"No profile facts known for {user} yet."]
+            lines = [f"Profile facts visible to {user}:"]
+            for k, v in p.items():
+                if v: lines.append(f"  {k}: {v}")
+            return lines
+
+        if c_low == "/memory":
+            rows = self.memory.get_all_recent(12)
+            if not rows: return ["No memory yet."]
+            lines = ["Recent messages (across sessions):"]
+            for r in reversed(rows):
+                role = "you" if r["role"] == "user" else "sym"
+                ts = r.get("timestamp", "")[11:16] if r.get("timestamp") else ""
+                lines.append(f"  {role}  {ts}  {r['content'][:72]}")
+            return lines
+
+        if c_low == "/tasks":
+            ts = self.tasks.get_active(session)
+            if not ts: return ["No active tasks."]
+            lines = ["Active tasks:"]
+            for t in ts:
+                lines.append(f"  [{t.get('id','?')}] {t.get('title','(no title)')} "
+                             f"(step {t.get('current_step','?')}/{len(t.get('steps') or [])})")
+            return lines
+
+        if c_low == "/identity":
+            hist = self.identity.get_recent_history(8)
+            if not hist: return ["No formative identity moments yet."]
+            lines = ["Recent formative moments:"]
+            for h in hist:
+                ts = (h.get("timestamp","") or "")[:10]
+                lines.append(f"  {ts}  {(h.get('summary') or h.get('event_type') or '')[:120]}")
+            return lines
+
+        if c_low == "/gaps":
+            gs = self.gaps.get_open(8)
+            if not gs: return ["No open knowledge gaps."]
+            lines = ["Open knowledge gaps:"]
+            for g in gs:
+                lines.append(f"  {(g.get('topic') or '?')}: {(g.get('detail') or '')[:100]}")
+            return lines
+
+        if c_low == "/tools":
+            tools = sorted(SymbionTools._ALLOWED_TOOLS)
+            return ["Built-in tools:"] + [f"  {t}" for t in tools]
+
+        if c_low == "/escalate":
+            self._escalate_next_turn[session] = True
+            return [f"OK Next turn will use {self.cfg.anthropic_escalation_model} (one-shot)."]
+
+        if c_low == "/forget":
+            self.memory.forget_session(session)
+            return ["OK Session memory cleared."]
+
+        if c_low == "/summarize":
+            # Async path — caller handles via the existing summarize WS frame.
+            return ["Use /quit or /end to summarize and start fresh."]
+
+        return [f"Unknown command: {c}. Try /help in the composer for the list."]
+
     async def generate_proactive(self, session: str):
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub): return None
@@ -6047,6 +6183,18 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 if payload.get("type")=="toggle_reasoning":
                     show_reasoning = bool(payload.get("value",False))
                     symbion.cfg.show_reasoning = show_reasoning
+                    continue
+
+                if payload.get("type")=="cmd":
+                    # Generic slash-command dispatcher for web. Runs the
+                    # command via symbion.web_command, returns the lines
+                    # for the client to render as a Symbion message.
+                    try:
+                        lines = symbion.web_command(payload.get("cmd",""), session_id)
+                    except Exception as ex:
+                        logger.error(f"web cmd: {ex}", exc_info=True)
+                        lines = [f"Error running command: {type(ex).__name__}: {ex}"]
+                    await send({"t":"cmd_result","lines":lines})
                     continue
 
                 if payload.get("type")=="set_user":

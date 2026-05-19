@@ -423,6 +423,11 @@ function connect(){
     } else if(d.t==='auth_ok'){
       // Server confirmed our auth frame. The status frame that follows
       // will populate the header pills.
+    } else if(d.t==='cmd_result'){
+      // Server-dispatched slash-command response. Render as a styled
+      // Symbion message so it looks like a system reply, not a chat turn.
+      const lines = d.lines || [];
+      addSymStatic(lines.join('\n'));
     } else if(d.t==='history'){
       renderHistory(d.messages||[]);
     } else if(d.t==='summarize_ok'){
@@ -641,6 +646,29 @@ function handleSlashCommand(text){
     showKeyModal('');
     return true;
   }
+  if(cmd==='/think'){
+    // Mirror the terminal /think toggle. The think button in the header
+    // wires the same WS frame, so this just stays in sync with that path.
+    showReasoning = !showReasoning;
+    thinkBtn.classList.toggle('active', showReasoning);
+    if(ws && ws.readyState === 1){
+      ws.send(JSON.stringify({type:'toggle_reasoning', value:showReasoning}));
+    }
+    addSymStatic(`Chain-of-thought: ${showReasoning ? 'ON' : 'OFF'}`);
+    return true;
+  }
+  // Server-side commands: send a {type:'cmd',cmd:...} frame, the server
+  // dispatches via symbion.web_command and replies with {t:'cmd_result',
+  // lines:[...]} which the onmessage handler renders below.
+  const SERVER_CMDS = ['/whoami','/status','/mood','/welfare','/profile','/memory','/tasks','/identity','/gaps','/tools','/escalate','/forget','/summarize'];
+  if(SERVER_CMDS.includes(cmd)){
+    if(ws && ws.readyState === 1){
+      ws.send(JSON.stringify({type:'cmd', cmd:cmd}));
+    } else {
+      addSymStatic('Not connected. Wait for the dot to turn green.');
+    }
+    return true;
+  }
   if(cmd.startsWith('/user')){
     // /user           -> show current active user (from localStorage)
     // /user <name>    -> switch to <name>: store in localStorage and tell
@@ -669,7 +697,27 @@ function handleSlashCommand(text){
     return true;
   }
   if(cmd==='/help'){
-    addSymStatic('Slash commands: /quit (save & end session, start fresh), /new (start fresh without saving), /user <name> (switch active user), /key (change API key), /help (this).');
+    addSymStatic([
+      'Slash commands:',
+      '  /quit, /end          save & end session, start fresh',
+      '  /new                 start fresh session (no save)',
+      '  /user [<name>]       show or switch active user (e.g. /user lala)',
+      '  /key                 open API key modal',
+      '  /think               toggle chain-of-thought display',
+      '  /whoami              Symbion self-description',
+      '  /status              health metrics snapshot',
+      '  /mood                current mood label',
+      '  /welfare             distress / failure / over-caution stats',
+      '  /profile             your profile facts (per-user)',
+      '  /memory              recent messages across sessions',
+      '  /tasks               active tasks',
+      '  /identity            recent formative moments',
+      '  /gaps                open knowledge gaps',
+      '  /tools               list built-in tools',
+      '  /escalate            force the NEXT turn to use Opus 4.7',
+      '  /forget              clear THIS session memory',
+      '  /help                this list'
+    ].join('\n'));
     return true;
   }
   return false;
