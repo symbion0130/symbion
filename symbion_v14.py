@@ -114,6 +114,17 @@ def magenta(t): return _c("35", t)
 def bold(t):    return _c("1",  t)
 def dim(t):     return _c("2",  t)
 def blue(t):    return _c("34", t)
+# Warm palette (added 2026-05-19) — readable on Night Light / warm-shifted
+# displays where blue/purple/cyan get washed out. Uses 256-colour ANSI
+# (`38;5;N`) for amber/gold/orange/warm-white tones; falls back to plain
+# text when _USE_COLOR is off. Terminals that don't speak 256-colour
+# render as fallback approximations on the nearest 16-colour mapping.
+def amber(t):       return _c("38;5;214", t)  # warm gold-orange, ~#ffaf00
+def gold(t):        return _c("38;5;220", t)  # bright gold, ~#ffd700
+def warm_white(t):  return _c("38;5;230", t)  # cream / off-white, ~#ffffd7
+def soft_orange(t): return _c("38;5;208", t)  # ~#ff8700
+def gray(t):        return _c("38;5;245", t)  # mid-gray, ~#8a8a8a
+def soft_green(t):  return _c("38;5;150", t)  # warm sage, ~#afd787
 
 logger = logging.getLogger("symbion")
 
@@ -4428,7 +4439,7 @@ class SYMBION:
                                           self.cfg.kimi_base_url, self.cfg)
 
         if self.client and not isinstance(self.client, OfflineJudgeStub):
-            print(green(f"  Provider  :  {self.cfg.llm_provider.upper()}  OK"))
+            print(soft_green(f"  Provider  :  {self.cfg.llm_provider.upper()}  OK"))
         else:
             print(yellow("  Provider  :  OFFLINE-STUB (no LLM — judge disabled)"))
 
@@ -6751,10 +6762,25 @@ def run_terminal(symbion: "SYMBION"):
         print(yellow(f"  MCP       :  {len(symbion.cfg.mcp_servers)} server(s) configured but "
                      "MCP is only active in web mode (`--web`)."))
 
+    # Unicode box-drawing for the title bar (2026-05-19). Width 68 chars
+    # inside the corners; pad the title line so the right border lands
+    # cleanly. Warm palette here -- amber title + warm-white border --
+    # so the chrome reads correctly under a Night-Light-shifted display.
     print()
-    print(bold("+==================================================================+"))
-    print(bold("|  SYMBION v14.0                                                   |"))
-    print(bold("+==================================================================+"))
+    print(amber("  ╔══════════════════════════════════════════════════════════════════╗"))
+    print(amber("  ║") + warm_white(bold("  SYMBION v14.0                                                  ")) + amber("║"))
+    print(amber("  ╚══════════════════════════════════════════════════════════════════╝"))
+    print()
+
+    # Status block: labels are 10-char left-pad amber, values are warm
+    # white / gold / soft-orange depending on what they represent.
+    # Aligning the label column means the value column lines up too,
+    # which makes the whole thing scannable at a glance instead of
+    # bouncing across uneven gutters.
+    def _row(label: str, value: str, hint: str = ""):
+        # 10-char field for the label so values land on column 14
+        # (2-space indent + 10 + 2). hint is grey, trailing, optional.
+        print(f"  {amber(label.ljust(10))}  {value}" + (f"  {gray(hint)}" if hint else ""))
 
     if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
         prov  = symbion.cfg.llm_provider.upper()
@@ -6766,19 +6792,33 @@ def run_terminal(symbion: "SYMBION"):
                      else symbion.cfg.openai_model if symbion.cfg.llm_provider=="openai"
                      else symbion.cfg.responder_model)
             resp_label = model
-        print(f"  {dim('Provider')}  {green(prov)}  {dim(resp_label)}")
-        print(f"  {dim('Judge')}     {dim(symbion._jmodel())}")
-    print(f"  {dim('Session')}   {dim(session[:20])}")
-    print(f"  {dim('User')}      {green(symbion._active_user(session))}  {dim('(/user <name> to switch)')}")
-    print(f"  {dim('Mood')}      {cyan(mood_name)}")
-    if profile: print(f"  {dim('Profile')}   {green(str(len(profile)))} facts known")
+        _row("Provider",  warm_white(prov),                                gray(resp_label))
+        _row("Judge",     gray(symbion._jmodel()))
+    _row("Session",   gray(session[:20]))
+    _row("User",      warm_white(symbion._active_user(session)),       "/user <name> to switch")
+    _row("Mood",      soft_orange(mood_name))
+    if profile:
+        _row("Profile",   gold(str(len(profile))),                       "facts known")
     moments = symbion.identity.total_moments()
-    if moments: print(f"  {dim('Identity')}  {green(str(moments))} formative moments")
+    if moments:
+        _row("Identity",  gold(str(moments)),                            "formative moments")
     active_tasks = symbion.tasks.get_active(session)
-    if active_tasks: print(f"  {dim('Tasks')}     {yellow(str(len(active_tasks)))} active")
+    if active_tasks:
+        _row("Tasks",     yellow(str(len(active_tasks))),                "active")
     open_gaps = symbion.gaps.get_open()
-    if open_gaps: print(f"  {dim('Gaps')}      {yellow(str(len(open_gaps)))} open knowledge gaps")
-    print(dim("  /help / /think / /tasks / /identity / /voice-test / /quit"))
+    if open_gaps:
+        _row("Gaps",      yellow(str(len(open_gaps))),                   "open knowledge gaps")
+
+    # Commands by category instead of one cramped line. Subtle separator
+    # before the prompt so the eye knows the header is done.
+    print()
+    print(f"  {amber('Commands')}")
+    print(f"    {gray('chat')}      /think  /escalate  /paste  /provider  /feedback")
+    print(f"    {gray('memory')}    /summarize  /forget  /tasks  /identity  /gaps")
+    print(f"    {gray('session')}   /user <name>  /tool-stats  /whoami  /help")
+    print(f"    {gray('exit')}      /quit")
+    print()
+    print(gray("  " + "─" * 68))
     print()
 
     while True:
@@ -6786,12 +6826,12 @@ def run_terminal(symbion: "SYMBION"):
         # These are messages Symbion generated on its own clock; deliver
         # them once, oldest first, before showing the next prompt.
         for pmsg in symbion.drain_proactive_queue(session):
-            print(f"\n{magenta(bold('Symbion'))}  {dim('(unprompted)')}")
+            print(f"\n{amber(bold('Symbion'))}  {gray('(unprompted)')}")
             sw = _StreamWrapper()
             sw.write(pmsg)
             sw.finish()
             print()
-        try:    raw = _read_input_multiline(bold(magenta("\nyou > "))).strip()
+        try:    raw = _read_input_multiline(bold(amber("\nyou > "))).strip()
         except (EOFError,KeyboardInterrupt): print(dim("\n  Goodbye.")); break
         if not raw: continue
 
