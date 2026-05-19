@@ -15,10 +15,20 @@
   --thinking:#15172a;--thinking-border:#2a2d4a;
   --radius:14px;
 }
-html,body{height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none}
-/* 100dvh handles the iOS URL-bar collapse / soft-keyboard cleanly when
-   supported (iOS 15.4+, Android Chrome 108+); falls back to 100% on older
-   browsers, which is the prior behaviour. */
+html,body{
+  height:100%;
+  height:100dvh;
+  /* JS sets --viewport-height from window.visualViewport.height whenever
+     the iOS soft keyboard + QuickType bar open/close. That keeps the
+     composer pinned just above the keyboard instead of being shoved
+     off-screen (the classic dvh + keyboard regression). Falls back to
+     100dvh on browsers without visualViewport, which falls back to 100%
+     on browsers older than that. Order is intentional: last declaration
+     wins if the unit is recognised. */
+  height:var(--viewport-height,100dvh);
+  overflow:hidden;
+  overscroll-behavior:none;
+}
 body{
   background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
@@ -28,6 +38,11 @@ body{
 }
 
 header{
+  /* Sticky so iOS Safari's URL-bar collapse + rubber-band overscroll
+     can't push the brand bar out of view during long scroll-throughs.
+     z-index sits above the chat content but below modals (1000) and
+     the status sheet (1100). */
+  position:sticky;top:0;z-index:50;
   padding:.6rem 1rem;
   padding-top:max(.6rem,env(safe-area-inset-top));
   border-bottom:1px solid var(--border);
@@ -336,6 +351,25 @@ footer{
   </div>
 </footer>
 <script>
+// --- Visual viewport tracking -------------------------------------------
+// iOS Safari's soft keyboard + QuickType (autofill suggestion bar) shrink
+// the *visible* viewport without changing window.innerHeight or 100dvh.
+// That used to push the composer below the keyboard. We expose the live
+// visualViewport.height as a CSS custom property and the html/body height
+// rule reads it. On browsers without visualViewport (older Android Chrome,
+// non-iOS), the CSS fallback chain falls back to 100dvh / 100%.
+if (window.visualViewport) {
+  const updateVV = () => {
+    document.documentElement.style.setProperty(
+      '--viewport-height',
+      window.visualViewport.height + 'px'
+    );
+  };
+  window.visualViewport.addEventListener('resize', updateVV);
+  window.visualViewport.addEventListener('scroll',  updateVV);
+  updateVV();
+}
+
 const chat=document.getElementById('chat');
 const chatInner=document.getElementById('chat-inner');
 const inp=document.getElementById('inp');
@@ -374,7 +408,12 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS  = 30000;
 let reconnectAttempts = 0;
 let reconnectTimer    = null;
-let initialConnectTimer = null;
+// Only surface reconnect UI for *unplanned* disconnects, never for the
+// initial connect or for user-initiated restarts (--kill, page refresh,
+// network swap). hasEverConnected flips true on the first onopen and
+// gates all setBanner() calls in scheduleReconnect — so before the WS
+// has ever connected, drops are silent.
+let hasEverConnected = false;
 
 const connBanner = document.getElementById('conn-banner');
 function _escapeHtml(s){
@@ -415,12 +454,18 @@ function scheduleReconnect(reason){
   const wait = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), RECONNECT_MAX_MS);
   const secs = Math.max(1, Math.round(wait/1000));
   reconnectAttempts++;
-  // First couple of attempts: subtle warn pill ("reconnecting in Xs").
-  // After that the server is probably actually down, escalate to danger.
-  if(reconnectAttempts <= 2){
-    setBanner(`Reconnecting in ${secs}s...`, 'warn', true);
-  } else {
-    setBanner(`Can't reach Symbion. Retrying in ${secs}s...`, 'danger', true);
+  // Pill only surfaces on UNPLANNED disconnects -- i.e. the WS had
+  // successfully connected at least once and then dropped. Page-load,
+  // refresh, and the brief gap between server kill + relaunch all leave
+  // hasEverConnected=false, so they stay silent. After a real mid-session
+  // drop the gating opens up: warn for the first couple of retries,
+  // danger thereafter.
+  if(hasEverConnected){
+    if(reconnectAttempts <= 2){
+      setBanner(`Reconnecting in ${secs}s...`, 'warn', true);
+    } else {
+      setBanner(`Can't reach Symbion. Retrying in ${secs}s...`, 'danger', true);
+    }
   }
   reconnectTimer = setTimeout(()=>{ reconnectTimer = null; connect(); }, wait);
 }
@@ -499,10 +544,11 @@ function connect(){
   ws.onopen=()=>{
     document.getElementById('dot').classList.remove('dead');
     // Successful connect resets the backoff counter, clears any pending
-    // retry timer, and hides the connection banner.
+    // retry timer, hides the connection banner, and -- crucially --
+    // marks hasEverConnected so future drops surface in the pill.
     reconnectAttempts = 0;
+    hasEverConnected  = true;
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if(initialConnectTimer){ clearTimeout(initialConnectTimer); initialConnectTimer = null; }
     setBanner(null);
     // Send the auth frame as the first message if we have a key. The
     // server treats this frame as required when SYMBION_API_KEY is set
@@ -926,14 +972,10 @@ inp.addEventListener('input',()=>{
 if(!apiKey){
   showKeyModal('Enter your server’s SYMBION_API_KEY, or tap Connect without one if the server doesn’t require auth.');
 }
-// Show a subtle "Connecting..." banner only if the first connect hasn't
-// established within 1.5s — fast LAN connects don't flash this; slow
-// Tailscale-over-cellular paths get clear feedback.
-initialConnectTimer = setTimeout(()=>{
-  if(!ws || ws.readyState !== 1){
-    setBanner('Connecting to Symbion...', 'info', true);
-  }
-}, 1500);
+// No initial-connect banner: page load, refresh, and post-kill relaunch
+// all leave hasEverConnected=false, so the pill stays out of the way
+// during expected/intentful states. The pill only appears after a real
+// mid-session drop -- see scheduleReconnect().
 connect();
 </script>
 </body>
