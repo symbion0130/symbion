@@ -3528,18 +3528,21 @@ class SymbionMemory:
     def get_recent(self, session: str, n: int = 10, user: Optional[str] = None) -> List[Dict]:
         """Recent messages for `session`. When `user` is None, no filter is
         applied (legacy caller path). When set, only rows tagged with that
-        user are returned."""
+        user are returned. Each result row carries the 'user' column so
+        build_context can attribute messages across speakers in a shared
+        memory pool (otherwise Symbion sees Lala's 'hey' right after
+        Aaron's 'web ui features' and treats them as one speaker)."""
         with sqlite3.connect(self.db) as c:
             if user:
                 rows = c.execute(
-                    "SELECT role,content FROM messages WHERE session=? AND user=? "
+                    "SELECT role,content,user FROM messages WHERE session=? AND user=? "
                     "ORDER BY id DESC LIMIT ?",
                     (session, user, n)).fetchall()
             else:
                 rows = c.execute(
-                    "SELECT role,content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
+                    "SELECT role,content,user FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
                     (session, n)).fetchall()
-        return [{"role":r[0],"content":r[1]} for r in reversed(rows)]
+        return [{"role":r[0],"content":r[1],"user":r[2] or "aaron"} for r in reversed(rows)]
 
     def get_summaries(self, session: str, n: int = 2, user: Optional[str] = None) -> List[str]:
         """Summaries written for `session`. Optional user filter — same
@@ -3900,7 +3903,25 @@ class SymbionMemory:
         # the design choice 'memory is categorized differently, not a
         # clean slate' — Aaron's history is visible to Lala, but new
         # writes get tagged with the active user for future categorization.
-        recent          = self.get_recent(session, n=10)
+        raw_recent      = self.get_recent(session, n=10)
+        # Per-message author attribution: when the shared pool contains
+        # turns from multiple users (e.g. aaron's chat + lala's later
+        # turns in the same session), prefix the OTHER user's user-role
+        # messages with '[<author> said] ' so the model can attribute
+        # speakers correctly. The active user's own messages stay
+        # unprefixed — the conversation feels like theirs. Without this,
+        # 'Hey how are you' from lala arriving right after 'web ui
+        # features' from aaron gets treated as one continuous speaker
+        # and Symbion responds as if lala had said both.
+        recent: List[Dict] = []
+        for m in raw_recent:
+            if m["role"] == "user" and m.get("user") and m["user"] != user:
+                recent.append({
+                    "role": "user",
+                    "content": f"[{m['user']} said] {m['content']}",
+                })
+            else:
+                recent.append({"role": m["role"], "content": m["content"]})
         summaries       = self.get_summaries(session, n=1)
         profile_meta    = self.get_profile_with_meta(user=user)
         profile         = {k: v for k, (v, _) in profile_meta.items()}
@@ -5323,13 +5344,26 @@ class SYMBION:
                        f"them as the developer directly ('you built X'), never in "
                        f"third person ('your developer built X'). The Self-knowledge "
                        f"paragraph's 'code your developer wrote' is generic phrasing "
-                       f"for any user; with aaron present, the developer IS the user.")
+                       f"for any user; with aaron present, the developer IS the user.\n\n"
+                       f"Shared-pool attribution: messages from other users in the "
+                       f"history are prefixed '[<name> said] ...'. Treat those as "
+                       f"the other user's statements, NOT as aaron's. When responding, "
+                       f"only attribute things to aaron that aaron actually said this "
+                       f"session (unprefixed user messages, or your previously-known "
+                       f"facts about him from the profile).")
         else:
             system += (f"\n\nCurrently talking to: {active_user} — NOT your developer. "
                        f"aaron is the developer; {active_user} is a different person "
                        f"using the same Symbion instance. Don't address {active_user} "
                        f"as if they built you; the 'your developer' framing in the "
-                       f"persona refers to aaron (who is not in this turn).")
+                       f"persona refers to aaron (who is not in this turn).\n\n"
+                       f"Shared-pool attribution: this session may contain prior "
+                       f"messages from other users (especially aaron) — those are "
+                       f"prefixed '[<name> said] ...' in the history. Do NOT attribute "
+                       f"those statements to {active_user}. If {active_user} just "
+                       f"joined and the previous messages were aaron's, you are now "
+                       f"meeting {active_user} fresh; don't pick up aaron's "
+                       f"conversational thread as if {active_user} had said it.")
 
         if preamble: system += f"\n\n{preamble}"
         system += f"\n\nYour current state: {mood_add}"
