@@ -77,6 +77,51 @@ function Write-Section($msg) {
     Write-Host "=== $msg ===" -ForegroundColor Cyan
 }
 
+# --- PAT resolution -----------------------------------------------------
+# Repo is private, so all fetches (initial irm of install.ps1, git clone,
+# zip download) need a fine-grained Personal Access Token with read-only
+# Contents permission. Order of preference:
+#   1. $env:SYMBION_PAT (user pastes via env var on the install command)
+#   2. %OneDrive%\Symbion\sync\.pat (cached from a prior install on any
+#      machine signed into the same OneDrive account)
+# We DO NOT prompt -- if neither source has a PAT, the irm fetching this
+# very script would have failed before we got here. If it didn't (e.g.
+# the repo was just made public), we proceed without a PAT and let git
+# clone try anonymously.
+function Resolve-Pat {
+    if ($env:SYMBION_PAT) { return $env:SYMBION_PAT }
+    $oneDrive = if ($env:OneDrive) { $env:OneDrive } else { $env:OneDriveConsumer }
+    if ($oneDrive) {
+        $cached = Join-Path $oneDrive 'Symbion\sync\.pat'
+        if (Test-Path -LiteralPath $cached) {
+            $val = (Get-Content -LiteralPath $cached -Raw).Trim()
+            if ($val) { return $val }
+        }
+    }
+    return $null
+}
+
+# After we know we have a working PAT, cache it to OneDrive so subsequent
+# installs on this OneDrive-linked account don't need it re-pasted.
+function Save-PatToOneDrive($pat) {
+    if (-not $pat) { return }
+    $oneDrive = if ($env:OneDrive) { $env:OneDrive } else { $env:OneDriveConsumer }
+    if (-not $oneDrive) { return }
+    $syncDir = Join-Path $oneDrive 'Symbion\sync'
+    if (-not (Test-Path -LiteralPath $syncDir)) {
+        New-Item -ItemType Directory -Path $syncDir -Force | Out-Null
+    }
+    $cached = Join-Path $syncDir '.pat'
+    if (Test-Path -LiteralPath $cached) {
+        $existing = (Get-Content -LiteralPath $cached -Raw).Trim()
+        if ($existing -eq $pat) { return }  # unchanged, no-op
+    }
+    Set-Content -LiteralPath $cached -Value $pat -Encoding ASCII -NoNewline
+    Write-Host "Cached PAT to $cached for future installs on this OneDrive account."
+}
+
+$Pat = Resolve-Pat
+
 # ------------------------------------------------------------------------
 # Phase 1: Locate or fetch the repo
 # ------------------------------------------------------------------------
@@ -99,9 +144,20 @@ if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'symbion
             if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
                 Push-Location $InstallDir
                 try {
+                    # Rewrite the origin URL to embed the PAT so `git pull`
+                    # works without an interactive credential prompt. We
+                    # restore the clean URL afterward so the token never
+                    # gets persisted to .git/config across machines.
+                    if ($Pat) {
+                        & git remote set-url origin "https://x-access-token:$Pat@github.com/symbion0130/symbion.git"
+                    }
                     & git pull --ff-only 2>&1 | Out-Null
                     if ($LASTEXITCODE -ne 0) {
                         Write-Host "[warn] git pull failed; continuing with existing files"
+                    }
+                    if ($Pat) {
+                        & git remote set-url origin 'https://github.com/symbion0130/symbion.git'
+                        Save-PatToOneDrive $Pat
                     }
                 } finally {
                     Pop-Location
@@ -117,23 +173,38 @@ if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'symbion
         # Fresh fetch. Prefer git (lighter, supports future pulls). Fall
         # back to GitHub's zip if git isn't installed so this script works
         # on machines with literally nothing pre-installed.
+        # Private repo: PAT goes into the clone URL as the x-access-token
+        # user. GitHub accepts this format for both raw and git endpoints.
         $hasGit = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
         if ($hasGit) {
-            Write-Host "git clone $RepoUrl ($Branch)"
-            & git clone --branch $Branch --depth 1 $RepoUrl $InstallDir
+            $cloneUrl = if ($Pat) {
+                "https://x-access-token:$Pat@github.com/symbion0130/symbion.git"
+            } else {
+                "$RepoUrl.git"  # try anonymous (works only if repo is public)
+            }
+            # Echo the safe-redacted form so logs don't leak the token.
+            Write-Host "git clone <repo> ($Branch)"
+            & git clone --branch $Branch --depth 1 $cloneUrl $InstallDir
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "git clone failed. Check network / GitHub access and retry."
+                if (-not $Pat) {
+                    Write-Error "git clone failed (no PAT available). Set `$env:SYMBION_PAT before running install.ps1, or place the PAT at %OneDrive%\Symbion\sync\.pat"
+                } else {
+                    Write-Error "git clone failed. Check the PAT is valid / not expired and has Contents:read permission on symbion0130/symbion."
+                }
                 exit 1
             }
+            Save-PatToOneDrive $Pat
         } else {
             Write-Host "git not found -- downloading zip from $ZipUrl"
             $zipPath = Join-Path $env:TEMP "symbion-$Branch-$([Guid]::NewGuid()).zip"
             $extractDir = Join-Path $env:TEMP "symbion-extract-$([Guid]::NewGuid())"
+            $zipHeaders = @{}
+            if ($Pat) { $zipHeaders['Authorization'] = "token $Pat" }
             try {
                 # Force TLS 1.2 for Win10 / PS 5.1 which sometimes default
                 # to TLS 1.0 and get refused by github.com.
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-WebRequest -Uri $ZipUrl -OutFile $zipPath -UseBasicParsing
+                Invoke-WebRequest -Uri $ZipUrl -OutFile $zipPath -UseBasicParsing -Headers $zipHeaders
                 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
                 $extracted = Get-ChildItem $extractDir -Directory | Select-Object -First 1
                 if (-not $extracted) {
