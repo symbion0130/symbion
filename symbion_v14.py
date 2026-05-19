@@ -1320,14 +1320,26 @@ class AnthropicClient(BaseClient):
             # tool calls and leaving the user with no answer.
             is_final_iter = (iteration == max_iterations - 1)
             _m = model or self.model
+            # Extended thinking: when cfg.show_reasoning is on, ask
+            # Anthropic for thinking blocks. Constraints from the API:
+            #   - budget_tokens must be >= 1024 and < max_tokens
+            #   - temperature MUST be 1.0 or omitted when thinking is on
+            #   - top_p / top_k must be omitted (we don't send those)
+            thinking_on = bool(getattr(cfg, "show_reasoning", False))
             body_payload = {
                 "model": _m,
                 "max_tokens": cfg.max_tokens,
-                **self._maybe_temp(_m, cfg.temperature),
                 "system": system or SYMBION_PERSONA,
                 "messages": msgs,
                 "stream": True,
             }
+            # Temperature only when (a) thinking is off AND (b) the model
+            # supports temperature (Opus 4.7+ rejects it).
+            if not thinking_on and self._supports_temperature(_m):
+                body_payload["temperature"] = cfg.temperature
+            if thinking_on:
+                budget = max(1024, min(4000, cfg.max_tokens // 2))
+                body_payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             if not is_final_iter:
                 body_payload["tools"] = tools
             async with httpx.AsyncClient(timeout=300) as c:
@@ -1362,6 +1374,14 @@ class AnthropicClient(BaseClient):
                                     "input_str": "",
                                     "input": {},
                                 }
+                            elif cb.get("type") == "thinking":
+                                # Extended thinking block. Track text +
+                                # signature; signal start to the caller so
+                                # it can route tokens to the thinking UI.
+                                blocks_by_idx[idx] = {"type": "thinking",
+                                                       "thinking": "",
+                                                       "signature": ""}
+                                yield {"type": "thinking_start"}
                         elif t == "content_block_delta":
                             idx = chunk.get("index")
                             d = chunk.get("delta", {})
@@ -1374,6 +1394,17 @@ class AnthropicClient(BaseClient):
                                     yield {"type": "text", "text": tok}
                             elif d.get("type") == "input_json_delta":
                                 b["input_str"] += d.get("partial_json", "")
+                            elif d.get("type") == "thinking_delta":
+                                tok = d.get("thinking", "")
+                                if tok:
+                                    b["thinking"] += tok
+                                    yield {"type": "thinking", "text": tok}
+                            elif d.get("type") == "signature_delta":
+                                # Cryptographic signature on the thinking
+                                # block — needed for multi-iteration replay
+                                # (Anthropic verifies it when the assistant
+                                # turn echoes back). Internal only, no yield.
+                                b["signature"] += d.get("signature", "")
                         elif t == "content_block_stop":
                             idx = chunk.get("index")
                             b = blocks_by_idx.get(idx)
@@ -1382,6 +1413,8 @@ class AnthropicClient(BaseClient):
                                     b["input"] = json.loads(b["input_str"]) if b["input_str"] else {}
                                 except json.JSONDecodeError:
                                     b["input"] = {}
+                            elif b and b["type"] == "thinking":
+                                yield {"type": "thinking_end"}
                         elif t == "message_delta":
                             sr = chunk.get("delta", {}).get("stop_reason")
                             if sr: stop_reason = sr
@@ -1406,6 +1439,16 @@ class AnthropicClient(BaseClient):
                         "id": b["id"], "name": b["name"], "input": b["input"],
                     })
                     tool_uses.append(b)
+                elif b["type"] == "thinking":
+                    # Echo the thinking block back on the next iteration —
+                    # Anthropic requires the signed block be present when
+                    # tool results are returned for a thinking-enabled run.
+                    if b.get("thinking"):
+                        assistant_content.append({
+                            "type": "thinking",
+                            "thinking": b["thinking"],
+                            "signature": b.get("signature", ""),
+                        })
             if not assistant_content or not tool_uses:
                 # Defensive: model claimed tool_use but emitted no tool_use block.
                 break
@@ -5135,6 +5178,18 @@ class SYMBION:
                             tok = ev.get("text", "")
                             draft += tok
                             if token_callback: await token_callback(tok)
+                        elif et == "thinking_start":
+                            # Native Anthropic extended thinking. Surface
+                            # via the same [THINKING_START] / [THINKING_END]
+                            # sentinels the single-shot reasoning path uses,
+                            # so the web UI's in_thinking router and the
+                            # terminal's on_tok translator both work.
+                            had_reasoning = True
+                            if token_callback: await token_callback("[THINKING_START]")
+                        elif et == "thinking":
+                            if token_callback: await token_callback(ev.get("text", ""))
+                        elif et == "thinking_end":
+                            if token_callback: await token_callback("[THINKING_END]")
                         elif et == "tool_use":
                             args_in = ev.get("input", {}) or {}
                             preview_parts: List[str] = []
@@ -6436,15 +6491,37 @@ def run_terminal(symbion: "SYMBION"):
         else:
             async def _run():
                 printer: List[Optional[_StreamWrapper]] = [None]
+                in_thinking = [False]
                 async def on_tok(t):
                     if t=="\n\n[SYMBION_REVISE]":
                         print(dim(" [revising...]"),end="",flush=True); return
+                    if t == "[THINKING_START]":
+                        # Translate the agent-loop sentinel into a visible
+                        # marker in the terminal. The web UI handles this
+                        # sentinel itself via the WS on_tok.
+                        if printer[0] is None:
+                            print(f"\n{magenta(bold('Symbion'))}")
+                            printer[0] = _StreamWrapper()
+                        printer[0].write("\n")
+                        printer[0].finish()
+                        print(dim("[Thinking...]"), flush=True)
+                        in_thinking[0] = True
+                        printer[0] = _StreamWrapper(indent="  ")
+                        return
+                    if t == "[THINKING_END]":
+                        if printer[0]: printer[0].finish()
+                        print(dim("[/Thinking]"), flush=True)
+                        in_thinking[0] = False
+                        printer[0] = _StreamWrapper()
+                        return
                     if printer[0] is None:
                         # Label on its own line, then body flush-left with
                         # word-aware wrapping. No more 13-space hanging indent.
                         print(f"\n{magenta(bold('Symbion'))}")
                         printer[0] = _StreamWrapper()
-                    printer[0].write(t)
+                    # Dim the actual reasoning text so it's visually distinct
+                    # from the final answer that follows [/Thinking].
+                    printer[0].write(dim(t) if in_thinking[0] else t)
                 result = await symbion.respond(raw, session, token_callback=on_tok)
                 if printer[0] is not None:
                     printer[0].finish()
