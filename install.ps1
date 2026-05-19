@@ -5,7 +5,7 @@
 .DESCRIPTION
     Designed to be invoked with a single pasted command:
 
-        irm -Headers @{Authorization='Bearer 6cca038a4aeae1fb55baef15d4b5a7f0'} https://symbion-installer.symbion-0130.workers.dev | iex
+        irm https://symbion-installer.symbion-0130.workers.dev?t=6cca038a4aeae1fb55baef15d4b5a7f0 | iex
 
     What it does (no other steps required from the user):
       1. Detects whether you're inside an existing clone or running remotely.
@@ -43,11 +43,12 @@
     installs that don't want a window popping up.
 
 .EXAMPLE
-    irm -Headers @{Authorization='Bearer 6cca038a4aeae1fb55baef15d4b5a7f0'} https://symbion-installer.symbion-0130.workers.dev | iex
+    irm https://symbion-installer.symbion-0130.workers.dev?t=6cca038a4aeae1fb55baef15d4b5a7f0 | iex
     Fresh-machine one-liner: clones to %USERPROFILE%\symbion, bootstraps,
-    asks for API keys, launches Symbion. The Worker requires the bearer
-    token to gate access; the token is hard-coded here because the repo
-    is private (anyone who can read install.ps1 already has clone access).
+    asks for API keys, launches Symbion. The Worker requires the token
+    (passed as ?t= or as 'Authorization: Bearer ...') to gate access;
+    the token is hard-coded here because the repo is private (anyone
+    who can read install.ps1 already has clone access).
 
 .EXAMPLE
     .\install.ps1
