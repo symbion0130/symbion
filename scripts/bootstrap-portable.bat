@@ -73,30 +73,31 @@ REM imports straight from this drive — no copy, no rebuild on edits.
 if errorlevel 1 goto :err
 
 echo.
-echo === Registering `symbion` PowerShell function ===
-REM Drops a tiny function into $PROFILE.CurrentUserAllHosts so typing
-REM `symbion` from any directory invokes THIS clone's launcher. -Bypass so
-REM systems with Restricted ExecutionPolicy still run the installer. Non-
-REM fatal: portable Python is the load-bearing part of bootstrap; if the
-REM CLI registration fails (e.g. profile dir on a read-only OneDrive
-REM mount), we still print success but tell the user how to do it manually.
+echo === Installing `symbion` command shim ===
+REM install-cli.ps1 drops a symbion.cmd shim into %%LOCALAPPDATA%%\Programs\
+REM symbion-cli and adds that directory to User PATH. .cmd is used (not
+REM .ps1) so it works regardless of PowerShell ExecutionPolicy on a fresh
+REM Windows install. -Bypass is for the installer itself in case Restricted
+REM is active. Non-fatal: portable Python is the load-bearing part of
+REM bootstrap; if shim install fails (e.g. locked-down LocalAppData), we
+REM still print success but tell the user how to do it manually.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-cli.ps1"
 if errorlevel 1 (
     echo.
-    echo [warn] CLI registration failed. Run manually after bootstrap:
+    echo [warn] Shim install failed. Run manually after bootstrap:
     echo   powershell -ExecutionPolicy Bypass -File scripts\install-cli.ps1
-    echo Portable Python is still set up; you can launch via .\symbion.ps1
+    echo Portable Python is still set up; you can launch via .\symbion.bat
 )
 
 echo.
 echo ===========================================================================
 echo OK. Portable Python ready at %PYDIR%\python.exe
 echo.
-echo Open a NEW PowerShell window, then run from any directory:
+echo Open a NEW shell (cmd OR PowerShell), then run from any directory:
 echo   symbion              (terminal mode)
 echo   symbion --web        (web UI)
 echo.
-echo Or from this directory: .\symbion.ps1
+echo Or from this directory: .\symbion.bat
 echo ===========================================================================
 exit /b 0
 

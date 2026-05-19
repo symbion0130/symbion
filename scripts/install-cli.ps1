@@ -1,32 +1,43 @@
 <#
 .SYNOPSIS
-    Register a `symbion` PowerShell function so the launcher works from any directory.
+    Make `symbion` callable from any shell, any directory.
 
 .DESCRIPTION
-    By default Symbion can only be invoked from the repo root (.\symbion.ps1).
-    This script writes a small function into your PowerShell profile that calls
-    the launcher at this repo's location, so typing `symbion` from anywhere
-    runs `<this-repo>\symbion.ps1` with passthrough args.
+    Drops a symbion.cmd shim into %LOCALAPPDATA%\Programs\symbion-cli\ and
+    adds that directory to the User PATH if it isn't already there. The
+    shim does `call "<repo>\symbion.bat" %*` so typing `symbion` from any
+    cmd OR PowerShell session invokes this clone's launcher.
 
-    Idempotent: re-running replaces the previous block instead of stacking.
-    Per-machine: the registered function hard-codes THIS clone's path, so
-    on a different machine you re-run install-cli.ps1 from that clone and
-    the function points wherever that clone lives. This is what preserves
-    plug-and-play across machines without committing absolute paths to git.
+    .cmd is used (not .ps1) because cmd doesn't have an ExecutionPolicy
+    concept. A fresh Windows install ships with PowerShell ExecutionPolicy
+    set to Restricted, which blocks every .ps1 file by default -- including
+    a function registered in $PROFILE that delegates to symbion.ps1. The
+    .cmd shim bypasses that whole problem.
 
-    Writes to $PROFILE.CurrentUserAllHosts so both Windows PowerShell 5.1
-    and PowerShell 7+ pick it up.
+    We DO still set CurrentUser ExecutionPolicy to RemoteSigned (if it's
+    Restricted) so that symbion.ps1 itself can run when called from the
+    .cmd chain (the launcher is .bat, not .ps1, so this is belt-and-
+    suspenders for users who prefer to invoke .\symbion.ps1 directly).
+
+    Per-machine: the shim hard-codes THIS clone's path. Re-run install-cli
+    from a different clone on a different machine and the shim there
+    points to that location -- no absolute paths committed to git.
+
+    Cleanup: also removes the legacy profile-function block from prior
+    install-cli versions, so upgrading users don't end up with two
+    `symbion` definitions racing each other.
 
 .PARAMETER Uninstall
-    Remove the symbion-cli block from the profile instead of installing.
+    Remove the shim dir, the User PATH entry, and any legacy profile
+    block. Does not touch ExecutionPolicy.
 
 .EXAMPLE
     .\scripts\install-cli.ps1
-    Installs/updates the function. Open a new PowerShell window and run `symbion`.
+    Installs/updates the shim. Open a NEW shell and run `symbion`.
 
 .EXAMPLE
     .\scripts\install-cli.ps1 -Uninstall
-    Removes the function. Existing shells keep it until they restart.
+    Removes the shim and PATH entry.
 #>
 [CmdletBinding()]
 param(
@@ -35,80 +46,133 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Repo root = parent of scripts/. Launcher lives at <repo>\symbion.ps1.
-$RepoRoot = Split-Path -Parent $PSScriptRoot
-$Launcher = Join-Path $RepoRoot 'symbion.ps1'
+# Resolve THIS clone's repo root and launcher. Script lives in scripts/,
+# launcher is at <repo>\symbion.bat next to symbion.ps1.
+$RepoRoot    = Split-Path -Parent $PSScriptRoot
+$BatLauncher = Join-Path $RepoRoot 'symbion.bat'
+$Ps1Launcher = Join-Path $RepoRoot 'symbion.ps1'
 
-if (-not (Test-Path -LiteralPath $Launcher)) {
-    Write-Error "Launcher not found at $Launcher. Run install-cli.ps1 from inside a Symbion clone."
+if (-not (Test-Path -LiteralPath $BatLauncher)) {
+    Write-Error "Launcher not found at $BatLauncher. Run install-cli.ps1 from inside a Symbion clone."
     exit 1
 }
 
-$ProfilePath = $PROFILE.CurrentUserAllHosts
-$BeginMarker = '# >>> symbion-cli >>>'
-$EndMarker   = '# <<< symbion-cli <<<'
+# Standard user-writable install location for personal CLIs. Off the main
+# Programs tree so this can never collide with an MSI-installed app.
+$ShimDir = Join-Path $env:LOCALAPPDATA 'Programs\symbion-cli'
+$CmdShim = Join-Path $ShimDir 'symbion.cmd'
 
-# Profile parent dir might not exist yet (fresh user, OneDrive Documents path).
-$ProfileDir = Split-Path -Parent $ProfilePath
-if (-not (Test-Path -LiteralPath $ProfileDir)) {
-    New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
-}
-
-# Read existing profile (empty if missing). Strip any prior symbion-cli block
-# so reinstall is clean and uninstall has something to find.
-$existing = if (Test-Path -LiteralPath $ProfilePath) {
-    Get-Content -LiteralPath $ProfilePath -Raw
-} else {
-    ''
-}
-
-# Multiline regex eats the markers + everything between, plus the trailing
-# newline so we don't leave a blank gap on uninstall/reinstall.
-$pattern = "(?ms)^\s*$([regex]::Escape($BeginMarker)).*?$([regex]::Escape($EndMarker))\s*\r?\n?"
-$stripped = [regex]::Replace($existing, $pattern, '')
-
-if ($Uninstall) {
-    if ($stripped -eq $existing) {
-        Write-Host "No symbion-cli block found in $ProfilePath. Nothing to remove."
-        exit 0
-    }
-    # If the file is now empty (we created it just for our block), delete it.
+# --- Legacy cleanup: strip old profile-function block, if present --------
+# Previous install-cli versions wrote a `function symbion { ... }` block
+# into $PROFILE.CurrentUserAllHosts. Remove it on every run so the new
+# .cmd shim is the single source of truth.
+function Remove-LegacyProfileBlock {
+    $profilePath = $PROFILE.CurrentUserAllHosts
+    if (-not (Test-Path -LiteralPath $profilePath)) { return $false }
+    $existing = Get-Content -LiteralPath $profilePath -Raw
+    $pattern  = '(?ms)^\s*# >>> symbion-cli >>>.*?# <<< symbion-cli <<<\s*\r?\n?'
+    $stripped = [regex]::Replace($existing, $pattern, '')
+    if ($stripped -eq $existing) { return $false }
     if ([string]::IsNullOrWhiteSpace($stripped)) {
-        Remove-Item -LiteralPath $ProfilePath -Force
-        Write-Host "Removed symbion-cli block and deleted empty profile: $ProfilePath"
+        Remove-Item -LiteralPath $profilePath -Force
     } else {
-        Set-Content -LiteralPath $ProfilePath -Value $stripped -Encoding UTF8 -NoNewline
-        Write-Host "Removed symbion-cli block from $ProfilePath"
+        Set-Content -LiteralPath $profilePath -Value $stripped -Encoding UTF8 -NoNewline
     }
-    Write-Host "Open a new PowerShell window for the change to take effect."
+    return $true
+}
+
+# --- PATH helpers --------------------------------------------------------
+function Get-UserPathEntries {
+    $raw = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ([string]::IsNullOrEmpty($raw)) { return @() }
+    return ($raw -split ';') | Where-Object { $_ -ne '' }
+}
+
+function Set-UserPathEntries {
+    param([string[]]$Entries)
+    $value = ($Entries -join ';')
+    [Environment]::SetEnvironmentVariable('Path', $value, 'User')
+}
+
+# --- Uninstall path ------------------------------------------------------
+if ($Uninstall) {
+    if (Test-Path -LiteralPath $ShimDir) {
+        Remove-Item -LiteralPath $ShimDir -Recurse -Force
+        Write-Host "Removed shim directory: $ShimDir"
+    } else {
+        Write-Host "Shim directory absent: $ShimDir"
+    }
+
+    $entries = Get-UserPathEntries
+    if ($entries -contains $ShimDir) {
+        Set-UserPathEntries -Entries ($entries | Where-Object { $_ -ne $ShimDir })
+        Write-Host "Removed $ShimDir from User PATH"
+    }
+
+    if (Remove-LegacyProfileBlock) {
+        Write-Host "Removed legacy symbion-cli block from PowerShell profile"
+    }
+
+    Write-Host ""
+    Write-Host "Open a new shell for PATH change to take effect."
     exit 0
 }
 
-# Build the new block. Single-quoted here-string so $args and the path stay
-# literal in the profile (no interpolation at write time).
-$LauncherEscaped = $Launcher.Replace("'", "''")
-$block = @"
-$BeginMarker
-# Auto-generated by symbion\scripts\install-cli.ps1. Re-run that script to update,
-# or pass -Uninstall to remove. Manual edits below the markers will be lost.
-function symbion {
-    & '$LauncherEscaped' @args
-}
-$EndMarker
-"@
+# --- Install path --------------------------------------------------------
 
-# Append the block. Ensure exactly one blank line between any existing
-# content and our block so the profile stays readable.
-$newContent = if ([string]::IsNullOrWhiteSpace($stripped)) {
-    $block + "`r`n"
+# 1. Create the shim dir
+if (-not (Test-Path -LiteralPath $ShimDir)) {
+    New-Item -ItemType Directory -Path $ShimDir -Force | Out-Null
+}
+
+# 2. Write the .cmd shim. `call` so errorlevel propagates to the caller.
+#    %* forwards all args verbatim. ASCII encoding so cmd parses cleanly
+#    (UTF-8 BOM would be interpreted as a stray glyph in the first line).
+$BatEscaped  = $BatLauncher.Replace('"', '""')
+$cmdContent  = "@echo off`r`ncall `"$BatEscaped`" %*`r`n"
+Set-Content -LiteralPath $CmdShim -Value $cmdContent -Encoding ASCII -NoNewline
+Write-Host "Wrote shim: $CmdShim"
+Write-Host "  -> $BatLauncher"
+
+# 3. Add shim dir to User PATH if missing. Also patch the current session
+#    so the user can run `symbion` without restarting their shell IF they
+#    invoked install-cli directly (bootstrap-portable.bat spawns a fresh
+#    powershell.exe so the current-session patch is moot there).
+$entries = Get-UserPathEntries
+if ($entries -notcontains $ShimDir) {
+    Set-UserPathEntries -Entries (@($ShimDir) + $entries)
+    $env:Path = "$ShimDir;$env:Path"
+    Write-Host "Added $ShimDir to User PATH"
 } else {
-    $stripped.TrimEnd() + "`r`n`r`n" + $block + "`r`n"
+    Write-Host "User PATH already contains $ShimDir"
 }
 
-Set-Content -LiteralPath $ProfilePath -Value $newContent -Encoding UTF8 -NoNewline
+# 4. Relax CurrentUser ExecutionPolicy if it's Restricted/Undefined. The
+#    .cmd shim doesn't need this -- it calls symbion.bat -- but anyone
+#    invoking .\symbion.ps1 directly will hit the "cannot be loaded"
+#    error without it. RemoteSigned is the standard relaxed level: local
+#    scripts run, downloaded-with-MOTW scripts still require signing.
+try {
+    $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+    if ($currentPolicy -eq 'Restricted' -or $currentPolicy -eq 'Undefined') {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+        Write-Host "Set CurrentUser ExecutionPolicy: $currentPolicy -> RemoteSigned"
+    } else {
+        Write-Host "CurrentUser ExecutionPolicy already $currentPolicy (no change)"
+    }
+} catch {
+    Write-Host "[warn] Could not set ExecutionPolicy: $($_.Exception.Message)"
+    Write-Host "       The .cmd shim still works. .ps1 launchers may not."
+}
 
-Write-Host "Installed 'symbion' function in $ProfilePath"
-Write-Host "  -> $Launcher"
+# 5. Strip any legacy profile-function block from prior install-cli runs.
+if (Remove-LegacyProfileBlock) {
+    Write-Host "Cleaned up legacy profile-function block (now using .cmd shim)"
+}
+
 Write-Host ""
-Write-Host "Open a new PowerShell window, then run:  symbion"
-Write-Host "(or:  symbion --web)"
+Write-Host "==========================================================="
+Write-Host "Installed. Open a NEW shell (cmd OR PowerShell), then run:"
+Write-Host "  symbion              (terminal REPL)"
+Write-Host "  symbion --web        (web UI)"
+Write-Host "==========================================================="
