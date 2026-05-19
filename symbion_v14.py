@@ -6645,6 +6645,31 @@ Examples:
     warnings=validate_and_report(cfg)
     for w in warnings: print(yellow(f"  !  {w}"))
 
+    # Register the OneDrive sync push to run on interpreter exit. This
+    # covers both --web (Ctrl+C through uvicorn) and terminal mode (/quit
+    # falling out of run_terminal) without the wrapper batch needing a
+    # trailing 'sync.py push' line — which was the source of the
+    # 'Terminate batch job (Y/N)?' prompt on Ctrl+C. Registered AFTER
+    # short-circuit branches (args.setup / args.kill / args.save_config)
+    # so admin commands don't trigger a needless sync push.
+    _sync_path = _REPO_ROOT / "scripts" / "sync.py"
+    if _sync_path.exists():
+        import atexit, subprocess as _subp
+        def _sync_push_on_exit():
+            try:
+                print(dim("\n  Syncing state to OneDrive..."))
+                r = _subp.run(
+                    [sys.executable, str(_sync_path), "push"],
+                    cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120,
+                )
+                for line in (r.stdout + r.stderr).splitlines():
+                    if line.strip(): print(f"  {line}")
+                if r.returncode != 0:
+                    print(yellow(f"  !  sync push exited {r.returncode}"))
+            except Exception as ex:
+                print(yellow(f"  !  sync push failed: {type(ex).__name__}: {ex}"))
+        atexit.register(_sync_push_on_exit)
+
     symbion=SYMBION(cfg)
 
     if args.web:
@@ -6683,8 +6708,20 @@ Examples:
         # frames. Multi-large-image use cases that exceed this can split
         # across multiple frames; the per-image checks inside the handler
         # still bound individual decoded sizes.
-        uvicorn.run(app, host=cfg.web_host, port=cfg.web_port,
-                    log_level="warning", ws_max_size=32 * 1024 * 1024)
+        try:
+            uvicorn.run(app, host=cfg.web_host, port=cfg.web_port,
+                        log_level="warning", ws_max_size=32 * 1024 * 1024)
+        except KeyboardInterrupt:
+            # uvicorn re-raises SIGINT after its own cleanup. Catching it
+            # here suppresses Python's default 'KeyboardInterrupt' traceback
+            # so Ctrl+C in the same terminal exits cleanly instead of
+            # printing the multi-line stack from asyncio + uvicorn shutdown.
+            pass
+        print(green("\n  OK Symbion shut down."))
+        # OneDrive push is handled by the atexit hook registered above,
+        # so it runs uniformly for both --web (this branch) and terminal
+        # mode (the else branch below) without the wrapper batch needing
+        # a trailing sync.py push line.
     else:
         # Background: backfill embeddings for any summaries that don't have
         # one yet (legacy DB rows or rows saved while Ollama was offline).
