@@ -5926,6 +5926,47 @@ def _lan_ipv4() -> Optional[str]:
     return None
 
 
+def _tailscale_ipv4() -> Optional[str]:
+    """Best-effort Tailscale IPv4 for this machine. Tries `tailscale ip -4`
+    first (most reliable, works on any platform where tailscale CLI is on
+    PATH). Falls back to enumerating local IPv4 addresses and picking
+    anything in the CGNAT 100.64.0.0/10 range that Tailscale assigns
+    tailnet members. Returns None if Tailscale isn't installed or running."""
+    try:
+        import subprocess as _subp
+        r = _subp.run(["tailscale", "ip", "-4"],
+                      capture_output=True, text=True, timeout=2)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    # Validate it's actually in CGNAT range
+                    try:
+                        import ipaddress
+                        ip = ipaddress.ip_address(line)
+                        if ip in ipaddress.ip_network("100.64.0.0/10"):
+                            return line
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    # Fallback: scan local interfaces for an IP in the CGNAT range.
+    try:
+        import socket as _s
+        import ipaddress
+        cgnat = ipaddress.ip_network("100.64.0.0/10")
+        for info in _s.getaddrinfo(_s.gethostname(), None, _s.AF_INET):
+            ip_str = info[4][0]
+            try:
+                if ipaddress.ip_address(ip_str) in cgnat:
+                    return ip_str
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
 def validate_and_report(cfg) -> list:
     warnings = []
     _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi", "hf_router", "deepseek")
@@ -7305,6 +7346,9 @@ Examples:
         _lan = _lan_ipv4()
         if _lan:
             print(f"  iPhone/LAN  ->  {cyan(f'http://{_lan}:{cfg.web_port}')}  {dim('(same Wi-Fi only)')}")
+        _ts = _tailscale_ipv4()
+        if _ts:
+            print(f"  iPhone/Anywhere -> {cyan(f'http://{_ts}:{cfg.web_port}')}  {dim('(Tailscale — any network)')}")
         print(f"  Stop server ->  {dim('Ctrl+C here, or')} {dim(f'python symbion_v14.py --kill --port {cfg.web_port}')} {dim('from another shell')}")
         if cfg.show_reasoning: print(f"  Reasoning: {green('ON')} (toggle ? in UI)")
         print()
