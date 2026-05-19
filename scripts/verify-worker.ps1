@@ -8,13 +8,11 @@
       1. No token            -> 403
       2. Wrong token         -> 403
       3. Correct token       -> 200
-      4. Served script has all six Worker-injected placeholders
+      4. Served script has all four Worker-injected placeholders
          substituted, and each substituted value is non-empty:
            - __SYMBION_PAT_INJECTED__              (+ github_pat_ prefix check)
            - __SYMBION_ANTHROPIC_KEY_INJECTED__    (+ sk-ant-api03- prefix check)
            - __SYMBION_BRAVE_KEY_INJECTED__
-           - __SYMBION_KIMI_KEY_INJECTED__
-           - __SYMBION_DEEPSEEK_KEY_INJECTED__
            - __SYMBION_API_KEY_INJECTED__
 
     Never prints the token, the served script body, or the substituted
@@ -134,19 +132,17 @@ try {
     Add-Result 'gh-pat-injected' $hasGhPat `
         $(if ($hasGhPat) { 'GitHub PAT prefix found' } else { 'no GitHub PAT prefix in served script' })
 
-    # Loop through the four additional injected provider keys (Brave,
-    # Kimi, DeepSeek, Symbion-internal). For each:
+    # Loop through the two additional injected provider keys (Brave +
+    # Symbion-internal). For each:
     #   (a) the placeholder string must be absent from the served body;
     #   (b) the value substituted into the Resolve-InjectedKey call must
     #       be non-empty (catches the case where the Worker secret is
     #       unset and the `|| ''` fallback wrote an empty string).
-    # No format/prefix checks: Brave/Kimi/DeepSeek/Symbion don't have a
-    # universal canonical prefix that's safe to grep for.
+    # No format/prefix checks: Brave and Symbion don't have a universal
+    # canonical prefix that's safe to grep for.
     $extraKeys = [ordered]@{
-        'brave'    = @{ placeholder = '__SYMBION_BRAVE_KEY_INJECTED__';    envName = 'BRAVE_API_KEY'    }
-        'kimi'     = @{ placeholder = '__SYMBION_KIMI_KEY_INJECTED__';     envName = 'KIMI_API_KEY'     }
-        'deepseek' = @{ placeholder = '__SYMBION_DEEPSEEK_KEY_INJECTED__'; envName = 'DEEPSEEK_API_KEY' }
-        'symbion'  = @{ placeholder = '__SYMBION_API_KEY_INJECTED__';      envName = 'SYMBION_API_KEY'  }
+        'brave'   = @{ placeholder = '__SYMBION_BRAVE_KEY_INJECTED__'; envName = 'BRAVE_API_KEY'   }
+        'symbion' = @{ placeholder = '__SYMBION_API_KEY_INJECTED__';   envName = 'SYMBION_API_KEY' }
     }
     foreach ($entry in $extraKeys.GetEnumerator()) {
         $shortname   = $entry.Key

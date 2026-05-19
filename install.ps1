@@ -157,8 +157,6 @@ function Resolve-InjectedKey {
 
 $AnthropicKey  = Resolve-InjectedKey -Placeholder '__SYMBION_ANTHROPIC_KEY_INJECTED__' -EnvVarName 'ANTHROPIC_API_KEY'
 $BraveKey      = Resolve-InjectedKey -Placeholder '__SYMBION_BRAVE_KEY_INJECTED__'     -EnvVarName 'BRAVE_API_KEY'
-$KimiKey       = Resolve-InjectedKey -Placeholder '__SYMBION_KIMI_KEY_INJECTED__'      -EnvVarName 'KIMI_API_KEY'
-$DeepseekKey   = Resolve-InjectedKey -Placeholder '__SYMBION_DEEPSEEK_KEY_INJECTED__'  -EnvVarName 'DEEPSEEK_API_KEY'
 $SymbionApiKey = Resolve-InjectedKey -Placeholder '__SYMBION_API_KEY_INJECTED__'       -EnvVarName 'SYMBION_API_KEY'
 
 # ------------------------------------------------------------------------
@@ -313,10 +311,11 @@ try {
 #     1. Existing <repo>\.env -- already present, leave alone
 #     2. OneDrive seeded copy at %OneDrive%\Symbion\sync\.env -- copy in
 #     3. Worker-injected keys -- seed .env with whichever provider keys
-#        the Worker substituted (ANTHROPIC + BRAVE + KIMI + DEEPSEEK +
-#        SYMBION). Zero-prompt and independent of OneDrive sync state,
-#        so this covers the case where the new machine doesn't have
-#        OneDrive signed in / synced yet.
+#        the Worker substituted (ANTHROPIC + BRAVE + SYMBION). Zero-prompt
+#        and independent of OneDrive sync state, so this covers the case
+#        where the new machine doesn't have OneDrive signed in / synced
+#        yet. Kimi and DeepSeek deliberately omitted -- when needed,
+#        seed them via OneDrive .env or manual --setup.
 #     4. Interactive --setup prompt (last resort, paste keys by hand)
 #   The OneDrive path remains the canonical multi-key-aware mechanism --
 #   add another key locally + push-env.ps1 -> instantly available on every
@@ -336,8 +335,6 @@ if (Test-Path -LiteralPath $envDest) {
     $injected = [ordered]@{
         ANTHROPIC_API_KEY = $AnthropicKey
         BRAVE_API_KEY     = $BraveKey
-        KIMI_API_KEY      = $KimiKey
-        DEEPSEEK_API_KEY  = $DeepseekKey
         SYMBION_API_KEY   = $SymbionApiKey
     }
     $injectedPresent = @($injected.GetEnumerator() | Where-Object { $_.Value })
