@@ -15,9 +15,22 @@ symbion                          :: terminal REPL (default)
 symbion --web                    :: web UI on http://localhost:8000
 ```
 
-`bootstrap-portable.bat` downloads Python 3.12 embeddable into `.python\` on the drive, installs pip + setuptools, then runs `pip install -e .[web] mcp mcp-server-time pypdf`. After that, `symbion` (a thin top-level shortcut to `scripts\start.bat`) launches Symbion using **only** the drive's Python — system Python (if any) is irrelevant.
+`bootstrap-portable.bat` downloads Python 3.12 embeddable into `.python\` on the drive, installs pip + setuptools, then runs `pip install -e .[web] mcp mcp-server-time pypdf`. After that, `symbion` launches Symbion using **only** the drive's Python — system Python (if any) is irrelevant.
 
-Terminal is the default so the drive works the same on every machine you plug it into: open PowerShell at the drive root, run `symbion`, talk to it. Add `--web` (or any other flag) when you want the browser UI. Extra args pass straight through to `python -m symbion`, so `symbion --provider anthropic`, `symbion --web --port 9000`, etc. all work. `scripts\start.bat` still exists and does the same thing if you prefer the explicit path.
+There are three entry points at the drive root:
+- `symbion.ps1` — PowerShell wrapper (preferred for PowerShell users; Ctrl+C is clean, no "Terminate batch job (Y/N)?" prompt)
+- `symbion.bat` — cmd.exe wrapper (works the same but Ctrl+C triggers the cmd-specific Y/N prompt that PowerShell doesn't have)
+- `scripts\start.bat` — direct python invocation, no OneDrive sync wrapper
+
+In PowerShell, typing `.\symbion` resolves to `symbion.ps1` automatically (PowerShell prefers `.ps1` over `.bat`). **First-time PowerShell setup needs execution policy to allow local scripts:**
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+This is the standard dev setting — your own scripts run, downloaded scripts still need to be signed. No admin needed (CurrentUser scope).
+
+Terminal is the default so the drive works the same on every machine you plug it into: open PowerShell at the drive root, run `symbion`, talk to it. Add `--web` (or any other flag) when you want the browser UI. Extra args pass straight through to `python -m symbion`, so `symbion --provider anthropic`, `symbion --web --port 9000`, etc. all work.
 
 Use this when:
 - You want one drive that "just works" across multiple machines
