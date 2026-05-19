@@ -5,7 +5,7 @@
 .DESCRIPTION
     Designed to be invoked with a single pasted command:
 
-        irm https://raw.githubusercontent.com/symbion0130/symbion/main/install.ps1 | iex
+        irm https://symbion-installer.symbion-0130.workers.dev | iex
 
     What it does (no other steps required from the user):
       1. Detects whether you're inside an existing clone or running remotely.
@@ -43,7 +43,7 @@
     installs that don't want a window popping up.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/symbion0130/symbion/main/install.ps1 | iex
+    irm https://symbion-installer.symbion-0130.workers.dev | iex
     Fresh-machine one-liner: clones to %USERPROFILE%\symbion, bootstraps,
     asks for API keys, launches Symbion.
 
@@ -88,10 +88,10 @@ function Test-IsElevated {
 # permission. Order of preference:
 #   1. Worker-injected PAT (placeholder below gets find/replaced by the
 #      Cloudflare Worker before this script is served, so the one-line
-#      `irm bit.ly/symbioninstalls | iex` command works on any fresh
-#      machine with no env var typing). When read directly from disk,
-#      the placeholder stays literal and the StartsWith check below
-#      falls through to source #2.
+#      `irm https://symbion-installer.symbion-0130.workers.dev | iex`
+#      command works on any fresh machine with no env var typing). When
+#      read directly from disk, the placeholder stays literal and the
+#      StartsWith check below falls through to source #2.
 #   2. $env:SYMBION_PAT (set manually if not using the Worker)
 #   3. %OneDrive%\Symbion\sync\.pat (cached from a prior install on any
 #      machine signed into the same OneDrive account)
@@ -132,6 +132,23 @@ function Save-PatToOneDrive($pat) {
 }
 
 $Pat = Resolve-Pat
+
+# --- Anthropic key resolution -------------------------------------------
+# Mirrors the PAT injection pattern. Worker rewrites the placeholder so a
+# fresh machine gets a working Anthropic key without typing one in. Order:
+#   1. Worker-injected (placeholder below)
+#   2. $env:ANTHROPIC_API_KEY (e.g. shell already has one exported)
+# Used in Phase 3 below to seed .env when no existing .env and no OneDrive
+# seed are present. The user can swap or augment keys later via
+# `python -m symbion --setup` or by editing .env directly.
+function Resolve-AnthropicKey {
+    $injected = '__SYMBION_ANTHROPIC_KEY_INJECTED__'
+    if (-not $injected.StartsWith('__SYMBION')) { return $injected }
+    if ($env:ANTHROPIC_API_KEY) { return $env:ANTHROPIC_API_KEY }
+    return $null
+}
+
+$AnthropicKey = Resolve-AnthropicKey
 
 # ------------------------------------------------------------------------
 # Phase 1: Locate or fetch the repo
@@ -284,10 +301,15 @@ try {
 #   Order of preference:
 #     1. Existing <repo>\.env -- already present, leave alone
 #     2. OneDrive seeded copy at %OneDrive%\Symbion\sync\.env -- copy in
-#     3. Interactive --setup prompt (last resort, paste keys by hand)
+#     3. Worker-injected Anthropic key -- seed minimal .env with just
+#        ANTHROPIC_API_KEY so the fresh-machine flow is zero-prompt. The
+#        user can switch keys / add other providers later by editing .env
+#        or running `python -m symbion --setup` again.
+#     4. Interactive --setup prompt (last resort, paste keys by hand)
 #   The OneDrive path makes the cross-machine flow zero-prompt: seed once
 #   on your dev machine via scripts\push-env.ps1, then every fresh install
-#   pulls keys automatically.
+#   pulls keys automatically. The Worker-injected key covers the case where
+#   the user is installing on a brand-new machine with no OneDrive yet.
 # ------------------------------------------------------------------------
 $envDest = Join-Path $RepoDir '.env'
 if (Test-Path -LiteralPath $envDest) {
@@ -300,8 +322,19 @@ if (Test-Path -LiteralPath $envDest) {
         Write-Section "Pulling .env from OneDrive"
         Copy-Item -LiteralPath $envSrc -Destination $envDest -Force
         Write-Host "Copied $envSrc -> $envDest"
+    } elseif ($AnthropicKey) {
+        Write-Section "Seeding .env with Anthropic key from installer"
+        # UTF-8 no BOM to match the canonical .env encoding (CLAUDE.md repo
+        # layout note). PowerShell 5.1's `Set-Content -Encoding utf8` would
+        # write a BOM, so use the .NET API directly.
+        [System.IO.File]::WriteAllText(
+            $envDest,
+            "ANTHROPIC_API_KEY=$AnthropicKey`n",
+            [System.Text.UTF8Encoding]::new($false))
+        Write-Host "Wrote $envDest with ANTHROPIC_API_KEY."
+        Write-Host "Swap or add keys later by editing the file or running: python -m symbion --setup"
     } elseif (-not $SkipSetup) {
-        Write-Section "API key setup (no OneDrive .env found)"
+        Write-Section "API key setup (no OneDrive .env or installer-injected key found)"
         Write-Host "Tip: run scripts\push-env.ps1 on your main machine to seed OneDrive so future installs skip this prompt."
         $py = Join-Path $RepoDir '.python\python.exe'
         if (Test-Path -LiteralPath $py) {
