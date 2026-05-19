@@ -7,6 +7,13 @@
 
         irm https://symbion-installer.symbion-0130.workers.dev?t=6cca038a4aeae1fb55baef15d4b5a7f0 | iex
 
+    On a locked-down machine where the above fails with "running scripts
+    is disabled on this system", use the ExecutionPolicy-bypass variant
+    (same effect, scoped to a single child process -- no Set-ExecutionPolicy
+    needed, no admin needed):
+
+        powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=6cca038a4aeae1fb55baef15d4b5a7f0 | iex"
+
     What it does (no other steps required from the user):
       1. Detects whether you're inside an existing clone or running remotely.
          Remote case: installs git via winget if missing (requires admin),
@@ -51,9 +58,23 @@
     who can read install.ps1 already has clone access).
 
 .EXAMPLE
+    powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=6cca038a4aeae1fb55baef15d4b5a7f0 | iex"
+    Same as the previous example, but spawns a child PowerShell with
+    ExecutionPolicy=Bypass for that one process. Use this on machines
+    where the default policy is Restricted/AllSigned and the short
+    form errors out with "running scripts is disabled on this system."
+
+.EXAMPLE
     .\install.ps1
     Local invocation from inside an existing clone. Skips the download
     step, just bootstraps + sets up + launches.
+
+.EXAMPLE
+    %USERPROFILE%\symbion\scripts\install-web.cmd
+    Refresh an existing install via the Worker. Equivalent to the
+    Bypass one-liner above but as a .cmd shim, so it works from cmd,
+    PowerShell, or Explorer double-click without ExecutionPolicy
+    concerns.
 #>
 [CmdletBinding()]
 param(
