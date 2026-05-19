@@ -5750,6 +5750,17 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                                 "integrity":_health_dict(),"status":{}})
 
         try:
+            # Replay session history first so the chat scroll backfills
+            # before the status pills + input unlock. Capped at 30 messages
+            # to bound DOM cost on mobile; older history still influences
+            # the model via cross-session retrieval / rolling summaries.
+            try:
+                hist = symbion.memory.get_recent(session_id, 30)
+            except Exception as ex:
+                logger.warning(f"WS history fetch failed: {ex}")
+                hist = []
+            await send({"t":"history","messages":hist})
+
             m = symbion.health; mn,_ = m.mood()
             await send({"t":"status","mood":mn,"coh":"--",
                         "sym":f"{m.symbiosis_score:+.2f}","dist":f"{m.distress_level:.2f}",
@@ -5775,6 +5786,18 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 if payload.get("type")=="toggle_reasoning":
                     show_reasoning = bool(payload.get("value",False))
                     symbion.cfg.show_reasoning = show_reasoning
+                    continue
+
+                if payload.get("type")=="summarize":
+                    # Web-side equivalent of terminal /quit: flush the session
+                    # to a summary so cross-session memory has the context,
+                    # then the client typically starts a new session_id.
+                    try:
+                        n = await symbion._force_summarize_session(session_id)
+                        await send({"t":"summarize_ok","count":n,"session":session_id})
+                    except Exception as ex:
+                        logger.error(f"WS summarize: {ex}")
+                        await send({"t":"error","v":f"summarize failed: {type(ex).__name__}"})
                     continue
 
                 text = payload.get("text","").strip()

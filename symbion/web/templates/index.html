@@ -288,7 +288,16 @@ const chatInner=document.getElementById('chat-inner');
 const inp=document.getElementById('inp');
 const btn=document.getElementById('btn');
 const thinkBtn=document.getElementById('think-btn');
-const SESSION=Math.random().toString(36).slice(2);
+// SESSION persists in localStorage so reloading the page continues
+// the same conversation. A new session is generated explicitly via
+// /new or /quit (the latter also summarises the current one).
+const SESSION_STORE='symbion_session';
+function newSessionId(){
+  const sid=Math.random().toString(36).slice(2);
+  localStorage.setItem(SESSION_STORE,sid);
+  return sid;
+}
+let SESSION=localStorage.getItem(SESSION_STORE)||newSessionId();
 let ws, activeMsg=null, activeCursor=null, activeThinking=null, showReasoning=false;
 
 // --- API key handling ----------------------------------------------------
@@ -403,6 +412,27 @@ function connect(){
     } else if(d.t==='auth_ok'){
       // Server confirmed our auth frame. The status frame that follows
       // will populate the header pills.
+    } else if(d.t==='history'){
+      renderHistory(d.messages||[]);
+    } else if(d.t==='summarize_ok'){
+      // Session was flushed to a summary server-side. Start a fresh
+      // conversation: clear the chat, generate a new SESSION, reconnect.
+      // Cross-session memory will surface the just-written summary as
+      // needed via retrieval — nothing is lost.
+      const count=d.count||0;
+      const note=document.createElement('div');
+      note.className='msg sym';
+      note.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+      note.querySelector('.msg-body').textContent=`Session summarised (${count} msg${count===1?'':'s'} folded into long-term memory). Starting fresh.`;
+      chatInner.appendChild(note);
+      scrollToBottom(true);
+      setTimeout(()=>{
+        SESSION=newSessionId();
+        chatInner.innerHTML='';
+        suppressReconnect=false;
+        try{ws.close();}catch(e){}
+        setTimeout(connect,200);
+      },900);
     } else if(d.t==='error'){
       const msg=String(d.v||'');
       const isAuthErr=msg==='unauthorized'||msg==='auth timeout'||msg==='invalid auth frame';
@@ -505,6 +535,29 @@ function addYou(text){
   scrollToBottom(true);
 }
 
+// Render a completed assistant message into the chat scroll (no cursor,
+// no streaming animation). Used by the history-replay path on connect.
+function addSymStatic(text){
+  const d=document.createElement('div');
+  d.className='msg sym';
+  d.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  d.querySelector('.msg-body').textContent=text;
+  chatInner.appendChild(d);
+}
+
+// Render the server's {t:'history',messages:[...]} payload. role==='user'
+// goes via addYou; role==='assistant' via addSymStatic. Messages arrive
+// in chronological order (memory.get_recent returns them reversed).
+function renderHistory(messages){
+  if(!messages||!messages.length) return;
+  chatInner.innerHTML='';
+  for(const m of messages){
+    if(m.role==='user')           addYou(m.content);
+    else if(m.role==='assistant') addSymStatic(m.content);
+  }
+  scrollToBottom(true);
+}
+
 // === Image attachments ===
 const attachStrip=document.getElementById('attach-strip');
 const composer=document.querySelector('.composer');
@@ -549,9 +602,50 @@ composer.addEventListener('drop',e=>{
   for(const f of files) addFile(f);
 });
 
+// Slash commands handled client-side. Match the terminal's idioms so
+// /quit etc. do what they do in the REPL rather than being sent as
+// chat messages. Returning true means "handled, don't fall through to
+// the normal send path."
+function handleSlashCommand(text){
+  const cmd=text.toLowerCase();
+  if(cmd==='/quit'||cmd==='/end'){
+    if(!ws||ws.readyState!==1){
+      addSymStatic('Not connected — can’t summarise. Try again when the dot turns green.');
+      return true;
+    }
+    ws.send(JSON.stringify({type:'summarize'}));
+    // The server replies with {t:'summarize_ok'} which clears the chat
+    // and starts a new session; nothing else for us to do here.
+    return true;
+  }
+  if(cmd==='/new'){
+    SESSION=newSessionId();
+    chatInner.innerHTML='';
+    suppressReconnect=false;
+    try{if(ws)ws.close();}catch(e){}
+    setTimeout(connect,200);
+    return true;
+  }
+  if(cmd==='/key'){
+    showKeyModal('');
+    return true;
+  }
+  if(cmd==='/help'){
+    addSymStatic('Slash commands: /quit (save & end session, start fresh), /new (start fresh without saving), /key (change API key), /help (this).');
+    return true;
+  }
+  return false;
+}
+
 function send(){
   const text=inp.value.trim();
   if((!text&&!pending.length)||!ws||ws.readyState!==1)return;
+  // Slash-command path: consume the input without sending to the server
+  // (except /quit which sends a control frame, not a chat message).
+  if(text.startsWith('/')&&!pending.length&&handleSlashCommand(text)){
+    inp.value='';inp.style.height='auto';
+    return;
+  }
   const display=text+(pending.length?` [+${pending.length} image${pending.length>1?'s':''}]`:'');
   addYou(display);
   const images=pending.slice();
