@@ -643,10 +643,12 @@ function handleSlashCommand(text){
   }
   if(cmd.startsWith('/user')){
     // /user           -> show current active user (from localStorage)
-    // /user <name>    -> switch to <name>: store in localStorage, start a
-    //                    fresh session, reconnect, and the new session's
-    //                    ws.onopen will send set_user so the new session
-    //                    is attributed correctly server-side.
+    // /user <name>    -> switch to <name>: store in localStorage and tell
+    //                    the server. SAME SESSION continues — shared
+    //                    memory pool stays visible, chat scroll stays
+    //                    intact. Only future writes get tagged with the
+    //                    new user; the profile lookup gets the per-user
+    //                    overlay on top of the shared base.
     const parts = text.split(/\s+/);
     if(parts.length < 2 || !parts[1]){
       const cur = localStorage.getItem(USER_STORE) || 'aaron';
@@ -658,13 +660,12 @@ function handleSlashCommand(text){
       addSymStatic('Invalid user name. Use letters/digits/_/- only.');
       return true;
     }
+    const prior = localStorage.getItem(USER_STORE) || 'aaron';
     localStorage.setItem(USER_STORE, name);
-    SESSION = newSessionId();
-    chatInner.innerHTML = '';
-    addSymStatic(`Active user → ${name}. Fresh session started.`);
-    suppressReconnect = false;
-    try{if(ws) ws.close();}catch(e){}
-    setTimeout(connect, 200);
+    if(ws && ws.readyState === 1){
+      ws.send(JSON.stringify({type:'set_user', name:name}));
+    }
+    addSymStatic(`Active user: ${prior} → ${name}. Shared memory still visible. New entries tagged as ${name}.`);
     return true;
   }
   if(cmd==='/help'){

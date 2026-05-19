@@ -3442,23 +3442,35 @@ class SymbionMemory:
             c.commit()
 
     def get_profile(self, user: str = "aaron") -> Dict:
-        """Return the profile facts for `user`. For backward compat, bare
-        keys (no '<user>:' prefix) are folded into aaron's profile so
-        existing pre-multi-user data stays attributed to him."""
+        """Return profile facts visible to `user`. Two-layer merge:
+
+          1. Legacy unprefixed keys form the SHARED BASE — visible to
+             every user. These are facts accumulated about the household
+             before multi-user landed (or facts intentionally written
+             without a user prefix as 'shared context').
+          2. The active user's '<user>:<key>' prefixed entries OVERRIDE
+             the shared base. So aaron's 'aaron:name' = 'Aaron' wins for
+             aaron; lala's 'lala:name' = 'Lala' wins for lala; both still
+             see the shared 'current_situation' / 'interests' / etc.
+
+        Other users' prefixed entries are NOT included — lala shouldn't
+        see aaron's private 'aaron:emotional_context'. The shared base
+        is the only cross-user surface."""
         with sqlite3.connect(self.db) as c:
             rows = c.execute("SELECT key,value FROM user_profile").fetchall()
         prefix = f"{user}:"
         result: Dict = {}
+        # Pass 1: legacy unprefixed (shared base, lowest precedence)
+        for k, v in rows:
+            if ":" not in k:
+                try:    result[k] = json.loads(v)
+                except Exception: result[k] = v
+        # Pass 2: active user's prefixed entries (override shared base)
         for k, v in rows:
             if k.startswith(prefix):
                 bare = k[len(prefix):]
                 try:    result[bare] = json.loads(v)
                 except Exception: result[bare] = v
-            elif user == "aaron" and ":" not in k:
-                # Legacy unprefixed key (predates multi-user) — treated as aaron's.
-                if k not in result:
-                    try:    result[k] = json.loads(v)
-                    except Exception: result[k] = v
         return result
 
     def get_recent(self, session: str, n: int = 10, user: Optional[str] = None) -> List[Dict]:
@@ -3830,8 +3842,14 @@ class SymbionMemory:
                       query: str = "",
                       query_embedding: Optional[List[float]] = None,
                       user: str = "aaron") -> "Tuple[List[Dict],str]":
-        recent    = self.get_recent(session, n=10, user=user)
-        summaries = self.get_summaries(session, n=1, user=user)  # most recent session summary
+        # Reads are UNSCOPED — every user sees the shared session + cross-
+        # session pool. Only the profile layer is user-aware: the active
+        # user's prefixed entries override the shared base. This matches
+        # the design choice 'memory is categorized differently, not a
+        # clean slate' — Aaron's history is visible to Lala, but new
+        # writes get tagged with the active user for future categorization.
+        recent    = self.get_recent(session, n=10)
+        summaries = self.get_summaries(session, n=1)
         profile   = self.get_profile(user=user)
         parts     = []
 
@@ -3869,16 +3887,16 @@ class SymbionMemory:
         # Relevant cross-session summaries: hybrid (BM25 + cosine) when a
         # query embedding is supplied, lexical-only otherwise.
         if query:
+            # Cross-session retrieval is also unscoped — shared memory pool.
             if query_embedding is not None:
                 relevant = self.get_relevant_summaries_hybrid(
                     query, query_embedding, k=2,
                     bm25_weight=self.cfg.embedding_bm25_weight,
                     cosine_weight=self.cfg.embedding_cosine_weight,
                     recency_half_life_days=self.cfg.embedding_recency_half_life_days,
-                    recency_weight=self.cfg.embedding_recency_weight,
-                    user=user)
+                    recency_weight=self.cfg.embedding_recency_weight)
             else:
-                relevant = self.get_relevant_summaries(query, k=2, user=user)
+                relevant = self.get_relevant_summaries(query, k=2)
             # Deduplicate against session summaries
             existing = set(summaries)
             relevant = [s for s in relevant if s not in existing]
@@ -6368,13 +6386,15 @@ def run_terminal(symbion: "SYMBION"):
                 print(f"  Known users: {dim(known)}")
                 print(f"  Switch with: {dim('/user <name>')}")
             else:
+                prior = symbion._active_user(session)
                 name = symbion._set_session_user(session, parts[1])
-                # Start a fresh session so the new user's chat doesn't
-                # commingle with the prior user's messages under the same
-                # session_id. The old session's messages stay in the DB
-                # tagged with the prior user — they're not deleted.
-                session = datetime.now().strftime(f"session_{name}_%Y%m%d_%H%M%S")
-                print(green(f"  OK Active user -> {name}. New session: {dim(session)}"))
+                # Same session continues — shared memory pool stays visible
+                # to the new user. Only future writes get tagged with their
+                # name. Profile gets the per-user overlay on top of the
+                # shared base (legacy unprefixed entries Symbion already
+                # knows about everyone in the household).
+                print(green(f"  OK Active user: {prior} -> {name}"))
+                print(dim(f"     Shared memory still visible. New entries tagged as {name}."))
         elif raw=="/memory":
             rows=symbion.memory.get_all_recent(12)
             if not rows: print(dim("  No memory yet."))
