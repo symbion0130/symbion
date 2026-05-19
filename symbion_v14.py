@@ -332,7 +332,10 @@ class SymbionConfig:
 
     def save(self):
         d = asdict(self)
-        for k in ("anthropic_api_key","openai_api_key","brave_api_key","api_key","kimi_api_key"):
+        # All secret fields must be listed here so --save-config never
+        # writes them into the tracked symbion.json. Adding a new secret
+        # field on SymbionConfig requires adding it to this tuple.
+        for k in ("anthropic_api_key","openai_api_key","brave_api_key","api_key","kimi_api_key","deepseek_api_key","hf_token"):
             d.pop(k, None)
         CONFIG_FILE.write_text(json.dumps(d, indent=2), encoding='utf-8')
 
@@ -822,7 +825,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "read_pdf",
-        "description": "Extract text from a .pdf file anywhere on the machine via pypdf. Returns 'NO EXTRACTABLE TEXT' for scanned/image-only PDFs (no OCR). Path can be absolute or workspace-relative.",
+        "description": "Extract text from a .pdf file anywhere on the machine via pypdf. Falls back to OCR via pypdfium2 + pytesseract for scanned / image-only PDFs when those deps are installed (plus the Tesseract binary on PATH); otherwise returns a clear 'install pypdfium2 + pytesseract' message rather than confabulating contents. Path can be absolute or workspace-relative.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -6571,6 +6574,15 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 await _push_proactive()
 
         except WebSocketDisconnect: pass
+        except RuntimeError as ex:
+            # Starlette raises RuntimeError("WebSocket is not connected...")
+            # when the client closes mid-receive instead of cleanly
+            # disconnecting. Semantically same as WebSocketDisconnect for
+            # us; treat as a soft disconnect to avoid stderr traceback
+            # noise for closes that race the receive_text await.
+            if 'not connected' in str(ex).lower():
+                return
+            logger.error(f"WS handler error: {ex}", exc_info=True)
         except Exception as ex:
             logger.error(f"WS handler error: {ex}", exc_info=True)
 

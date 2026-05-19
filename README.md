@@ -54,7 +54,7 @@ Config persists to `symbion.json` via `--save-config`. API keys live in `.env` (
 
 ## Tools and the workspace sandbox
 
-File tools (`read_file`, `write_file`) are sandboxed to `./symbion_workspace/`. Paths that escape via `../` or absolute paths are rejected. Symlinks targeting outside the workspace are also blocked.
+Read tools (`read_file`, `read_file_chunk`, `read_image`, `read_pdf`, `list_dir`) can read anywhere on the machine — a deliberate widening (2026-04-25) so Symbion can help with files outside its own repo. Write tools (`write_file`) are sandboxed to the **repo root** (`_REPO_ROOT`, i.e. the directory `symbion_v14.py` lives in); paths that escape via `../`, absolute paths outside the repo, and symlinks targeting outside the repo are all rejected.
 
 The calculator uses AST validation — no `eval()` on untrusted input. Only numeric expressions with allowed functions (sqrt, sin, cos, tan, log, abs, round, floor, ceil) and constants (pi, e).
 
