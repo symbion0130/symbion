@@ -15,7 +15,10 @@
   --thinking:#15172a;--thinking-border:#2a2d4a;
   --radius:14px;
 }
-html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+html,body{height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none}
+/* 100dvh handles the iOS URL-bar collapse / soft-keyboard cleanly when
+   supported (iOS 15.4+, Android Chrome 108+); falls back to 100% on older
+   browsers, which is the prior behaviour. */
 body{
   background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
@@ -182,6 +185,31 @@ footer{
 ::-webkit-scrollbar-thumb{background:#2c2c38;border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:#3a3a48}
 
+/* Connection banner — surfaces WS lifecycle to non-technical users.
+   Hidden by default; .visible toggles it on. Variants .warn / .danger
+   shift colour for retry / error states respectively. */
+.conn-banner{
+  position:fixed;left:50%;transform:translateX(-50%);
+  top:max(.55rem,env(safe-area-inset-top));
+  z-index:900;
+  background:var(--surface);border:1px solid var(--border);
+  color:var(--muted-2);font-size:.78rem;
+  padding:.4rem .85rem;border-radius:999px;
+  box-shadow:0 4px 14px rgba(0,0,0,.4);
+  display:none;align-items:center;gap:.5rem;
+  pointer-events:none; /* don't block taps on the header beneath */
+  max-width:calc(100% - 1.5rem);
+}
+.conn-banner.visible{display:inline-flex}
+.conn-banner.warn  {color:var(--warn);  border-color:#3a2a00;background:#3a2a00cc}
+.conn-banner.danger{color:var(--danger);border-color:#7f1d1d;background:#7f1d1dcc}
+.conn-spinner{
+  width:10px;height:10px;border-radius:50%;
+  border:2px solid currentColor;border-top-color:transparent;
+  animation:conn-spin .8s linear infinite;flex-shrink:0;
+}
+@keyframes conn-spin{to{transform:rotate(360deg)}}
+
 @media (max-width:540px){
   header{padding:.55rem .75rem;padding-top:max(.55rem,env(safe-area-inset-top))}
   .brand{font-size:.88rem}
@@ -195,6 +223,9 @@ footer{
   #inp{font-size:16px;padding:.6rem .8rem}
   .icon-btn{width:42px;height:42px}
   .send-btn{padding:0 .9rem;height:42px;font-size:.88rem}
+  /* Bump the per-thumb close-X to a finger-friendly size on mobile. */
+  .attach-thumb .x{width:24px;height:24px;font-size:.85rem;top:3px;right:3px}
+  .conn-banner{font-size:.72rem;padding:.35rem .7rem}
 }
 
 /* Key entry modal — shown when the WS server requires SYMBION_API_KEY
@@ -258,6 +289,7 @@ footer{
 </style>
 </head>
 <body>
+<div id="conn-banner" class="conn-banner" role="status" aria-live="polite"></div>
 <header>
   <div class="dot" id="dot" aria-label="connection"></div>
   <div class="brand">Symbion<span class="ver">v14</span></div>
@@ -334,6 +366,65 @@ const KEY_STORE='symbion_api_key';
 let apiKey=localStorage.getItem(KEY_STORE)||'';
 let suppressReconnect=false; // set true on auth-class close so we don't loop
 
+// --- Connection state + banner ------------------------------------------
+// Reconnect with exponential backoff so a downed server doesn't get
+// hammered by retries. RECONNECT_BASE_MS doubles each failed attempt up
+// to RECONNECT_MAX_MS, resetting to 0 on a successful onopen.
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS  = 30000;
+let reconnectAttempts = 0;
+let reconnectTimer    = null;
+let initialConnectTimer = null;
+
+const connBanner = document.getElementById('conn-banner');
+function _escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function setBanner(text, kind, withSpinner){
+  // text:   string to display, or null/empty to hide the banner.
+  // kind:   'info' | 'warn' | 'danger' | undefined.
+  // withSpinner: bool — show the spinner glyph to the left of the text.
+  if(!text){
+    connBanner.className = 'conn-banner';
+    connBanner.innerHTML = '';
+    return;
+  }
+  connBanner.className = 'conn-banner visible' + (kind==='warn'?' warn':kind==='danger'?' danger':'');
+  connBanner.innerHTML = (withSpinner ? '<span class="conn-spinner"></span>' : '') + _escapeHtml(text);
+}
+
+// Translate server-side error tokens to phrases a non-technical user can
+// act on. Falls back to the raw token when we don't recognise it so we
+// never hide an unexpected failure mode entirely.
+function friendlyError(msg){
+  const m = String(msg||'').toLowerCase();
+  if(m.includes('rate_limit') || m.includes('429'))       return "Sending too quickly. Wait a sec and try again.";
+  if(m.includes('overloaded') || m.includes('529'))       return "Anthropic is overloaded right now. Try again in a moment.";
+  if(m.includes('timeout'))                                return "Symbion took too long to respond. Try again.";
+  if(m.includes('quota') || m.includes('insufficient'))   return "API quota reached. Check your Anthropic account billing.";
+  if(m.includes('image') && m.includes('large'))          return "Image is too large. Keep it under 10 MB.";
+  if(m.includes('image'))                                  return "Image upload failed. Try a JPEG or PNG under 10 MB.";
+  if(m.includes('connection') || m.includes('network'))   return "Connection problem. Reconnecting...";
+  return msg; // unknown -> raw, so we don't accidentally swallow info
+}
+
+function scheduleReconnect(reason){
+  if(suppressReconnect) return;
+  if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+  const wait = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), RECONNECT_MAX_MS);
+  const secs = Math.max(1, Math.round(wait/1000));
+  reconnectAttempts++;
+  // First couple of attempts: subtle warn pill ("reconnecting in Xs").
+  // After that the server is probably actually down, escalate to danger.
+  if(reconnectAttempts <= 2){
+    setBanner(`Reconnecting in ${secs}s...`, 'warn', true);
+  } else {
+    setBanner(`Can't reach Symbion. Retrying in ${secs}s...`, 'danger', true);
+  }
+  reconnectTimer = setTimeout(()=>{ reconnectTimer = null; connect(); }, wait);
+}
+
 const keyModal=document.getElementById('key-modal');
 const keyInput=document.getElementById('key-input');
 const keyError=document.getElementById('key-error');
@@ -407,6 +498,12 @@ function connect(){
   ws=new WebSocket(`${proto}://${location.host}/ws/${SESSION}`);
   ws.onopen=()=>{
     document.getElementById('dot').classList.remove('dead');
+    // Successful connect resets the backoff counter, clears any pending
+    // retry timer, and hides the connection banner.
+    reconnectAttempts = 0;
+    if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if(initialConnectTimer){ clearTimeout(initialConnectTimer); initialConnectTimer = null; }
+    setBanner(null);
     // Send the auth frame as the first message if we have a key. The
     // server treats this frame as required when SYMBION_API_KEY is set
     // and ignores it harmlessly when the server has no key configured,
@@ -428,10 +525,11 @@ function connect(){
     document.getElementById('dot').classList.add('dead');
     if(suppressReconnect){
       // Last close was auth-related — don't auto-reconnect, the user
-      // needs to fix the key first via the modal.
+      // needs to fix the key first via the modal. setBanner cleared by
+      // the modal showing.
       return;
     }
-    setTimeout(connect,3000);
+    scheduleReconnect('close');
   };
   ws.onmessage=e=>{
     const d=JSON.parse(e.data);
@@ -521,9 +619,21 @@ function connect(){
                        :'The browser sent a malformed auth frame. Try again.';
         showKeyModal(prettyMsg);
       } else {
-        // Non-auth error (e.g. rate limit) — surface inline if we have
-        // an active message context, otherwise drop on the floor.
-        if(activeMsg) appendTok(`[error: ${msg}]`);
+        // Non-auth error (rate limit, overloaded, etc). Translate to a
+        // sentence non-technical users can act on; surface inline if we
+        // have an active message context, otherwise via the connection
+        // banner with a short auto-dismiss.
+        const friendly = friendlyError(msg);
+        if(activeMsg){
+          appendTok(`\n\n[!] ${friendly}`);
+        } else {
+          setBanner(friendly, 'warn', false);
+          setTimeout(()=>{
+            // Only clear if no other banner state took over in the meantime.
+            if(connBanner.textContent === friendly) setBanner(null);
+          }, 6000);
+        }
+        btn.disabled = false;
       }
     }
   };
@@ -816,6 +926,14 @@ inp.addEventListener('input',()=>{
 if(!apiKey){
   showKeyModal('Enter your server’s SYMBION_API_KEY, or tap Connect without one if the server doesn’t require auth.');
 }
+// Show a subtle "Connecting..." banner only if the first connect hasn't
+// established within 1.5s — fast LAN connects don't flash this; slow
+// Tailscale-over-cellular paths get clear feedback.
+initialConnectTimer = setTimeout(()=>{
+  if(!ws || ws.readyState !== 1){
+    setBanner('Connecting to Symbion...', 'info', true);
+  }
+}, 1500);
 connect();
 </script>
 </body>
