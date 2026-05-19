@@ -292,6 +292,10 @@ const thinkBtn=document.getElementById('think-btn');
 // the same conversation. A new session is generated explicitly via
 // /new or /quit (the latter also summarises the current one).
 const SESSION_STORE='symbion_session';
+// Active user persists too — /user lala sets it, ws.onopen re-applies
+// it on every reconnect so the server-side per-session user map stays
+// in sync with the device's local choice.
+const USER_STORE='symbion_user';
 function newSessionId(){
   const sid=Math.random().toString(36).slice(2);
   localStorage.setItem(SESSION_STORE,sid);
@@ -367,6 +371,13 @@ function connect(){
     // nothing — let the server tell us whether it needs one.
     if(apiKey){
       try{ws.send(JSON.stringify({type:'auth',key:apiKey}));}catch(e){}
+    }
+    // If a non-default user is stored from a prior /user command, set it
+    // on the new session so the server attributes messages correctly.
+    // No-op when no user is stored (server defaults to cfg.active_user).
+    const storedUser = localStorage.getItem(USER_STORE);
+    if(storedUser && storedUser !== 'aaron'){
+      try{ws.send(JSON.stringify({type:'set_user', name:storedUser}));}catch(e){}
     }
   };
   ws.onclose=()=>{
@@ -630,8 +641,34 @@ function handleSlashCommand(text){
     showKeyModal('');
     return true;
   }
+  if(cmd.startsWith('/user')){
+    // /user           -> show current active user (from localStorage)
+    // /user <name>    -> switch to <name>: store in localStorage, start a
+    //                    fresh session, reconnect, and the new session's
+    //                    ws.onopen will send set_user so the new session
+    //                    is attributed correctly server-side.
+    const parts = text.split(/\s+/);
+    if(parts.length < 2 || !parts[1]){
+      const cur = localStorage.getItem(USER_STORE) || 'aaron';
+      addSymStatic(`Active user: ${cur}. Switch with /user <name> (e.g. /user lala).`);
+      return true;
+    }
+    const name = parts[1].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+    if(!name){
+      addSymStatic('Invalid user name. Use letters/digits/_/- only.');
+      return true;
+    }
+    localStorage.setItem(USER_STORE, name);
+    SESSION = newSessionId();
+    chatInner.innerHTML = '';
+    addSymStatic(`Active user → ${name}. Fresh session started.`);
+    suppressReconnect = false;
+    try{if(ws) ws.close();}catch(e){}
+    setTimeout(connect, 200);
+    return true;
+  }
   if(cmd==='/help'){
-    addSymStatic('Slash commands: /quit (save & end session, start fresh), /new (start fresh without saving), /key (change API key), /help (this).');
+    addSymStatic('Slash commands: /quit (save & end session, start fresh), /new (start fresh without saving), /user <name> (switch active user), /key (change API key), /help (this).');
     return true;
   }
   return false;

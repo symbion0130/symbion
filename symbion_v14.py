@@ -198,6 +198,14 @@ class SymbionConfig:
 
     show_reasoning: bool = False
 
+    # Multi-user: every conversation is attributed to one user. The default
+    # (aaron) inherits all pre-existing memory/profile rows that predate
+    # multi-user support; switching to a different user (e.g. lala) gives a
+    # clean memory slate so Symbion meets her without Aaron's framing in
+    # the room. See /user command in terminal + web composer.
+    active_user: str = "aaron"
+    known_users: List[str] = field(default_factory=lambda: ["aaron", "lala"])
+
     memory_summary_every: int = 16
     profile_update_every: int = 4
 
@@ -1013,6 +1021,22 @@ def init_db(db_path: str):
                 logger.warning("Migrated summaries table: added embedding column")
         except sqlite3.OperationalError as ex:
             logger.warning(f"summaries embedding migration skipped: {ex}")
+
+        # Additive migration: multi-user support. messages + summaries gain
+        # a `user` column; legacy rows (predating /user) get backfilled to
+        # 'aaron' so reads scoped to user='aaron' still see the historical
+        # conversation. Writes from /user lala onwards get tagged with the
+        # active user. User profile uses '<user>:<key>' encoding inside the
+        # existing key column (avoids needing a new table or changing PK).
+        for table, col in [("messages", "user"), ("summaries", "user")]:
+            try:
+                existing_cols = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+                if col not in existing_cols:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                    c.execute(f"UPDATE {table} SET {col}='aaron' WHERE {col} IS NULL")
+                    logger.warning(f"Migrated {table} table: added {col} column, backfilled legacy rows to 'aaron'")
+            except sqlite3.OperationalError as ex:
+                logger.warning(f"{table} {col} migration skipped: {ex}")
         c.commit()
 
 
@@ -3244,22 +3268,26 @@ class SymbionMemory:
         # to full-scan Python cosine.
         self.vec_index = EmbeddingIndex(db_path)
 
-    def add(self, role: str, content: str, session: str, emotional_state: str = ""):
+    def add(self, role: str, content: str, session: str, emotional_state: str = "",
+             user: str = "aaron"):
         with sqlite3.connect(self.db) as c:
-            c.execute("INSERT INTO messages (timestamp,session,role,content,emotional_state) VALUES (?,?,?,?,?)",
-                      (datetime.now().isoformat(), session, role, content, emotional_state)); c.commit()
+            c.execute("INSERT INTO messages (timestamp,session,role,content,emotional_state,user) "
+                      "VALUES (?,?,?,?,?,?)",
+                      (datetime.now().isoformat(), session, role, content, emotional_state, user))
+            c.commit()
 
     def save_summary(self, session: str, summary: str, count: int,
-                      embedding: Optional[List[float]] = None) -> int:
+                      embedding: Optional[List[float]] = None,
+                      user: str = "aaron") -> int:
         """Insert a new summary row, optionally with an embedding vector.
         Returns the new row id so callers can backfill embeddings later
         if they were unable to embed at save time."""
         blob = _vec_to_blob(embedding) if embedding else None
         with sqlite3.connect(self.db) as c:
             cur = c.execute(
-                "INSERT INTO summaries (timestamp,session,content,msg_count,embedding) "
-                "VALUES (?,?,?,?,?)",
-                (datetime.now().isoformat(), session, summary, count, blob))
+                "INSERT INTO summaries (timestamp,session,content,msg_count,embedding,user) "
+                "VALUES (?,?,?,?,?,?)",
+                (datetime.now().isoformat(), session, summary, count, blob, user))
             row_id = cur.lastrowid
             c.execute("UPDATE messages SET summarised=1 WHERE session=? AND summarised=0",(session,))
             c.commit()
@@ -3349,14 +3377,23 @@ class SymbionMemory:
         self.vec_index.clear()
         return n or 0
 
-    def get_summaries_with_embeddings(self, limit: int = 200) -> List[Tuple[str, Optional[List[float]], str]]:
+    def get_summaries_with_embeddings(self, limit: int = 200,
+                                       user: Optional[str] = None) -> List[Tuple[str, Optional[List[float]], str]]:
         """Return (content, vec_or_None, timestamp) for the most recent N summaries.
         Timestamp is the ISO string from the summaries table; callers parse
-        on demand so retrieval can apply recency weighting."""
+        on demand so retrieval can apply recency weighting. When `user` is
+        set, only that user's summaries are returned so cross-session
+        retrieval stays scoped to the current user."""
         with sqlite3.connect(self.db) as c:
-            rows = c.execute(
-                "SELECT content, embedding, timestamp FROM summaries ORDER BY id DESC LIMIT ?",
-                (limit,)).fetchall()
+            if user:
+                rows = c.execute(
+                    "SELECT content, embedding, timestamp FROM summaries WHERE user=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (user, limit)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT content, embedding, timestamp FROM summaries ORDER BY id DESC LIMIT ?",
+                    (limit,)).fetchall()
         return [(r[0], _blob_to_vec(r[1]), r[2] or "") for r in rows]
 
     def enqueue_proactive(self, session: str, message: str, reason: str = "") -> int:
@@ -3389,50 +3426,92 @@ class SymbionMemory:
             return [{"id": r[0], "message": r[1], "reason": r[2], "created_at": r[3]}
                     for r in rows]
 
-    def update_profile(self, profile: Dict):
+    def update_profile(self, profile: Dict, user: str = "aaron"):
+        """Profile facts are namespaced by user inside the existing
+        user_profile.key column ('<user>:<key>') so the table's single-
+        column PRIMARY KEY survives without a schema rewrite. Legacy rows
+        (pre-multi-user) live under the bare key without a prefix and are
+        treated as aaron's by get_profile."""
         with sqlite3.connect(self.db) as c:
             now = datetime.now().isoformat()
             for k, v in profile.items():
                 if v and v != "null" and v != [] and v != "":
                     val = json.dumps(v) if isinstance(v,list) else str(v)
-                    c.execute("INSERT OR REPLACE INTO user_profile VALUES (?,?,?)",(k,val,now))
+                    c.execute("INSERT OR REPLACE INTO user_profile VALUES (?,?,?)",
+                              (f"{user}:{k}", val, now))
             c.commit()
 
-    def get_profile(self) -> Dict:
+    def get_profile(self, user: str = "aaron") -> Dict:
+        """Return the profile facts for `user`. For backward compat, bare
+        keys (no '<user>:' prefix) are folded into aaron's profile so
+        existing pre-multi-user data stays attributed to him."""
         with sqlite3.connect(self.db) as c:
             rows = c.execute("SELECT key,value FROM user_profile").fetchall()
-        result = {}
-        for k,v in rows:
-            try:    result[k] = json.loads(v)
-            except Exception: result[k] = v
+        prefix = f"{user}:"
+        result: Dict = {}
+        for k, v in rows:
+            if k.startswith(prefix):
+                bare = k[len(prefix):]
+                try:    result[bare] = json.loads(v)
+                except Exception: result[bare] = v
+            elif user == "aaron" and ":" not in k:
+                # Legacy unprefixed key (predates multi-user) — treated as aaron's.
+                if k not in result:
+                    try:    result[k] = json.loads(v)
+                    except Exception: result[k] = v
         return result
 
-    def get_recent(self, session: str, n: int = 10) -> List[Dict]:
+    def get_recent(self, session: str, n: int = 10, user: Optional[str] = None) -> List[Dict]:
+        """Recent messages for `session`. When `user` is None, no filter is
+        applied (legacy caller path). When set, only rows tagged with that
+        user are returned."""
         with sqlite3.connect(self.db) as c:
-            rows = c.execute(
-                "SELECT role,content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
-                (session,n)).fetchall()
+            if user:
+                rows = c.execute(
+                    "SELECT role,content FROM messages WHERE session=? AND user=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (session, user, n)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT role,content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
+                    (session, n)).fetchall()
         return [{"role":r[0],"content":r[1]} for r in reversed(rows)]
 
-    def get_summaries(self, session: str, n: int = 2) -> List[str]:
+    def get_summaries(self, session: str, n: int = 2, user: Optional[str] = None) -> List[str]:
+        """Summaries written for `session`. Optional user filter — same
+        shape as get_recent."""
         with sqlite3.connect(self.db) as c:
-            rows = c.execute(
-                "SELECT content FROM summaries WHERE session=? ORDER BY id DESC LIMIT ?",
-                (session,n)).fetchall()
+            if user:
+                rows = c.execute(
+                    "SELECT content FROM summaries WHERE session=? AND user=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (session, user, n)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT content FROM summaries WHERE session=? ORDER BY id DESC LIMIT ?",
+                    (session, n)).fetchall()
         return [r[0] for r in reversed(rows)]
 
     def get_relevant_summaries(self, query: str, k: int = 2,
-                                candidate_pool: int = 200) -> List[str]:
+                                candidate_pool: int = 200,
+                                user: Optional[str] = None) -> List[str]:
         """BM25-ranked cross-session retrieval over the most recent
         `candidate_pool` summaries. Stop-word filtered, IDF-weighted,
         length-normalised. Preserves short technical tokens (ai, v14, py).
         Lexical-only path; for semantic + lexical hybrid see
-        get_relevant_summaries_hybrid.
-        """
+        get_relevant_summaries_hybrid. When user is provided, only that
+        user's summaries are eligible (so lala doesn't pull in aaron's
+        history and vice versa)."""
         with sqlite3.connect(self.db) as c:
-            rows = c.execute(
-                "SELECT content FROM summaries ORDER BY id DESC LIMIT ?",
-                (candidate_pool,)).fetchall()
+            if user:
+                rows = c.execute(
+                    "SELECT content FROM summaries WHERE user=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (user, candidate_pool)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT content FROM summaries ORDER BY id DESC LIMIT ?",
+                    (candidate_pool,)).fetchall()
         if not rows:
             return []
         ranked = _bm25_rank(query, [r[0] for r in rows], k=k)
@@ -3486,7 +3565,8 @@ class SymbionMemory:
             bm25_weight: float = 0.40,
             cosine_weight: float = 0.60,
             recency_half_life_days: float = 30.0,
-            recency_weight: float = 0.30) -> List[str]:
+            recency_weight: float = 0.30,
+            user: Optional[str] = None) -> List[str]:
         """Hybrid BM25 + cosine retrieval with multiplicative recency decay.
         Falls back to BM25-only when no query embedding is available (Ollama
         down, embeddings disabled, etc). Scores are min-max normalised to
@@ -3510,11 +3590,26 @@ class SymbionMemory:
             and self.total_summaries_with_embedding() > candidate_pool
         )
         if use_vec_index:
-            ranked = self.vec_index.topk(query_embedding, k=candidate_pool)
+            # Index path doesn't know about users; over-fetch then filter
+            # by user in Python. The pool is bounded so the cost is small.
+            ranked = self.vec_index.topk(query_embedding, k=candidate_pool * (2 if user else 1))
             cand_ids = [rid for rid, _ in ranked]
             candidates = self.get_summaries_with_embeddings_by_ids(cand_ids)
+            if user:
+                # Cross-reference IDs with the user column.
+                with sqlite3.connect(self.db) as c:
+                    allowed = {r[0] for r in c.execute(
+                        f"SELECT id FROM summaries WHERE user=? AND id IN ({','.join('?'*len(cand_ids))})",
+                        (user, *cand_ids)).fetchall()} if cand_ids else set()
+                allowed_contents = set()
+                with sqlite3.connect(self.db) as c:
+                    rows = c.execute(
+                        f"SELECT content FROM summaries WHERE user=? AND id IN ({','.join('?'*len(cand_ids))})",
+                        (user, *cand_ids)).fetchall() if cand_ids else []
+                allowed_contents = {r[0] for r in rows}
+                candidates = [(content, vec, ts) for content, vec, ts in candidates if content in allowed_contents]
         else:
-            candidates = self.get_summaries_with_embeddings(candidate_pool)
+            candidates = self.get_summaries_with_embeddings(candidate_pool, user=user)
         if not candidates:
             return []
         contents = [c for c, _, _ in candidates]
@@ -3733,10 +3828,11 @@ class SymbionMemory:
                       tasks: "TaskEngine", gaps: "KnowledgeGapTracker",
                       contradictions: "ContradictionTracker" = None,
                       query: str = "",
-                      query_embedding: Optional[List[float]] = None) -> "Tuple[List[Dict],str]":
-        recent    = self.get_recent(session, n=10)
-        summaries = self.get_summaries(session, n=1)  # most recent session summary
-        profile   = self.get_profile()
+                      query_embedding: Optional[List[float]] = None,
+                      user: str = "aaron") -> "Tuple[List[Dict],str]":
+        recent    = self.get_recent(session, n=10, user=user)
+        summaries = self.get_summaries(session, n=1, user=user)  # most recent session summary
+        profile   = self.get_profile(user=user)
         parts     = []
 
         # Always-on time anchor. Forces the model to ground "morning/lunch/
@@ -3779,9 +3875,10 @@ class SymbionMemory:
                     bm25_weight=self.cfg.embedding_bm25_weight,
                     cosine_weight=self.cfg.embedding_cosine_weight,
                     recency_half_life_days=self.cfg.embedding_recency_half_life_days,
-                    recency_weight=self.cfg.embedding_recency_weight)
+                    recency_weight=self.cfg.embedding_recency_weight,
+                    user=user)
             else:
-                relevant = self.get_relevant_summaries(query, k=2)
+                relevant = self.get_relevant_summaries(query, k=2, user=user)
             # Deduplicate against session summaries
             existing = set(summaries)
             relevant = [s for s in relevant if s not in existing]
@@ -4177,6 +4274,11 @@ class SYMBION:
         # sessions or browser tabs sharing this SYMBION instance.
         self._escalate_next_turn: Dict[str, bool] = {}
 
+        # Multi-user: each session can be attributed to a different user via
+        # /user <name>. Default is cfg.active_user (defaults to "aaron").
+        # Reads fall back to cfg.active_user when a session has no override.
+        self._session_user: Dict[str, str] = {}
+
         self._providers: List[BaseClient] = []
         self._build_providers()
         self.client = self._providers[0] if self._providers else None
@@ -4348,6 +4450,28 @@ class SYMBION:
                 stats["errors"] += 1
                 stats["last_error"] = result[:200]
         return result
+
+    def _active_user(self, session: str) -> str:
+        """The user this session is attributed to. Falls back to
+        cfg.active_user when /user has not been called for this session.
+        Used by respond() to scope memory reads/writes and by the profile
+        injection in build_context so lala doesn't see aaron's profile."""
+        return self._session_user.get(session) or (self.cfg.active_user or "aaron")
+
+    def _set_session_user(self, session: str, user: str) -> str:
+        """Set the active user for `session`. Returns the canonicalized
+        name (lowercased + stripped, max 32 chars). Pruned to a safe slug
+        so a stray ';drop table' from a web request can't sneak through
+        into SQL via the parameter binding context downstream."""
+        clean = (user or "").strip().lower()[:32]
+        # Allow letters/digits/underscore/hyphen — same charset as a Unix
+        # username. Anything else gets dropped so '../etc/passwd' style
+        # nonsense can't be smuggled.
+        clean = "".join(ch for ch in clean if ch.isalnum() or ch in "_-")
+        if not clean:
+            clean = self.cfg.active_user or "aaron"
+        self._session_user[session] = clean
+        return clean
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -4802,7 +4926,9 @@ class SYMBION:
                 embedding = await self.embeddings.embed(summary)
             except Exception as ex:
                 logger.warning(f"Summary embedding skipped: {ex}")
-            self.memory.save_summary(session, summary, len(msgs), embedding=embedding)
+            self.memory.save_summary(session, summary, len(msgs),
+                                     embedding=embedding,
+                                     user=self._active_user(session))
             return len(msgs)
         except Exception as ex:
             logger.error(f"Summarise: {ex}")
@@ -4889,13 +5015,14 @@ class SYMBION:
 
         # Profile
         if self.count % self.cfg.profile_update_every == 0:
-            recent = self.memory.get_recent(session, n=16)
+            sess_user = self._active_user(session)
+            recent = self.memory.get_recent(session, n=16, user=sess_user)
             if len(recent) >= 4:
                 try:
                     conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent)
                     raw  = await client.chat_json(self._jmodel(), PROFILE_SYSTEM, conv, 0.2, 300)
                     profile = _parse_json(raw, {})
-                    if profile: self.memory.update_profile(profile)
+                    if profile: self.memory.update_profile(profile, user=sess_user)
                     if profile.get("core_positions"):
                         for pos in (profile["core_positions"] if isinstance(profile["core_positions"],list)
                                     else [profile["core_positions"]]):
@@ -4976,6 +5103,12 @@ class SYMBION:
             self._seen_sessions.add(session)
             self._session_count += 1
 
+        # Resolve the user attribution for this session/turn. All memory
+        # writes (messages, summaries) and reads (profile, recent, cross-
+        # session retrieval) downstream scope to this user so lala's
+        # context never includes aaron's history and vice versa.
+        active_user = self._active_user(session)
+
         # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + (legacy-mode only)
         # tool dispatch. In agent-loop mode the model fires tools itself during
         # generation, so _maybe_tool is skipped and tool_context starts empty.
@@ -5053,7 +5186,8 @@ class SYMBION:
             history, preamble = self.memory.build_context(
                 session, self.identity, self.tasks, self.gaps,
                 contradictions=self.contradictions, query=text,
-                query_embedding=query_embedding)
+                query_embedding=query_embedding,
+                user=active_user)
         except Exception as ex:
             logger.error(f"[req={request_id}] build_context: {ex}")
             history, preamble = [], ""
@@ -5323,11 +5457,11 @@ class SYMBION:
         # 5. Memory — guard each insert. A SQLite lock or disk-IO blip here
         # must not crash respond() after the user has already seen the answer.
         try:
-            self.memory.add("user", text, session, emotional_state.get("state",""))
+            self.memory.add("user", text, session, emotional_state.get("state",""), user=active_user)
         except Exception as ex:
             logger.error(f"[req={request_id}] memory.add(user): {ex}")
         try:
-            self.memory.add("assistant", full_response, session)
+            self.memory.add("assistant", full_response, session, user=active_user)
         except Exception as ex:
             logger.error(f"[req={request_id}] memory.add(assistant): {ex}")
         self.count += 1
@@ -5438,7 +5572,7 @@ class SYMBION:
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub): return None
         try:
-            profile = self.memory.get_profile()
+            profile = self.memory.get_profile(user=self._active_user(session))
             tasks   = self.tasks.get_active(session)
             identity_ctx = self.identity.get_identity_summary()
             context = (f"User profile: {json.dumps(profile)}\n"
@@ -5869,6 +6003,15 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     symbion.cfg.show_reasoning = show_reasoning
                     continue
 
+                if payload.get("type")=="set_user":
+                    # /user <name> from the web composer. Sets the per-
+                    # session user attribution. The next message + every
+                    # subsequent one in this session is scoped to that
+                    # user for memory + profile reads/writes.
+                    name = symbion._set_session_user(session_id, str(payload.get("name", "")))
+                    await send({"t":"user_ok","v":name})
+                    continue
+
                 if payload.get("type")=="summarize":
                     # Web-side equivalent of terminal /quit: flush the session
                     # to a summary so cross-session memory has the context,
@@ -5996,6 +6139,10 @@ HELP_TEXT = f"""
     /welfare          distress, failure count, over-caution rate
     /mood             current mood label
     /think            toggle chain-of-thought display
+    /user             show active user (default: aaron)
+    /user <name>      switch to <name> — gives the new user a fresh
+                      memory slate (profile, history, summaries scoped
+                      to that user only)
     /memory           recent memory entries
     /summarize        flush a summary of this session's unsummarised messages
                       (also runs automatically on /quit so short sessions
@@ -6119,7 +6266,7 @@ def run_terminal(symbion: "SYMBION"):
         proactive_thread = threading.Thread(
             target=_proactive_runner, daemon=True, name="symbion-proactive")
         proactive_thread.start()
-    profile  = symbion.memory.get_profile()
+    profile  = symbion.memory.get_profile(user=symbion._active_user(session))
     mood_name, _ = symbion.health.mood()
 
     if symbion.cfg.mcp_enabled and symbion.cfg.mcp_servers:
@@ -6144,6 +6291,7 @@ def run_terminal(symbion: "SYMBION"):
         print(f"  {dim('Provider')}  {green(prov)}  {dim(resp_label)}")
         print(f"  {dim('Judge')}     {dim(symbion._jmodel())}")
     print(f"  {dim('Session')}   {dim(session[:20])}")
+    print(f"  {dim('User')}      {green(symbion._active_user(session))}  {dim('(/user <name> to switch)')}")
     print(f"  {dim('Mood')}      {cyan(mood_name)}")
     if profile: print(f"  {dim('Profile')}   {green(str(len(profile)))} facts known")
     moments = symbion.identity.total_moments()
@@ -6210,6 +6358,23 @@ def run_terminal(symbion: "SYMBION"):
             symbion.cfg.show_reasoning = not symbion.cfg.show_reasoning
             state = green("ON") if symbion.cfg.show_reasoning else dim("OFF")
             print(f"  Chain-of-thought: {state}")
+        elif raw.startswith("/user"):
+            parts = raw.split(None, 1)
+            if len(parts) == 1:
+                # No arg: show current user + the known list.
+                cur = symbion._active_user(session)
+                known = ", ".join(symbion.cfg.known_users) or "(none configured)"
+                print(f"  Active user: {green(cur)}")
+                print(f"  Known users: {dim(known)}")
+                print(f"  Switch with: {dim('/user <name>')}")
+            else:
+                name = symbion._set_session_user(session, parts[1])
+                # Start a fresh session so the new user's chat doesn't
+                # commingle with the prior user's messages under the same
+                # session_id. The old session's messages stay in the DB
+                # tagged with the prior user — they're not deleted.
+                session = datetime.now().strftime(f"session_{name}_%Y%m%d_%H%M%S")
+                print(green(f"  OK Active user -> {name}. New session: {dim(session)}"))
         elif raw=="/memory":
             rows=symbion.memory.get_all_recent(12)
             if not rows: print(dim("  No memory yet."))
@@ -6220,7 +6385,7 @@ def run_terminal(symbion: "SYMBION"):
                     print(f"  {rs}  {dim(r['timestamp'][11:16])}  {r['content'][:72]}")
                 print()
         elif raw=="/profile":
-            p=symbion.memory.get_profile()
+            p=symbion.memory.get_profile(user=symbion._active_user(session))
             if not p: print(dim("  No profile yet."))
             else:
                 print()
