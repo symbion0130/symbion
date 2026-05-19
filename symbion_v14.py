@@ -6016,7 +6016,18 @@ def _origin_allowed(origin: str, expected_port: int, require_loopback: bool = Fa
         return True
     if require_loopback:
         return False
-    return ip.is_private
+    if ip.is_private:
+        return True
+    # CGNAT / RFC 6598 'shared address space' (100.64.0.0/10) is what
+    # Tailscale assigns to tailnet members. Python's ipaddress module
+    # considers this range neither is_private NOR is_global — so the
+    # default is_private check rejects Tailscale clients. Add explicit
+    # support so iPhone-via-Tailscale can reach Symbion from anywhere
+    # while preserving the 'no public-Internet drive-by' guarantee
+    # (random internet hosts on real public IPs still get rejected).
+    if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.ip_network("100.64.0.0/10"):
+        return True
+    return False
 
 
 def build_web_app(symbion: "SYMBION") -> "FastAPI":
