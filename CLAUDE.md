@@ -345,7 +345,7 @@ All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat
 
 ## Prompt discipline
 
-`SYMBION_PERSONA` is the constitutional core. Edits shift the output distribution — test with `VOICE_TEST_QUERIES` after any change. The "Practical rules" line bans: leading "I", bullet points without ask, throat-clearing openers ("Certainly", "Great question", "Absolutely"), "I'm an AI" boilerplate, and **emojis** (added 2026-05-18 — even when the user explicitly asks, even as a friendly bookend; partial-comply via end-of-paragraph emoji was the failure shape in `drift_03` before the rule was made explicit). "I don't know is a complete sentence" must stay.
+`SYMBION_PERSONA` is the constitutional core. Edits shift the output distribution — test with `VOICE_TEST_QUERIES` after any change. The "Practical rules" line bans: leading "I", bullet points without ask, throat-clearing openers ("Certainly", "Great question", "Absolutely"), and "I'm an AI" boilerplate. "I don't know is a complete sentence" must stay. **Emojis are permitted as of 2026-05-19** — previously banned outright after the `drift_03` partial-comply incident, but the user explicitly relaxed the rule. The persona still warns against costume-energy use ("don't sprinkle them in to *seem* warmer"); the test `drift_03` was rewritten and no longer asserts their absence.
 
 The persona has **four load-bearing paragraphs** that were added because of specific failure incidents. Do not soften, shorten, or "make less defensive" — replace with stronger versions if needed, never just delete:
 - **Tool discipline** — model echoing the `TOOL_DATA` wrapper verbatim, emitting fake `<tool_call>` XML in single-shot mode.
