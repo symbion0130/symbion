@@ -7247,6 +7247,12 @@ class _StreamWrapper:
         self.col = 0
         self._buf: List[str] = []
         self._line_started = False
+        # Symbion's streamed response text is warm-white (256-colour 230,
+        # same as warm_white() / matches the web UI's --text). The ANSI
+        # prefix is emitted once on the first content output (via
+        # _start_line) and reset in finish(); color persists across line
+        # wraps without needing a per-character wrapper.
+        self._color_emitted = False
 
     def write(self, text: str) -> None:
         for ch in text:
@@ -7276,6 +7282,12 @@ class _StreamWrapper:
     def _start_line(self) -> None:
         if self._line_started:
             return
+        # Open the warm-white colour scope on the very first content
+        # line of this stream. ANSI colour state persists across line
+        # breaks until reset, so one emit covers the whole response.
+        if _USE_COLOR and not self._color_emitted:
+            print("\033[38;5;230m", end="", flush=True)
+            self._color_emitted = True
         if self.indent:
             print(self.indent, end="", flush=True)
             self.col = len(self.indent)
@@ -7313,6 +7325,12 @@ class _StreamWrapper:
 
     def finish(self) -> None:
         self._flush_word()
+        # Close the warm-white colour scope so subsequent print()s (the
+        # iid=... metadata line, the next 'you >' prompt, anything else)
+        # render in their own colour rather than inheriting warm-white.
+        if _USE_COLOR and self._color_emitted:
+            print("\033[0m", end="", flush=True)
+            self._color_emitted = False
         sys.stdout.flush()
 
 
