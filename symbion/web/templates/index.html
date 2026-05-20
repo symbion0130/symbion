@@ -40,7 +40,11 @@ html,body{
 body{
   background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
-  font-size:15px;line-height:1.55;
+  /* Desktop base bumped from 15 to 16 -- the prior size felt cramped
+     on a desktop browser (Chrome at default zoom). Mobile @media at
+     <=540px overrides chat message font-sizes back down to keep the
+     iPhone read unchanged. */
+  font-size:16px;line-height:1.55;
   display:flex;flex-direction:column;
   -webkit-font-smoothing:antialiased;
 }
@@ -101,8 +105,8 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
   background:var(--you-soft);
   border:1px solid #afd78744;
   border-radius:var(--radius) var(--radius) 4px var(--radius);
-  padding:.65rem .9rem;color:var(--text);
-  font-size:.95rem;line-height:1.5;
+  padding:.75rem 1rem;color:var(--text);
+  font-size:1.05rem;line-height:1.55;
   white-space:pre-wrap;word-break:break-word;
 }
 
@@ -114,7 +118,7 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 }
 .msg-body{
   white-space:pre-wrap;word-break:break-word;
-  color:var(--text);font-size:.95rem;line-height:1.65;
+  color:var(--text);font-size:1.05rem;line-height:1.65;
 }
 
 .thinking-block{
