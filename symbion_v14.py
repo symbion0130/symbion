@@ -126,6 +126,14 @@ def soft_orange(t): return _c("38;5;173", t)  # muted terra-cotta, ~#d7875f
 def gray(t):        return _c("38;5;245", t)  # mid-gray, ~#8a8a8a
 def soft_green(t):  return _c("38;5;150", t)  # warm sage, ~#afd787
 
+def warm_white_open() -> str:
+    """Open the warm-white colour scope WITHOUT a closing reset, so free
+    text that follows (e.g. user input at the 'you >' prompt) renders
+    in warm-white. The scope stays open until the next ANSI reset --
+    most coloured helpers above emit `\\x1b[0m` at the end, which closes
+    this scope automatically the next time we print() any of them."""
+    return "\033[38;5;230m" if _USE_COLOR else ""
+
 logger = logging.getLogger("symbion")
 
 # Silence the stderr cascade when a log handler fails. Windows real-time
@@ -6831,7 +6839,12 @@ def run_terminal(symbion: "SYMBION"):
             sw.write(pmsg)
             sw.finish()
             print()
-        try:    raw = _read_input_multiline(bold(soft_green("\nyou > "))).strip()
+        # The trailing warm_white_open() leaves the colour scope open
+        # after the prompt renders, so the user's typed input is also
+        # warm-white. Whatever Symbion print()s next (the soft_orange
+        # 'Symbion' label or the _StreamWrapper's own scope) emits its
+        # own ANSI reset, which closes this scope automatically.
+        try:    raw = _read_input_multiline(bold(soft_green("\nyou > ")) + warm_white_open()).strip()
         except (EOFError,KeyboardInterrupt): print(dim("\n  Goodbye.")); break
         if not raw: continue
 
