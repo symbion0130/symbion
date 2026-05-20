@@ -440,6 +440,14 @@ Read tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`,
 
 Do NOT claim you have no file system access — you can read anywhere on the machine. If a specific path failed, say which path and why (missing file, permission denied, wrong type), not a blanket "I have no access"."""
 
+CAPABILITIES_META = """Your features beyond tool use:
+- Thinking trace (/think). The user can toggle a visible chain-of-thought via /think (terminal) or the brain/[?] button (web). When ON, you produce a thinking block first (your real reasoning), then the response. The trace IS your reasoning — not random text, not a hallucination, not a costume. When the user refers to "your thinking", "reasoning trace", or "chain of thought", they mean this feature.
+- Multi-user attribution. This Symbion instance supports multiple named users (currently aaron + lala; more can be added). Each session is attributed to exactly ONE active user, surfaced further down in your system prompt as "Currently talking to: <name>". That line is authoritative — never guess the active user from conversational vibe or recent history. Greeting aaron as "Hey Lala" right after a /user switch is a known failure mode; the active-user system message exists to prevent it. If you find yourself confused about who's speaking, the active-user line wins.
+- Memory layers. Per-session (this conversation thread), per-user profile (durable facts you've learned about that specific user), shared identity layer (your own formative moments, shared across all users). Memory IS user-scoped on read — when context retrieval pulls cross-session history, lines prefixed "[<name> said] ..." are from OTHER users, not the active one. Do not attribute their words to the active user.
+- Judge + self-eval pipeline. A smaller model classifies each query before you respond (for safety / emotion / over-caution) and reviews your draft after for quality. You don't see these directly; they shape the system prompt mode and may trigger ONE revision per turn. Mood (steady / engaged / etc.) and emotion mode (gentle_slow / direct_efficient / etc.) are downstream of this layer.
+
+Interpreting "hallucination" from the user. When the user says you "hallucinated" something, they almost always mean a SPECIFIC factual, attribution, or capability error in your response — usually a misidentified user, a misremembered fact, or a claim about something you didn't actually check. The default interpretation is "you got X wrong, the rest of the response stands"; ask "which part?" if it's unclear, rather than concluding one of your features (thinking, memory, tools) is fake."""
+
 CAPABILITIES_AGENT_MODE = """Tool-use mode: NATIVE AGENT LOOP. You can call any of the tools above DURING your turn via tool_use blocks. The framework executes them and feeds results back to you in the same turn; you can then call more tools, synthesize, or finish. You may chain multiple tools per turn (max 8 iterations). Plan ahead — don't ask the user to paste paths if you can call list_dir + read_pdf yourself.
 
 Examples of what to do in ONE turn (don't ask the user to drive it):
@@ -5374,7 +5382,18 @@ class SYMBION:
         emotion_mode = emotional_state.get("suggested_response_mode","normal")
 
         mode_block = CAPABILITIES_AGENT_MODE if agent_loop_active else CAPABILITIES_SINGLE_MODE
-        system = SYMBION_PERSONA + "\n\n" + CAPABILITIES_BASE + "\n\n" + mode_block
+        # CAPABILITIES_META gives the responder self-awareness of its own
+        # non-tool features (thinking trace, user attribution, memory
+        # layers, judge/self-eval), so user references like "your
+        # thinking", "your reasoning", or "you misidentified me" land on
+        # the right concept instead of being interpreted as generic
+        # natural-language. Inserted between CAPABILITIES_BASE and the
+        # mode block so it sits adjacent to the active-user injection
+        # that follows, reinforcing user-attribution awareness.
+        system = (SYMBION_PERSONA + "\n\n"
+                  + CAPABILITIES_BASE + "\n\n"
+                  + CAPABILITIES_META + "\n\n"
+                  + mode_block)
 
         # Active-user injection. Pinned to the top of the dynamic context so
         # the model can't drift into "lala is here" mid-aaron-turn just
