@@ -93,7 +93,7 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
   scroll-behavior:smooth;
 }
 #chat-inner{
-  max-width:760px;margin:0 auto;
+  max-width:1200px;margin:0 auto;
   display:flex;flex-direction:column;gap:1.4rem;
 }
 
@@ -157,7 +157,7 @@ footer{
   display:flex;justify-content:center;flex-shrink:0;
 }
 .composer{
-  width:100%;max-width:760px;
+  width:100%;max-width:1200px;
   display:flex;gap:.5rem;align-items:flex-end;
 }
 #inp{
@@ -198,7 +198,7 @@ footer{
 .send-btn:disabled{opacity:.35;cursor:not-allowed}
 
 .attach-strip{
-  width:100%;max-width:760px;margin:0 auto .4rem;
+  width:100%;max-width:1200px;margin:0 auto .4rem;
   display:flex;flex-wrap:wrap;gap:.4rem;
 }
 .attach-strip:empty{display:none}
@@ -347,7 +347,10 @@ footer{
   border-radius:var(--radius) var(--radius) 0 0;
   padding:1rem;
   padding-bottom:max(1rem,env(safe-area-inset-bottom));
-  width:100%;max-width:760px;
+  /* Status sheet stays narrow even when chat/composer go wide --
+     it's a modal panel containing a handful of short rows, not a
+     content surface. Independent of #chat-inner max-width. */
+  width:100%;max-width:600px;
   display:flex;flex-direction:column;gap:.55rem;
   animation:status-slide-up .25s cubic-bezier(.2,.8,.2,1);
   max-height:80vh;overflow-y:auto;
