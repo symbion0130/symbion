@@ -119,10 +119,10 @@ def blue(t):    return _c("34", t)
 # (`38;5;N`) for amber/gold/orange/warm-white tones; falls back to plain
 # text when _USE_COLOR is off. Terminals that don't speak 256-colour
 # render as fallback approximations on the nearest 16-colour mapping.
-def amber(t):       return _c("38;5;214", t)  # warm gold-orange, ~#ffaf00
-def gold(t):        return _c("38;5;220", t)  # bright gold, ~#ffd700
+def amber(t):       return _c("38;5;179", t)  # muted gold-tan, ~#d7af5f
+def gold(t):        return _c("38;5;178", t)  # darker gold, ~#d7af00
 def warm_white(t):  return _c("38;5;230", t)  # cream / off-white, ~#ffffd7
-def soft_orange(t): return _c("38;5;208", t)  # ~#ff8700
+def soft_orange(t): return _c("38;5;173", t)  # muted terra-cotta, ~#d7875f
 def gray(t):        return _c("38;5;245", t)  # mid-gray, ~#8a8a8a
 def soft_green(t):  return _c("38;5;150", t)  # warm sage, ~#afd787
 
