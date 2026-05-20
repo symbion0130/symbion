@@ -5035,6 +5035,26 @@ class SYMBION:
         except Exception as ex:
             logger.error(f"Self-eval: {ex}"); return 1.0, False, "", False, False, None
 
+    async def _self_eval_bg(self, query: str, draft: str, request_id: str) -> None:
+        """Fire-and-forget self-eval wrapper. Runs _self_eval purely for
+        telemetry (updates HealthMetrics.last_self_eval_confidence via
+        the helper's existing side effect) and does NOT trigger any
+        revision streaming. Decoupling from respond()'s synchronous path
+        saves 2-3s/turn on substantive responses; the revision feature
+        is intentionally dropped here (it fired ~0/50 turns in samples)
+        and can be reintroduced via the streaming [SYMBION_REVISE]
+        sentinel + client-side replace if needed later.
+        Swallows all exceptions -- this is logging, not load-bearing."""
+        try:
+            score, should_revise, _g, _r, _s, _conf = await self._self_eval(query, draft)
+            if should_revise:
+                # Log-only: surface the score in symbion_system.log so
+                # we can audit later whether the dropped revision would
+                # have been worth keeping. No user-visible effect.
+                logger.warning(f"[req={request_id}] self-eval would-have-revised: score={score:.2f}")
+        except Exception as ex:
+            logger.error(f"[req={request_id}] self-eval bg: {ex}")
+
     # -- Knowledge gap check ------------------------------
 
     async def _check_knowledge_gaps(self, query: str, response: str, session: str):
@@ -5650,34 +5670,18 @@ class SYMBION:
                         if stale_draft:
                             draft = stale_draft; revised = True; quality_score = 0.9; stale_refresh = True
 
-            # Self-eval + revision (skip if stale-draft already revised)
+            # Self-eval -- 2026-05-19: moved to fire-and-forget.
+            # The synchronous version awaited a Haiku call (+2-3s per
+            # turn) and could stream a revision when the score was low.
+            # In practice revisions fired ~0/50 turns sampled, so the
+            # cost wasn't worth the user-visible latency. The bg task
+            # below runs the same _self_eval for telemetry (updates
+            # health.last_self_eval_confidence) but does NOT stream a
+            # revision; quality_score / revised remain at their defaults
+            # (1.0 / False) on the synchronous path, so the event log
+            # records "no eval ran this turn" rather than a stale value.
             if not refusal and not task_failed and not revised:
-                (quality_score, should_revise, guidance,
-                 recklessness_risk, scope_exceeded,
-                 self_eval_confidence) = await self._self_eval(text, draft)
-
-                if should_revise:
-                    extra = ""
-                    if recklessness_risk: extra += " Be more precise and bounded."
-                    if scope_exceeded:    extra += " Answer exactly what was asked."
-                    rev_msgs = messages + [
-                        {"role":"assistant","content":draft},
-                        {"role":"system","content":(
-                            f"Draft scored {quality_score:.2f}. Issues: {guidance}.{extra} "
-                            "Rewrite -- more genuine, direct, true to your voice. "
-                            "Don't mention you're revising.")}]
-                    rev_draft = ""; signalled = False
-                    try:
-                        async for tok in resp_client.stream(resp_model, rev_msgs, self.cfg):
-                            rev_draft += tok
-                            if not signalled:
-                                if token_callback: await token_callback("\n\n[SYMBION_REVISE]")
-                                signalled = True
-                            if token_callback: await token_callback(tok)
-                    except Exception as ex: logger.error(f"[req={request_id}] Revision: {ex}")
-                    if rev_draft:
-                        draft = rev_draft; revised = True
-                    quality_score = 0.9
+                asyncio.create_task(self._self_eval_bg(text, draft, request_id))
 
         else:
             if refusal:
