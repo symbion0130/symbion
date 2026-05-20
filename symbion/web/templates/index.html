@@ -124,7 +124,11 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 .thinking-block{
   background:var(--thinking);border:1px solid var(--thinking-border);
   border-radius:10px;padding:.7rem .9rem;
-  font-size:.85rem;color:var(--text);opacity:.85;font-style:italic;line-height:1.55;
+  /* Thinking text stays slightly below .msg-body (1.05rem) so the
+     hierarchy reads -- response text is the focus, thinking trace is
+     supporting context. Italic + 85% opacity reinforce the secondary
+     status without making it hard to read. */
+  font-size:.95rem;color:var(--text);opacity:.85;font-style:italic;line-height:1.55;
 }
 .thinking-label{
   font-size:.65rem;color:#a89c80;font-style:normal;font-weight:700;
