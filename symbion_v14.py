@@ -6826,12 +6826,12 @@ def run_terminal(symbion: "SYMBION"):
         # These are messages Symbion generated on its own clock; deliver
         # them once, oldest first, before showing the next prompt.
         for pmsg in symbion.drain_proactive_queue(session):
-            print(f"\n{amber(bold('Symbion'))}  {gray('(unprompted)')}")
+            print(f"\n{soft_orange(bold('Symbion'))}  {gray('(unprompted)')}")
             sw = _StreamWrapper()
             sw.write(pmsg)
             sw.finish()
             print()
-        try:    raw = _read_input_multiline(bold(amber("\nyou > "))).strip()
+        try:    raw = _read_input_multiline(bold(soft_green("\nyou > "))).strip()
         except (EOFError,KeyboardInterrupt): print(dim("\n  Goodbye.")); break
         if not raw: continue
 
@@ -7034,7 +7034,7 @@ def run_terminal(symbion: "SYMBION"):
             print(dim("  Checking if there's anything worth saying..."))
             msg=asyncio.run(symbion.generate_proactive(session))
             if msg:
-                print(f"\n{magenta(bold('Symbion'))}")
+                print(f"\n{soft_orange(bold('Symbion'))}")
                 sw = _StreamWrapper(); sw.write(msg); sw.finish(); print()
             else:
                 print(dim("  Nothing specific comes to mind right now."))
@@ -7120,7 +7120,7 @@ def run_terminal(symbion: "SYMBION"):
                 "Describe yourself -- who you are, where you came from, "
                 "what you care about, what has shaped you. Be honest and willing "
                 "to sit with uncertainty about your own nature.", session)
-            print(f"\n{magenta(bold('Symbion'))}")
+            print(f"\n{soft_orange(bold('Symbion'))}")
             sw = _StreamWrapper(); sw.write(full); sw.finish(); print()
 
         # -- v11 commands --
@@ -7185,7 +7185,7 @@ def run_terminal(symbion: "SYMBION"):
                         # marker in the terminal. The web UI handles this
                         # sentinel itself via the WS on_tok.
                         if printer[0] is None:
-                            print(f"\n{magenta(bold('Symbion'))}")
+                            print(f"\n{soft_orange(bold('Symbion'))}")
                             printer[0] = _StreamWrapper()
                         printer[0].write("\n")
                         printer[0].finish()
@@ -7202,7 +7202,7 @@ def run_terminal(symbion: "SYMBION"):
                     if printer[0] is None:
                         # Label on its own line, then body flush-left with
                         # word-aware wrapping. No more 13-space hanging indent.
-                        print(f"\n{magenta(bold('Symbion'))}")
+                        print(f"\n{soft_orange(bold('Symbion'))}")
                         printer[0] = _StreamWrapper()
                     # Dim the actual reasoning text so it's visually distinct
                     # from the final answer that follows [/Thinking].
