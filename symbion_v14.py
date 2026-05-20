@@ -3054,6 +3054,14 @@ class EmbeddingClient:
                 r = await c.post(self._url, json={
                     "model": self.cfg.embedding_model,
                     "prompt": text,
+                    # Tell Ollama to keep the embedding model resident
+                    # for 1h after each call. Default is 5min, which is
+                    # short enough that a conversational gap unloads the
+                    # model and the next embed pays a ~5s cold-load --
+                    # which becomes the dominant component of pre-gen
+                    # latency for short benign queries that otherwise
+                    # would be on the skip-judge fast path.
+                    "keep_alive": "1h",
                 })
                 if r.status_code != 200:
                     logger.warning(f"Embed {r.status_code}: {r.text[:200]}")
