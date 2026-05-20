@@ -157,17 +157,16 @@ footer{
   display:flex;gap:.5rem;align-items:flex-end;
 }
 #inp{
-  /* Composer is now genuinely large -- the conversational input is the
-     primary affordance on the page so it gets visual weight to match.
-     1.2rem (~19px) font, ~1.2rem padding, min-height 72px so the empty
-     state looks intentional rather than cramped. max-height 280 so a
-     multi-paragraph draft breathes before scrolling kicks in. */
+  /* Goldilocks-tuned composer: large enough to read as the page's
+     primary action, not so large it dominates the chat. ~1.1rem font,
+     ~1.05rem padding, min-height 64 -- settled here after two prior
+     iterations (1.05rem felt small, 1.2rem felt big). */
   flex:1;background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);
-  padding:1.15rem 1.35rem;
-  color:var(--text);font-size:1.2rem;font-family:inherit;
+  padding:1.05rem 1.25rem;
+  color:var(--text);font-size:1.1rem;font-family:inherit;
   resize:none;outline:none;
-  min-height:72px;max-height:280px;
+  min-height:64px;max-height:240px;
   transition:border-color .15s,background .15s;
   line-height:1.55;
 }
@@ -183,14 +182,14 @@ footer{
 .icon-btn{
   background:transparent;color:var(--muted);
   border:1px solid var(--border);
-  font-size:1.2rem;width:64px;height:64px;
+  font-size:1.15rem;width:56px;height:56px;
   display:flex;align-items:center;justify-content:center;
 }
 .icon-btn.active{color:var(--sym);border-color:var(--sym);background:var(--sym-soft)}
 .send-btn{
   background:var(--accent);color:var(--text);
-  padding:0 1.7rem;height:64px;
-  font-size:1.05rem;font-weight:700;letter-spacing:.02em;
+  padding:0 1.55rem;height:56px;
+  font-size:1rem;font-weight:700;letter-spacing:.02em;
 }
 .send-btn:disabled{opacity:.35;cursor:not-allowed}
 
@@ -254,11 +253,11 @@ footer{
   footer{padding:.6rem .65rem;padding-bottom:max(.6rem,env(safe-area-inset-bottom))}
   .composer{gap:.45rem}
   /* iOS auto-zooms inputs whose font-size is below 16px on focus.
-     Stay >=16px AND give the composer real presence on mobile -- it's
-     the primary action on the page. */
-  #inp{font-size:18px;padding:1rem 1.15rem;min-height:60px}
-  .icon-btn{width:58px;height:58px;font-size:1.15rem}
-  .send-btn{padding:0 1.3rem;height:58px;font-size:1rem}
+     17px keeps us comfortably above that line while pulling back from
+     the larger 18px feel of the prior round. */
+  #inp{font-size:17px;padding:.9rem 1.05rem;min-height:54px}
+  .icon-btn{width:54px;height:54px;font-size:1.1rem}
+  .send-btn{padding:0 1.2rem;height:54px;font-size:.95rem}
   /* Bump the per-thumb close-X to a finger-friendly size on mobile. */
   .attach-thumb .x{width:24px;height:24px;font-size:.85rem;top:3px;right:3px}
   .conn-banner{font-size:.75rem;padding:.4rem .8rem}
