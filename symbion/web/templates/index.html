@@ -157,19 +157,19 @@ footer{
   display:flex;gap:.5rem;align-items:flex-end;
 }
 #inp{
-  /* Bigger composer (2026-05-19) -- the prior 1rem/.7rem/140px felt
-     cramped on both desktop and mobile. Now 1.05rem/.95rem-1.15rem
-     padding, min-height set so the empty input has the same vertical
-     weight as the buttons next to it, max-height bumped so multi-line
-     drafts breathe before they start scrolling internally. */
+  /* Composer is now genuinely large -- the conversational input is the
+     primary affordance on the page so it gets visual weight to match.
+     1.2rem (~19px) font, ~1.2rem padding, min-height 72px so the empty
+     state looks intentional rather than cramped. max-height 280 so a
+     multi-paragraph draft breathes before scrolling kicks in. */
   flex:1;background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);
-  padding:.95rem 1.15rem;
-  color:var(--text);font-size:1.05rem;font-family:inherit;
+  padding:1.15rem 1.35rem;
+  color:var(--text);font-size:1.2rem;font-family:inherit;
   resize:none;outline:none;
-  min-height:52px;max-height:200px;
+  min-height:72px;max-height:280px;
   transition:border-color .15s,background .15s;
-  line-height:1.5;
+  line-height:1.55;
 }
 #inp::placeholder{color:var(--muted)}
 #inp:focus{border-color:var(--accent);background:var(--surface-2)}
@@ -183,14 +183,14 @@ footer{
 .icon-btn{
   background:transparent;color:var(--muted);
   border:1px solid var(--border);
-  font-size:1.1rem;width:52px;height:52px;
+  font-size:1.2rem;width:64px;height:64px;
   display:flex;align-items:center;justify-content:center;
 }
 .icon-btn.active{color:var(--sym);border-color:var(--sym);background:var(--sym-soft)}
 .send-btn{
   background:var(--accent);color:var(--text);
-  padding:0 1.4rem;height:52px;
-  font-size:1rem;font-weight:700;letter-spacing:.02em;
+  padding:0 1.7rem;height:64px;
+  font-size:1.05rem;font-weight:700;letter-spacing:.02em;
 }
 .send-btn:disabled{opacity:.35;cursor:not-allowed}
 
@@ -254,10 +254,11 @@ footer{
   footer{padding:.6rem .65rem;padding-bottom:max(.6rem,env(safe-area-inset-bottom))}
   .composer{gap:.45rem}
   /* iOS auto-zooms inputs whose font-size is below 16px on focus.
-     Keep at 17px to feel bigger AND stay auto-zoom-safe. */
-  #inp{font-size:17px;padding:.8rem .95rem;min-height:50px}
-  .icon-btn{width:50px;height:50px;font-size:1.05rem}
-  .send-btn{padding:0 1.1rem;height:50px;font-size:.95rem}
+     Stay >=16px AND give the composer real presence on mobile -- it's
+     the primary action on the page. */
+  #inp{font-size:18px;padding:1rem 1.15rem;min-height:60px}
+  .icon-btn{width:58px;height:58px;font-size:1.15rem}
+  .send-btn{padding:0 1.3rem;height:58px;font-size:1rem}
   /* Bump the per-thumb close-X to a finger-friendly size on mobile. */
   .attach-thumb .x{width:24px;height:24px;font-size:.85rem;top:3px;right:3px}
   .conn-banner{font-size:.75rem;padding:.4rem .8rem}
