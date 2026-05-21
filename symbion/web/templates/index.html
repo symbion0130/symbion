@@ -90,7 +90,12 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat{
   flex:1;overflow-y:auto;overflow-x:hidden;
   padding:1.5rem 1rem 1rem;
-  scroll-behavior:smooth;
+  /* scroll-behavior left at auto (browser default). With smooth, each
+     streaming-token `scrollTop = scrollHeight` kicks off an animation,
+     and reads of scrollTop during the animation return the interpolated
+     mid-position. nearBottom() then sees a stale scrollTop, decides
+     the user has scrolled up, and stops auto-following the stream.
+     Instant scrolls keep the math consistent. */
 }
 #chat-inner{
   max-width:1200px;margin:0 auto;
@@ -1009,8 +1014,21 @@ function startFreshSession(){
 }
 sidebarNew.onclick = startFreshSession;
 
-function nearBottom(){return chat.scrollHeight-chat.scrollTop-chat.clientHeight<80}
-function scrollToBottom(force){if(force||nearBottom())chat.scrollTop=chat.scrollHeight}
+// 220px threshold gives token streams enough slack to keep auto-
+// following even when chunks come in larger than one line. If you
+// scroll explicitly more than ~3 visible lines up, you opt out of
+// follow-mode and Symbion stops yanking you back. Anything less
+// generous than this and a single paragraph-sized chunk breaks the
+// loop on the very first append.
+function nearBottom(){return chat.scrollHeight-chat.scrollTop-chat.clientHeight<220}
+function scrollToBottom(force){
+  if(force||nearBottom()){
+    // behavior:'auto' overrides any CSS scroll-behavior and keeps each
+    // scroll instant — required because reading scrollTop mid-animation
+    // returns a lagging value that confuses the next nearBottom() call.
+    chat.scrollTo({top: chat.scrollHeight, behavior: 'auto'});
+  }
+}
 
 thinkBtn.onclick=()=>{
   showReasoning=!showReasoning;
