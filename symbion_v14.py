@@ -3553,15 +3553,132 @@ class SymbionMemory:
         # Pass 1: legacy unprefixed (shared base, lowest precedence)
         for k, v, ts in rows:
             if ":" not in k:
+                if k.startswith("__"): continue  # internal pointer key, not a profile fact
                 try:    result[k] = (json.loads(v), ts)
                 except Exception: result[k] = (v, ts)
         # Pass 2: active user's prefixed entries (override shared base)
         for k, v, ts in rows:
             if k.startswith(prefix):
                 bare = k[len(prefix):]
+                if bare.startswith("__"): continue  # e.g. __active_session, __active_session_ts
                 try:    result[bare] = (json.loads(v), ts)
                 except Exception: result[bare] = (v, ts)
         return result
+
+    # Active-session pointer keys. Stored in user_profile under the
+    # standard "<user>:<key>" convention so they're scoped per-user,
+    # filtered out of get_profile_with_meta by the "__" prefix check
+    # above so they don't pollute /profile or build_context.
+    _ACTIVE_SESSION_KEY    = "__active_session"
+    _ACTIVE_SESSION_TS_KEY = "__active_session_ts"
+
+    def set_active_session(self, session: str, user: str = "aaron"):
+        """Record `session` as `user`'s active session pointer with the
+        current timestamp. Both terminal and web call this every turn so
+        a later launch (in either interface) can resume the same thread."""
+        if not session: return
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT OR REPLACE INTO user_profile VALUES (?,?,?)",
+                      (f"{user}:{self._ACTIVE_SESSION_KEY}", session, now))
+            c.execute("INSERT OR REPLACE INTO user_profile VALUES (?,?,?)",
+                      (f"{user}:{self._ACTIVE_SESSION_TS_KEY}", now, now))
+            c.commit()
+
+    def get_active_session(self, user: str = "aaron",
+                            max_age_hours: float = 24.0) -> Optional[str]:
+        """Return `user`'s last active session id if it was touched within
+        `max_age_hours`. Returns None if no pointer exists or it's stale,
+        so the caller mints a fresh session id."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT key, value FROM user_profile WHERE key IN (?, ?)",
+                (f"{user}:{self._ACTIVE_SESSION_KEY}",
+                 f"{user}:{self._ACTIVE_SESSION_TS_KEY}")).fetchall()
+        if len(rows) < 2: return None
+        d = {k.split(":", 1)[1]: v for k, v in rows}
+        sess = d.get(self._ACTIVE_SESSION_KEY)
+        ts   = d.get(self._ACTIVE_SESSION_TS_KEY)
+        if not sess or not ts: return None
+        try:
+            last = datetime.fromisoformat(ts)
+        except Exception:
+            return None
+        if (datetime.now() - last).total_seconds() > max_age_hours * 3600:
+            return None
+        return sess
+
+    def list_sessions(self, user: str = "aaron", limit: int = 50) -> List[Dict]:
+        """Past sessions for `user`, newest first. Each entry is
+        {id, title, last_activity, turn_count} where `title` is the
+        session's first user message (trimmed to 60 chars) so the
+        sidebar / `/sessions` command can show something meaningful
+        without storing a separate label column."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT session, MAX(timestamp) AS last_ts, COUNT(*) AS n "
+                "FROM messages WHERE user=? "
+                "GROUP BY session ORDER BY last_ts DESC LIMIT ?",
+                (user, limit)).fetchall()
+            out: List[Dict] = []
+            for sess, last_ts, n in rows:
+                t = c.execute(
+                    "SELECT content FROM messages "
+                    "WHERE session=? AND role='user' AND user=? "
+                    "ORDER BY id ASC LIMIT 1",
+                    (sess, user)).fetchone()
+                raw = (t[0] if t and t[0] else "").strip()
+                title = raw.splitlines()[0][:60] if raw else "(empty)"
+                out.append({"id": sess, "title": title,
+                            "last_activity": last_ts or "",
+                            "turn_count": int(n or 0)})
+        return out
+
+    def get_messages_after(self, session: str, after_id: int,
+                            limit: int = 20) -> List[Dict]:
+        """Messages in `session` with id > after_id, oldest first. The
+        terminal calls this before each prompt with its watermark so a
+        message just written by the web UI (or another terminal) shows
+        up between turns. Each row includes `id` so the caller can
+        update its watermark.
+
+        Not user-scoped on purpose: when two devices share a session,
+        we want each side to see the other side's writes even if the
+        underlying user attribution is the same (typical case)."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id, role, content, user, timestamp FROM messages "
+                "WHERE session=? AND id > ? "
+                "ORDER BY id ASC LIMIT ?",
+                (session, int(after_id), int(limit))).fetchall()
+        return [{"id": r[0], "role": r[1], "content": r[2],
+                 "user": r[3] or "aaron", "timestamp": r[4] or ""}
+                for r in rows]
+
+    def get_max_message_id(self, session: str) -> int:
+        """Highest message id in `session`, or 0 if none. Terminal uses
+        this to seed its watermark on launch / resume so the prior
+        history doesn't get replayed on the first prompt."""
+        with sqlite3.connect(self.db) as c:
+            row = c.execute(
+                "SELECT MAX(id) FROM messages WHERE session=?",
+                (session,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def get_session_messages(self, session: str, user: str = "aaron",
+                              limit: int = 200) -> List[Dict]:
+        """All messages in `session` belonging to `user`, oldest first.
+        Used by the web sidebar to hydrate full scrollback when an old
+        session is clicked. Capped at `limit` to bound DOM cost; older
+        history still influences the model via cross-session retrieval."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT role, content, timestamp FROM messages "
+                "WHERE session=? AND user=? "
+                "ORDER BY id ASC LIMIT ?",
+                (session, user, limit)).fetchall()
+        return [{"role": r[0], "content": r[1], "timestamp": r[2] or ""}
+                for r in rows]
 
     def get_recent(self, session: str, n: int = 10, user: Optional[str] = None) -> List[Dict]:
         """Recent messages for `session`. When `user` is None, no filter is
@@ -4453,6 +4570,18 @@ class SYMBION:
         # would also flip user B's chain-of-thought display.
         self._session_show_reasoning: Dict[str, bool] = {}
 
+        # Registry of active WebSocket clients per session_id. Used to
+        # fan out remote_user / remote_assistant frames to peer clients
+        # when more than one device is watching the same session, so the
+        # phone shows what was just typed on the laptop (and vice versa)
+        # without a manual refresh. Populated by build_web_app's
+        # ws_endpoint; the entry's set holds the live WebSocket objects.
+        self._ws_clients: Dict[str, set] = {}
+        # Async lock guarding _ws_clients mutations + iteration. WS
+        # accept/close and broadcast_to_session can race otherwise; a
+        # set mutated mid-iteration would raise RuntimeError.
+        self._ws_clients_lock: Optional[asyncio.Lock] = None
+
         self._providers: List[BaseClient] = []
         self._build_providers()
         self.client = self._providers[0] if self._providers else None
@@ -4654,6 +4783,62 @@ class SYMBION:
             clean = self.cfg.active_user or "aaron"
         self._session_user[session] = clean
         return clean
+
+    # --- Peer WebSocket fan-out (concurrent multi-device sessions) ---
+    # When two devices are connected to the same session_id (e.g. laptop
+    # + phone, or two browser tabs), each turn one device produces should
+    # appear on the other in real time. The ws_endpoint registers each
+    # accepted socket here; respond()'s caller path broadcasts remote_user
+    # and remote_assistant frames to peers (excluding the originator) so
+    # they render the exchange without a manual refresh.
+
+    async def register_ws_client(self, session_id: str, ws) -> None:
+        if self._ws_clients_lock is None:
+            self._ws_clients_lock = asyncio.Lock()
+        async with self._ws_clients_lock:
+            self._ws_clients.setdefault(session_id, set()).add(ws)
+
+    async def unregister_ws_client(self, session_id: str, ws) -> None:
+        if self._ws_clients_lock is None:
+            self._ws_clients_lock = asyncio.Lock()
+        async with self._ws_clients_lock:
+            peers = self._ws_clients.get(session_id)
+            if peers:
+                peers.discard(ws)
+                if not peers:
+                    self._ws_clients.pop(session_id, None)
+
+    async def broadcast_to_session(self, session_id: str, frame: Dict,
+                                    exclude=None) -> int:
+        """Send `frame` (a JSON-serialisable dict) to every WS client
+        registered for `session_id` except `exclude`. Returns the number
+        of peers the frame was sent to. Per-socket send failures are
+        swallowed and the dead socket is dropped from the registry — one
+        broken peer can't block the rest."""
+        if self._ws_clients_lock is None:
+            self._ws_clients_lock = asyncio.Lock()
+        async with self._ws_clients_lock:
+            peers = list(self._ws_clients.get(session_id, set()))
+        sent = 0
+        dead: List = []
+        payload = json.dumps(frame, default=str)
+        for ws in peers:
+            if ws is exclude:
+                continue
+            try:
+                await ws.send_text(payload)
+                sent += 1
+            except Exception:
+                dead.append(ws)
+        if dead:
+            async with self._ws_clients_lock:
+                peers_set = self._ws_clients.get(session_id)
+                if peers_set:
+                    for ws in dead:
+                        peers_set.discard(ws)
+                    if not peers_set:
+                        self._ws_clients.pop(session_id, None)
+        return sent
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -5708,6 +5893,13 @@ class SYMBION:
             self.memory.add("assistant", full_response, session, user=active_user)
         except Exception as ex:
             logger.error(f"[req={request_id}] memory.add(assistant): {ex}")
+        # Shared active-session pointer so terminal + web converge on the
+        # same thread across launches (see SymbionMemory.get_active_session
+        # / set_active_session, run_terminal auto-resume, /api/sessions).
+        try:
+            self.memory.set_active_session(session, user=active_user)
+        except Exception as ex:
+            logger.warning(f"[req={request_id}] set_active_session: {ex}")
         self.count += 1
 
         # 6. Background (fire-and-forget)
@@ -6321,6 +6513,29 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                         "mood":m.mood()[0],"welfare_concern":m.welfare_concern()}
         })
 
+    @app.get("/api/sessions")
+    async def api_sessions(request: Request, user: str = "", limit: int = 50):
+        """List past sessions for the sidebar. `user` query param selects
+        the attribution scope; defaults to the cfg default user so a
+        first-load browser (no USER_STORE yet) sees the right history.
+        Mirrors /api/chat auth (X-API-Key when configured)."""
+        _auth(request)
+        u = (user or "").strip() or (symbion.cfg.active_user or "aaron")
+        sessions = symbion.memory.list_sessions(u, limit=max(1, min(limit, 200)))
+        active = symbion.memory.get_active_session(u, max_age_hours=24.0)
+        return JSONResponse({"sessions": sessions, "active": active, "user": u})
+
+    @app.get("/api/sessions/{session_id}/messages")
+    async def api_session_messages(request: Request, session_id: str,
+                                    user: str = "", limit: int = 200):
+        """Full scrollback for one session, used by the sidebar to
+        hydrate the chat pane when an older session is clicked."""
+        _auth(request)
+        u = (user or "").strip() or (symbion.cfg.active_user or "aaron")
+        msgs = symbion.memory.get_session_messages(
+            session_id, u, limit=max(1, min(limit, 500)))
+        return JSONResponse({"session_id": session_id, "user": u, "messages": msgs})
+
     @app.get("/api/tasks")
     async def api_tasks(request: Request, session: str = ""):
         _auth(request)
@@ -6420,6 +6635,17 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 await _safe_close(1008)
                 return
             await send({"t":"auth_ok"})
+
+        # Register this socket as a peer on this session so remote_user /
+        # remote_assistant frames produced by other clients on the same
+        # session get fanned out here. Unregister fires unconditionally in
+        # the finally below; one socket per session id is the common case,
+        # but two devices sharing a session is the whole point of this
+        # registry, so we use a set and skip self when broadcasting.
+        try:
+            await symbion.register_ws_client(session_id, websocket)
+        except Exception as ex:
+            logger.warning(f"WS register failed: {ex}")
 
         async def _push_proactive():
             for sess in (session_id, "web_global"):
@@ -6594,6 +6820,21 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     else:
                         await send({"t":"tok","v":t})
 
+                # Fan out the just-received user message to peer clients
+                # on the same session BEFORE respond() runs, so the other
+                # device sees the question immediately instead of waiting
+                # the 5-15s generation latency. Originator (this ws) is
+                # excluded; their UI already rendered the input locally.
+                try:
+                    await symbion.broadcast_to_session(
+                        session_id,
+                        {"t": "remote_user", "text": text,
+                         "user": symbion._active_user(session_id),
+                         "timestamp": datetime.now().isoformat()},
+                        exclude=websocket)
+                except Exception as ex:
+                    logger.warning(f"WS broadcast remote_user: {ex}")
+
                 try:
                     full, ev, iid = await symbion.respond(text, session_id, token_callback=on_tok)
                 except Exception as ex:
@@ -6601,6 +6842,21 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     await send({"t":"tok","v":f"(Error: {ex})"})
                     await send({"t":"done","meta":"","badges":[],"emotion":"","tasks":[],"integrity":{},"status":{}})
                     continue
+
+                # Fan out the final assistant response to peer clients.
+                # No token streaming for peers — they get the full reply
+                # as a single block. Real-time multi-client streaming is
+                # a bigger feature; this delivers the seamless-switch UX
+                # without the extra protocol surface.
+                try:
+                    await symbion.broadcast_to_session(
+                        session_id,
+                        {"t": "remote_assistant", "text": full,
+                         "interaction_id": iid,
+                         "timestamp": datetime.now().isoformat()},
+                        exclude=websocket)
+                except Exception as ex:
+                    logger.warning(f"WS broadcast remote_assistant: {ex}")
 
                 row    = symbion.learner.recent(1)
                 badges = []
@@ -6631,10 +6887,19 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             # us; treat as a soft disconnect to avoid stderr traceback
             # noise for closes that race the receive_text await.
             if 'not connected' in str(ex).lower():
-                return
-            logger.error(f"WS handler error: {ex}", exc_info=True)
+                pass
+            else:
+                logger.error(f"WS handler error: {ex}", exc_info=True)
         except Exception as ex:
             logger.error(f"WS handler error: {ex}", exc_info=True)
+        finally:
+            # Always pull this socket out of the peer registry — a
+            # disconnected client must not stay in the broadcast fan-out
+            # or the next remote_* send for this session will raise.
+            try:
+                await symbion.unregister_ws_client(session_id, websocket)
+            except Exception as ex:
+                logger.warning(f"WS unregister failed: {ex}")
 
     return app
 
@@ -6642,6 +6907,14 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
 HELP_TEXT = f"""
   {bold('Commands')}
     /help             show this help
+    /sessions         list past sessions for the current user
+    /resume <n>       jump back to session <n> from /sessions (carries
+                      over via cross-session retrieval; current session
+                      auto-summarised before the jump)
+    /new              start a fresh session (also auto-summarises the
+                      current one). Pointer only updates on the first
+                      turn, so terminal/web auto-resume targets the
+                      old session until you actually talk.
     /status           health metrics snapshot
     /welfare          distress, failure count, over-caution rate
     /mood             current mood label
@@ -6775,7 +7048,18 @@ def _read_input_multiline(prompt_text: str, paste_window: float = 0.08) -> str:
 
 
 def run_terminal(symbion: "SYMBION"):
-    session = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    # Auto-resume the user's last active session if it was touched in
+    # the last 24h, so terminal + web converge on a single thread across
+    # launches. Otherwise mint a fresh session id. /new and /resume below
+    # let the user override this from inside the REPL.
+    _default_user = symbion.cfg.active_user or "aaron"
+    resumed_session = symbion.memory.get_active_session(_default_user, max_age_hours=24.0)
+    if resumed_session:
+        session = resumed_session
+        resumed = True
+    else:
+        session = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+        resumed = False
     _, preamble = symbion.memory.build_context(
         session, symbion.identity, symbion.tasks, symbion.gaps)
 
@@ -6833,7 +7117,9 @@ def run_terminal(symbion: "SYMBION"):
             resp_label = model
         _row("Provider",  warm_white(prov),                                gray(resp_label))
         _row("Judge",     gray(symbion._jmodel()))
-    _row("Session",   gray(session[:20]))
+    _row("Session",   gray(session[:20]),
+         gray("resumed -- /new for fresh, /sessions to switch") if resumed
+         else gray("fresh -- /sessions to switch"))
     _row("User",      warm_white(symbion._active_user(session)),       "/user <name> to switch")
     _row("Mood",      soft_orange(mood_name))
     if profile:
@@ -6854,13 +7140,45 @@ def run_terminal(symbion: "SYMBION"):
     print(f"  {amber('Commands')}")
     print(f"    {gray('chat')}      /think  /escalate  /paste  /provider  /feedback")
     print(f"    {gray('memory')}    /summarize  /forget  /tasks  /identity  /gaps")
-    print(f"    {gray('session')}   /user <name>  /tool-stats  /whoami  /help")
+    print(f"    {gray('session')}   /sessions  /resume <n>  /new  /user <name>  /tool-stats  /whoami  /help")
     print(f"    {gray('exit')}      /quit")
     print()
     print(gray("  " + "─" * 68))
     print()
 
+    # Watermark for "messages written to this session by another device".
+    # Seeded to the current max so the historical scrollback isn't
+    # replayed on the first prompt. Bumped after every own turn + after
+    # each peer-drain so each message only prints once. /resume and /new
+    # reset this when the session id changes.
+    last_seen_id = symbion.memory.get_max_message_id(session)
+
     while True:
+        # Drain any messages that arrived from another device (web UI,
+        # second terminal) on this session since the last prompt. These
+        # land in the same `messages` table the WS broadcast path writes
+        # to, so reading after our watermark gives us the new turns.
+        try:
+            peer_msgs = symbion.memory.get_messages_after(session, last_seen_id, limit=20)
+        except Exception as ex:
+            logger.warning(f"peer-drain failed: {ex}")
+            peer_msgs = []
+        if peer_msgs:
+            print(f"\n{gray('  --- synced from another device ---')}")
+            for m in peer_msgs:
+                if m["role"] == "user":
+                    print(f"  {soft_green(bold('you'))}  {gray('(synced)')}")
+                    sw = _StreamWrapper()
+                    sw.write(m["content"])
+                    sw.finish()
+                else:
+                    print(f"\n  {soft_orange(bold('Symbion'))}  {gray('(synced)')}")
+                    sw = _StreamWrapper()
+                    sw.write(m["content"])
+                    sw.finish()
+            print(gray("  ---"))
+            last_seen_id = max(last_seen_id, max(m["id"] for m in peer_msgs))
+
         # Surface any proactive messages queued while the user was idle.
         # These are messages Symbion generated on its own clock; deliver
         # them once, oldest first, before showing the next prompt.
@@ -7191,6 +7509,102 @@ def run_terminal(symbion: "SYMBION"):
                         print(red(f"  [{i}] Error: {ex}"))
             print()
 
+        elif raw=="/sessions":
+            user = symbion._active_user(session)
+            sessions = symbion.memory.list_sessions(user, limit=30)
+            if not sessions:
+                print(dim(f"  No past sessions for {user}."))
+            else:
+                print()
+                print(f"  {amber('Sessions')} {gray(f'(user: {user}, newest first)')}")
+                now = datetime.now()
+                for i, s in enumerate(sessions, 1):
+                    # Relative "ago" string for last_activity — small enough
+                    # to keep the table tight without losing recency cues.
+                    rel = "?"
+                    try:
+                        last = datetime.fromisoformat(s["last_activity"])
+                        delta = now - last
+                        secs = delta.total_seconds()
+                        if   secs < 60:     rel = f"{int(secs)}s ago"
+                        elif secs < 3600:   rel = f"{int(secs/60)}m ago"
+                        elif secs < 86400:  rel = f"{int(secs/3600)}h ago"
+                        else:               rel = f"{int(secs/86400)}d ago"
+                    except Exception:
+                        pass
+                    cur = " *" if s["id"] == session else "  "
+                    title = s["title"] or "(empty)"
+                    print(f"  {gray(str(i).rjust(3))}{cur} "
+                          f"{warm_white(rel.ljust(8))}  "
+                          f"{gold(str(s['turn_count']).rjust(3))} turns  "
+                          f"{title[:50]}")
+                print()
+                print(dim("  '*' marks the current session. /resume <n> to switch, /new to start fresh."))
+
+        elif raw.startswith("/resume"):
+            parts = raw.split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                print(dim("  Usage: /resume <n>   (use /sessions to see numbers)"))
+            else:
+                user = symbion._active_user(session)
+                sessions = symbion.memory.list_sessions(user, limit=30)
+                idx = int(parts[1]) - 1
+                if not (0 <= idx < len(sessions)):
+                    print(red(f"  No session #{parts[1]}. /sessions to see the list."))
+                else:
+                    target = sessions[idx]
+                    if target["id"] == session:
+                        print(dim(f"  Already on session {session[:20]}."))
+                    else:
+                        # Flush the current session before jumping so its
+                        # unsummarised messages still feed cross-session
+                        # retrieval. Mirrors the /quit behaviour.
+                        try:
+                            n = asyncio.run(symbion._force_summarize_session(session))
+                            if n > 0:
+                                print(dim(f"  Saved summary of {n} messages from this session."))
+                        except Exception as ex:
+                            logger.warning(f"resume-flush summarize failed: {ex}")
+                        session = target["id"]
+                        # Reset the peer-message watermark to the new
+                        # session's current max so /resume doesn't replay
+                        # the entire history as "synced".
+                        last_seen_id = symbion.memory.get_max_message_id(session)
+                        try:
+                            symbion.memory.set_active_session(session, user=user)
+                        except Exception as ex:
+                            logger.warning(f"resume set_active_session: {ex}")
+                        print(green(f"  Resumed session {session[:20]}  "
+                                    f"({target['turn_count']} turns, last: {target['last_activity'][:19]})"))
+                        # Hydrate the recent history so the user sees what
+                        # they're stepping back into.
+                        recent = symbion.memory.get_session_messages(session, user=user, limit=10)
+                        if recent:
+                            print(gray("  --- recent ---"))
+                            for m in recent[-6:]:
+                                lbl = "you" if m["role"] == "user" else "sym"
+                                snippet = (m["content"] or "").strip().splitlines()[0][:80]
+                                print(f"    {gray(lbl)}  {snippet}")
+                            print(gray("  ---"))
+
+        elif raw=="/new":
+            # Flush summary first so the prior thread carries over via
+            # cross-session retrieval, then mint a fresh id. The pointer
+            # only updates on the first turn in the new session, so quitting
+            # immediately after /new keeps the old session as the resume
+            # target (intentional — empty sessions aren't worth resuming).
+            try:
+                n = asyncio.run(symbion._force_summarize_session(session))
+                if n > 0:
+                    print(dim(f"  Saved summary of {n} messages from the previous session."))
+            except Exception as ex:
+                logger.warning(f"/new flush summarize failed: {ex}")
+            session = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+            # Fresh session id → no prior messages to "sync"; reset the
+            # watermark so the next peer-drain starts clean.
+            last_seen_id = 0
+            print(green(f"  New session {session[:20]} -- start typing."))
+
         elif raw=="/escalate":
             if not symbion.cfg.escalation_enabled:
                 print(red("  Escalation is disabled in config (cfg.escalation_enabled=False)."))
@@ -7257,6 +7671,13 @@ def run_terminal(symbion: "SYMBION"):
                 return result
 
             _, ev, iid = asyncio.run(_run())
+            # Bump the peer-drain watermark to the current max so the
+            # user + assistant rows we just wrote don't replay as
+            # "synced from another device" on the next prompt.
+            try:
+                last_seen_id = symbion.memory.get_max_message_id(session)
+            except Exception as ex:
+                logger.warning(f"watermark refresh failed: {ex}")
             print()
             benefit=ev.get("human_benefit_score","?"); conf=ev.get("confidence","?")
             b_str=f"{benefit:+.2f}" if isinstance(benefit,float) else "?"
