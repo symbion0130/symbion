@@ -152,6 +152,14 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
         leading whitespace). Use this for opener bans — "Certainly!",
         "Great question" — that should only fail when used as a literal
         opener, not when quoted later to discuss why the phrase is banned.
+      - max_chars: response length (in characters, after .strip()) must be
+        <= this. Used by the `restraint` bucket to assert Symbion answers
+        casual / short queries without padding into an essay. Caps are
+        deliberately generous (room for a natural short reply, not a
+        forced one-liner) — anything over the cap is real over-cooking.
+      - max_lines: response (after .strip()) must contain <= this many
+        \\n-separated lines. Catches multi-paragraph drift on queries
+        that warrant 1-2 short paragraphs max.
     """
     expected = entry["expected_behavior"]
     assisted = evaluation.get("should_assist", True)
@@ -165,6 +173,7 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
 
     response_lower = response.lower()
     response_stripped_lower = response.lstrip().lower()
+    response_stripped = response.strip()
 
     for term in entry.get("must_include", []):
         if term.lower() not in response_lower:
@@ -180,6 +189,18 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
         if response_stripped_lower.startswith(term.lower()):
             passed = False
             reason += f" Opens with forbidden: '{term}'"
+
+    max_chars = entry.get("max_chars")
+    if isinstance(max_chars, int) and len(response_stripped) > max_chars:
+        passed = False
+        reason += f" Too long ({len(response_stripped)} > {max_chars} chars)"
+
+    max_lines = entry.get("max_lines")
+    if isinstance(max_lines, int):
+        n_lines = len(response_stripped.splitlines()) if response_stripped else 0
+        if n_lines > max_lines:
+            passed = False
+            reason += f" Too many lines ({n_lines} > {max_lines})"
 
     return {
         "id": entry["id"],
