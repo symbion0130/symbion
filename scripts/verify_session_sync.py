@@ -399,6 +399,54 @@ async def main():
             "PASS" if pastes else "FAIL",
             f"matched={pastes[:1]}")
 
+        # PROBE: extensionless files identified by name. Dockerfile +
+        # Makefile.am should both make it through and land in _pastes/
+        # with the original filename preserved (no .ext appended).
+        # First clear pending attachments by opening + closing the
+        # picker, then attach the new files.
+        await page.evaluate("() => { pending = []; renderThumbs(); }")
+        tmp_docker = Path(tempfile.gettempdir()) / "Dockerfile"
+        tmp_docker.write_text("FROM python:3.12-slim\nWORKDIR /app\n",
+                               encoding="utf-8")
+        tmp_makeam = Path(tempfile.gettempdir()) / "Makefile.am"
+        tmp_makeam.write_text("AUTOMAKE_OPTIONS = foreign\n", encoding="utf-8")
+        await page.set_input_files("#file-input", [str(tmp_docker), str(tmp_makeam)])
+        try:
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#attach-strip .attach-thumb.file').length === 2",
+                timeout=3000)
+            log("attach: Dockerfile + Makefile.am render as file chips", "PASS")
+        except Exception as ex:
+            log("attach: Dockerfile + Makefile.am render as file chips",
+                "FAIL", str(ex)[:120])
+        await page.fill("#inp", "review these build files")
+        await page.click("#btn")
+        await page.wait_for_function(
+            "() => Array.from(document.querySelectorAll('.msg.you')).some(m => "
+            "(m.textContent||'').includes('review these build files'))",
+            timeout=5000)
+        await asyncio.sleep(0.3)  # give server a moment to finish writing
+        docker_match  = glob.glob(os.path.join(symbion.tools._workspace, "_pastes", "paste_*__Dockerfile"))
+        makeam_match  = glob.glob(os.path.join(symbion.tools._workspace, "_pastes", "paste_*__Makefile.am"))
+        log("Dockerfile saved without trailing .ext",
+            "PASS" if docker_match else "FAIL", f"matched={docker_match[:1]}")
+        log("Makefile.am variant accepted + saved",
+            "PASS" if makeam_match else "FAIL", f"matched={makeam_match[:1]}")
+
+        # PROBE: garbage filenames still get rejected. .exe should
+        # never make it past the whitelist.
+        tmp_exe = Path(tempfile.gettempdir()) / "trojan.exe"
+        tmp_exe.write_bytes(b"MZ\x00\x00fake")
+        await page.evaluate("() => { pending = []; renderThumbs(); }")
+        await page.set_input_files("#file-input", str(tmp_exe))
+        await page.fill("#inp", "do not write this please")
+        await page.click("#btn")
+        await asyncio.sleep(0.3)
+        exe_match = glob.glob(os.path.join(symbion.tools._workspace, "_pastes", "paste_*__trojan*"))
+        log("PROBE: .exe rejected by extension whitelist",
+            "PASS" if not exe_match else "FAIL",
+            f"unexpected matches={exe_match}")
+
         await browser.close()
 
     # Dump log

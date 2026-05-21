@@ -6840,6 +6840,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                         "sql", "toml", "ini", "conf", "cfg", "env",
                         "log", "out",
                     }
+                    # Build/config files that are identified by FILENAME,
+                    # not extension. Match exactly (Dockerfile) or by
+                    # known prefix (Dockerfile.dev, Makefile.am) — both
+                    # case-insensitive. Saved with the original name
+                    # preserved so read_file sees the same handle.
+                    _ALLOWED_FILE_NAMES = {"dockerfile", "makefile", "gnumakefile"}
                     saved_files: List[str] = []
                     for n, att in enumerate(attachments[:6]):
                         if not isinstance(att, dict):
@@ -6858,27 +6864,50 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                         if len(b64) > _MAX_FILE_B64:
                             logger.warning(f"WS file #{n}: base64 too large ({len(b64)} bytes), skipping")
                             continue
-                        # Pull extension from the client-supplied filename
-                        # rather than the data URL's MIME (often
-                        # application/octet-stream for unrecognised types
-                        # — useless). Lowercase, strip non-alphanum, cap
-                        # length so a hostile client can't smuggle path
-                        # separators or oversized junk.
-                        if "." in name:
-                            base_part, _, ext_part = name.rpartition(".")
+                        # Two paths for accepting a filename:
+                        #   1. By exact name (Dockerfile, Makefile, etc.)
+                        #      — extensionless build files. We preserve
+                        #      the whole filename so read_file picks it
+                        #      up as the same handle.
+                        #   2. By extension whitelist — strip + validate
+                        #      the suffix, sanitise the base separately.
+                        # Pull from the client-supplied filename rather
+                        # than the data URL's MIME (often application/
+                        # octet-stream for unrecognised types — useless).
+                        name_lower = name.lower()
+                        known_no_ext = (
+                            name_lower in _ALLOWED_FILE_NAMES
+                            or any(name_lower.startswith(kn + ".")
+                                   for kn in _ALLOWED_FILE_NAMES)
+                        )
+                        if known_no_ext:
+                            # Preserve the full filename, sanitised. The
+                            # dot is allowed here so Dockerfile.dev /
+                            # Makefile.am round-trip; everything else
+                            # collapses to _.
+                            safe_full = "".join(
+                                c if (c.isalnum() or c in "._-") else "_"
+                                for c in name)[:96].strip("._")
+                            if not safe_full:
+                                safe_full = "attachment"
+                            fname_suffix = safe_full
                         else:
-                            base_part, ext_part = name, ""
-                        ext = "".join(c for c in ext_part.lower() if c.isalnum())[:8]
-                        if ext not in _ALLOWED_FILE_EXTS:
-                            logger.warning(f"WS file #{n}: ext '{ext}' not in whitelist, skipping")
-                            continue
-                        # Sanitise base name (preserve readable chars,
-                        # collapse anything else to _). Falls back to
-                        # 'attachment' for anonymous / fully-stripped names.
-                        safe = "".join(c if (c.isalnum() or c in "_-") else "_"
-                                       for c in base_part)[:64].strip("_")
-                        if not safe:
-                            safe = "attachment"
+                            if "." in name:
+                                base_part, _, ext_part = name.rpartition(".")
+                            else:
+                                base_part, ext_part = name, ""
+                            ext = "".join(c for c in ext_part.lower() if c.isalnum())[:8]
+                            if ext not in _ALLOWED_FILE_EXTS:
+                                logger.warning(f"WS file #{n}: ext '{ext}' not in whitelist, skipping")
+                                continue
+                            # Sanitise base name (preserve readable chars,
+                            # collapse anything else to _). Falls back to
+                            # 'attachment' for anonymous / fully-stripped names.
+                            safe = "".join(c if (c.isalnum() or c in "_-") else "_"
+                                           for c in base_part)[:64].strip("_")
+                            if not safe:
+                                safe = "attachment"
+                            fname_suffix = f"{safe}.{ext}"
                         try:
                             import base64 as _b64
                             try:
@@ -6889,7 +6918,7 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                             if len(raw) > _MAX_FILE_RAW:
                                 continue
                             ts = int(time.time() * 1000)
-                            fname = f"paste_{ts}_{n}__{safe}.{ext}"
+                            fname = f"paste_{ts}_{n}__{fname_suffix}"
                             if paste_dir:
                                 (paste_dir / fname).write_bytes(raw)
                                 saved_files.append(f"_pastes/{fname}")
