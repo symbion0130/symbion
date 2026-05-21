@@ -38,6 +38,18 @@ html,body{
   overscroll-behavior:none;
 }
 body{
+  /* position:fixed anchors the body to the visual viewport corners so
+     iOS Safari can't scroll the page when the keyboard opens or when
+     the user taps the composer near the screen bottom. Without this,
+     focusing the input triggers Safari's "scroll the input into view"
+     reflex — which creates a black gap below the body and shoves the
+     composer toward the top. With body locked, the input is already
+     visible above the keyboard (body bottom = visualViewport bottom),
+     so Safari has nothing to scroll. JS keeps top in sync with
+     visualViewport.offsetTop for the pinch-zoom edge case. */
+  position:fixed;top:0;left:0;right:0;
+}
+body{
   background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
   /* Desktop base bumped from 15 to 16 -- the prior size felt cramped
@@ -90,17 +102,6 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat{
   flex:1;overflow-y:auto;overflow-x:hidden;
   padding:1.5rem 1rem 1rem;
-  /* Bottom padding reserves space for the FIXED footer so the last
-     message can scroll above it rather than getting tucked underneath.
-     --footer-height is set by a ResizeObserver on the footer so multi-
-     line composer + attach previews don't crash the last message into
-     the input. The extra 1.5rem buffer is breathing room on top of
-     the exact footer height — without it the last line sits flush
-     against the composer's top edge, which reads as "cut off" even
-     when math says zero overlap. Fallback (7rem ≈ 112px) is generous
-     enough to cover a composer with attach previews even before the
-     ResizeObserver has had a chance to fire. */
-  padding-bottom:calc(1.5rem + var(--footer-height, 7rem));
   /* overscroll-behavior:contain stops iOS rubber-band from scrolling
      the BODY when the chat is at its top/bottom edge. Without this,
      overscrolling the chat at the top can pull the whole layout up
@@ -196,15 +197,11 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 }
 
 footer{
-  /* FIXED positioning so the composer stays welded to the bottom of
-     the viewport even when the parent flex layout gets confused (iOS
-     URL-bar collapse, PWA mode, in-app webviews, Android keyboard
-     resize). flex:column on the inside still stacks attach-strip
-     above .composer. JS keeps --footer-height in sync with the
-     element's offsetHeight so #chat reserves enough bottom padding
-     not to hide messages behind the input. z-index sits above the
-     header (50) but below modals (1000+). */
-  position:fixed;left:0;right:0;bottom:0;z-index:60;
+  /* Natural flex child at the bottom of body's flex column. body is
+     position:fixed top:0/left:0/right:0 with height = visualViewport,
+     so the footer ends at body bottom = visual viewport bottom = above
+     the iOS keyboard. flex-shrink:0 keeps the composer at its natural
+     height while #chat (flex:1) absorbs any leftover space. */
   padding:.65rem 1rem;
   padding-bottom:max(.65rem,env(safe-area-inset-bottom));
   border-top:1px solid var(--border);
@@ -683,51 +680,49 @@ footer{
 // non-iOS), the CSS fallback chain falls back to 100dvh / 100%.
 if (window.visualViewport) {
   const updateVV = () => {
+    // Height: drives html/body via --viewport-height so the document
+    // is bounded to the visible area when the iOS keyboard opens.
     document.documentElement.style.setProperty(
       '--viewport-height',
       window.visualViewport.height + 'px'
     );
+    // OffsetTop: when the user pinch-zooms or iOS scrolls the visual
+    // viewport, offsetTop becomes non-zero. The position:fixed body
+    // would otherwise stay anchored to layout viewport (0,0) — which
+    // is now off-screen. Translating the body keeps it lined up with
+    // what the user actually sees.
+    document.body.style.top = window.visualViewport.offsetTop + 'px';
   };
   window.visualViewport.addEventListener('resize', updateVV);
   window.visualViewport.addEventListener('scroll',  updateVV);
   updateVV();
 }
 
-// --- Pinned footer height tracker ----------------------------------------
-// Footer is position:fixed so it doesn't scroll with content. #chat
-// needs bottom-padding equal to the footer height so the last message
-// scrolls above it instead of underneath. The composer grows when the
-// user types multi-line, and the attach-strip appears when files are
-// attached — both change footer height. ResizeObserver keeps the CSS
-// custom property in sync; the !window.ResizeObserver fallback uses
-// a window resize listener which catches viewport changes if not the
-// composer/strip growth (acceptable degradation on older browsers).
-//
-// Critically: when the footer GROWS (multi-line typing, attach strip
-// open), the chat's padding-bottom grows too — but the scroll position
-// stays put, so the last message's viewport-y is unchanged while the
-// footer slides up over it. If the user was following the bottom, we
-// re-scroll so the last message stays above the (now-taller) composer.
-(function syncFooterHeight(){
+// --- Catch-up scroll when the footer grows -------------------------------
+// Footer is a natural flex child at the bottom of body. When the
+// composer grows (multi-line typing) or the attach-strip opens, the
+// footer's offsetHeight grows and the flex layout shrinks #chat
+// accordingly. #chat's scrollTop doesn't auto-adjust, so the last
+// message's viewport-y is unchanged while the new (smaller) chat
+// viewport top moves down — putting the last message BELOW the visible
+// area. If the user was following the bottom, re-scroll so they keep
+// seeing the latest line.
+(function trackFooterGrowth(){
   const footer = document.querySelector('footer');
   if(!footer) return;
-  let prevHeight = -1;
+  let prevHeight = footer.offsetHeight;
   const apply = () => {
     const h = footer.offsetHeight;
     if(h === prevHeight) return;
-    const chatEl = document.getElementById('chat');
-    const wasNearBottom = chatEl &&
-      (chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 220);
-    document.documentElement.style.setProperty('--footer-height', h + 'px');
+    const grew = h > prevHeight;
     prevHeight = h;
-    if(wasNearBottom && chatEl){
-      // Reading scrollHeight forces layout, so the new padding-bottom
-      // is reflected before we compute the scroll target. behavior:auto
-      // overrides any CSS scroll-behavior so the catch-up is instant.
+    const chatEl = document.getElementById('chat');
+    if(!chatEl || !grew) return;
+    const nearBottom = (chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight) < 220;
+    if(nearBottom){
       chatEl.scrollTo({top: chatEl.scrollHeight, behavior: 'auto'});
     }
   };
-  apply();
   if(window.ResizeObserver){
     const ro = new ResizeObserver(apply);
     ro.observe(footer);
