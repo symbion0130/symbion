@@ -1330,9 +1330,15 @@ function renderHistory(messages){
 // `pending` carries both kinds, each as {name, dataurl, isImage}. At
 // send time we split into the WS payload's `images` (existing path,
 // data:image/* URLs only) and `attachments` (new, for non-images).
+// Per-attachment caps differ between images and files: images are
+// limited closer to the Anthropic vision API's practical ceiling,
+// files can be much bigger since they're extracted locally by the
+// read_pdf / read_file tools.
 const attachStrip=document.getElementById('attach-strip');
 const composer=document.querySelector('.composer');
-const MAX_ATTACHMENTS=6, MAX_BYTES=10*1024*1024;
+const MAX_ATTACHMENTS  = 6;
+const MAX_IMG_BYTES    = 15 * 1024 * 1024; // 15 MB — vision API caps below this anyway
+const MAX_FILE_BYTES   = 50 * 1024 * 1024; // 50 MB — generous for PDFs, code dumps
 let pending=[];
 
 function renderThumbs(){
@@ -1356,11 +1362,22 @@ function renderThumbs(){
 }
 function addFile(f){
   if(!f)return;
-  if(f.size>MAX_BYTES){console.warn('file too large, skipping:',f.name||'(unnamed)');return}
-  if(pending.length>=MAX_ATTACHMENTS)return;
+  const isImage = !!(f.type && f.type.startsWith('image/'));
+  const cap = isImage ? MAX_IMG_BYTES : MAX_FILE_BYTES;
+  if(f.size > cap){
+    const got = (f.size/(1024*1024)).toFixed(1);
+    const lim = (cap/(1024*1024)).toFixed(0);
+    const what = isImage ? 'image' : 'file';
+    console.warn(`${what} too large (${got} MB > ${lim} MB), skipping:`, f.name||'(unnamed)');
+    addSymStatic(`"${f.name||'attachment'}" is too large (${got} MB). Limit is ${lim} MB for ${what}s.`);
+    return;
+  }
+  if(pending.length>=MAX_ATTACHMENTS){
+    addSymStatic(`Already at the ${MAX_ATTACHMENTS}-attachment limit. Send what you have, then attach more.`);
+    return;
+  }
   const r=new FileReader();
   r.onload=()=>{
-    const isImage = !!(f.type && f.type.startsWith('image/'));
     pending.push({name: f.name||'', dataurl: r.result, isImage});
     renderThumbs();
   };
@@ -1387,10 +1404,11 @@ composer.addEventListener('drop',e=>{
 });
 
 // Attach button: opens the native file picker, then funnels selected
-// images through the same addFile() path used by paste / drag-drop so
-// the WS payload format and MAX_IMAGES / MAX_BYTES caps apply
-// identically. Reset the input value after each pick so re-selecting
-// the SAME file fires `change` again (no-reset would suppress it).
+// files through the same addFile() path used by paste / drag-drop so
+// the WS payload format + MAX_IMG_BYTES / MAX_FILE_BYTES /
+// MAX_ATTACHMENTS caps apply identically. Reset the input value after
+// each pick so re-selecting the SAME file fires `change` again
+// (no-reset would suppress it).
 const attachBtn=document.getElementById('attach-btn');
 const fileInput=document.getElementById('file-input');
 attachBtn.onclick=()=>fileInput.click();

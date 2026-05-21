@@ -6766,9 +6766,16 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     # full data URL is a fast pre-decode gate so a malicious
                     # client can't force a 100MB+ allocation before the size
                     # cap fires.
-                    _MAX_IMG_DATAURL = 15 * 1024 * 1024
-                    _MAX_IMG_B64     = 14 * 1024 * 1024
-                    _MAX_IMG_RAW     = 10 * 1024 * 1024
+                    # Image caps: 15MB decoded is more than the Anthropic
+                    # vision endpoint can use (it caps closer to 5MB
+                    # base64), but accepting the original lets the user
+                    # attach without resizing first — read_image will
+                    # downscale before the API call. data URL / base64
+                    # ceilings are 1.33x + small overhead to bound the
+                    # WS frame at decode time.
+                    _MAX_IMG_DATAURL = 22 * 1024 * 1024
+                    _MAX_IMG_B64     = 20 * 1024 * 1024
+                    _MAX_IMG_RAW     = 15 * 1024 * 1024
                     for n, du in enumerate(images[:6]):  # cap at 6 per turn
                         if not isinstance(du, str) or not du.startswith("data:image/"):
                             continue
@@ -6817,9 +6824,15 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     except Exception as ex:
                         logger.warning(f"WS file: paste dir mkdir failed: {ex}")
                         paste_dir = None
-                    _MAX_FILE_DATAURL = 15 * 1024 * 1024
-                    _MAX_FILE_B64     = 14 * 1024 * 1024
-                    _MAX_FILE_RAW     = 10 * 1024 * 1024
+                    # File caps: bigger than images because PDFs / log
+                    # dumps / large code repos are common at 20-40MB.
+                    # 50MB raw fits in the bumped ws_max_size below
+                    # with headroom for chat text. read_pdf / read_file
+                    # extract locally, so this is purely a memory /
+                    # decode-time concern, not an Anthropic API one.
+                    _MAX_FILE_DATAURL = 70 * 1024 * 1024
+                    _MAX_FILE_B64     = 67 * 1024 * 1024
+                    _MAX_FILE_RAW     = 50 * 1024 * 1024
                     # Whitelist of safe extensions. Everything here is
                     # readable as text/structured-doc via the existing
                     # tool layer (read_file / read_pdf / read_file_chunk).
@@ -8107,12 +8120,15 @@ Examples:
         # ws_max_size caps each individual WebSocket frame at the protocol
         # layer (websockets library), so an oversized frame is rejected
         # before Symbion's handler ever sees it. Default websockets cap
-        # is 1MB, which would break image-attachment frames (each image
-        # data URL can be up to ~15MB). 32MB fits ~2 max-size images
-        # comfortably while bounding memory exposure on adversarial
-        # frames. Multi-large-image use cases that exceed this can split
-        # across multiple frames; the per-image checks inside the handler
-        # still bound individual decoded sizes.
+        # is 1MB, which would break attachment frames. Bumped 32MB -> 80MB
+        # on 2026-05-21 to fit one max-size file attachment (50MB raw ≈
+        # 67MB base64 + small chat text) in a single frame. Multi-
+        # attachment turns that sum past 80MB still fit if individual
+        # items are under their per-item caps; the WS protocol just
+        # rejects the frame, so the user sees a console error. The
+        # per-attachment _MAX_FILE_RAW / _MAX_IMG_RAW checks inside the
+        # handler are the real defense — ws_max_size only bounds total
+        # frame allocation for adversarial peers.
         # Suppress uvicorn's "ERROR: Cancel N running task(s), timeout
         # graceful shutdown exceeded" log line on Ctrl+C. That message
         # fires every time the timeout_graceful_shutdown cap hits —
@@ -8158,7 +8174,7 @@ Examples:
             # reported Ctrl+C 'isn't killing the server' — almost certainly
             # an active iPhone WS connection holding the loop open).
             uvicorn.run(app, host=cfg.web_host, port=cfg.web_port,
-                        log_level="warning", ws_max_size=32 * 1024 * 1024,
+                        log_level="warning", ws_max_size=80 * 1024 * 1024,
                         timeout_graceful_shutdown=3)
         except KeyboardInterrupt:
             # uvicorn re-raises SIGINT after its own cleanup. Catching it

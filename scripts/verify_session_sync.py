@@ -56,8 +56,12 @@ def build_app():
 
 def run_server_in_thread(app, cfg, ready_event):
     import uvicorn
+    # ws_max_size mirrors production (symbion_v14.main's uvicorn.run);
+    # the default 1MB would reject the 12MB upload probe at the
+    # protocol layer before our handler ever sees it.
     config = uvicorn.Config(app, host=cfg.web_host, port=cfg.web_port,
-                            log_level="warning", lifespan="on")
+                            log_level="warning", lifespan="on",
+                            ws_max_size=80 * 1024 * 1024)
     server = uvicorn.Server(config)
 
     async def _runner():
@@ -432,6 +436,52 @@ async def main():
             "PASS" if docker_match else "FAIL", f"matched={docker_match[:1]}")
         log("Makefile.am variant accepted + saved",
             "PASS" if makeam_match else "FAIL", f"matched={makeam_match[:1]}")
+
+        # PROBE: bumped per-attachment size caps (2026-05-21).
+        # The client previously rejected anything over 10MB. Now it
+        # accepts up to 15MB for images, 50MB for files. Verify both
+        # the constants are wired AND a 12MB upload actually lands in
+        # _pastes/ (would have failed under the old cap).
+        caps = await page.evaluate("""() => ({
+            MAX_IMG_BYTES: typeof MAX_IMG_BYTES === 'number' ? MAX_IMG_BYTES : null,
+            MAX_FILE_BYTES: typeof MAX_FILE_BYTES === 'number' ? MAX_FILE_BYTES : null,
+        })""")
+        ok = (caps["MAX_IMG_BYTES"] == 15 * 1024 * 1024
+              and caps["MAX_FILE_BYTES"] == 50 * 1024 * 1024)
+        log("client per-attachment caps bumped to 15MB image / 50MB file",
+            "PASS" if ok else "FAIL", f"caps={caps}")
+
+        tmp_big = Path(tempfile.gettempdir()) / "verify_big.txt"
+        tmp_big.write_bytes(b"verify-payload " * 800_000)  # ~12MB
+        await page.evaluate("() => { pending = []; renderThumbs(); }")
+        await page.set_input_files("#file-input", str(tmp_big))
+        try:
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#attach-strip .attach-thumb.file').length === 1",
+                timeout=3000)
+            log("12MB file accepted (would fail under old 10MB cap)", "PASS")
+        except Exception as ex:
+            log("12MB file accepted (would fail under old 10MB cap)", "FAIL",
+                str(ex)[:120])
+        await page.fill("#inp", "big upload test")
+        await page.click("#btn")
+        # WS frame of ~16MB base64 takes longer to round-trip than the
+        # tiny attachments above. Wait up to 8s for the assistant reply
+        # so we know the server actually processed it.
+        try:
+            await page.wait_for_function(
+                "() => Array.from(document.querySelectorAll('.msg.sym .msg-body')).some(b => "
+                "(b.textContent||'').includes('Got it: big upload test'))",
+                timeout=8000)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        big_match = glob.glob(os.path.join(symbion.tools._workspace,
+                                            "_pastes", "paste_*__verify_big.txt"))
+        ok_size = bool(big_match) and os.path.getsize(big_match[0]) > 10 * 1024 * 1024
+        log("12MB file round-tripped to _pastes/ via WS",
+            "PASS" if ok_size else "FAIL",
+            f"matched={big_match[:1]} size={os.path.getsize(big_match[0]) if big_match else 'n/a'}")
 
         # PROBE: garbage filenames still get rejected. .exe should
         # never make it past the whitelist.
