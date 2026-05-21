@@ -179,7 +179,12 @@ footer{
   padding-bottom:max(.65rem,env(safe-area-inset-bottom));
   border-top:1px solid var(--border);
   background:var(--bg);
-  display:flex;justify-content:center;flex-shrink:0;
+  /* COLUMN so .attach-strip stacks ABOVE .composer (was display:flex row,
+     which made them siblings competing for horizontal space — the
+     attach previews ended up half-width on the left and the Send button
+     got pushed off the right edge). align-items:center keeps both
+     children centered up to their max-width:1200px. */
+  display:flex;flex-direction:column;align-items:center;flex-shrink:0;
 }
 .composer{
   width:100%;max-width:1200px;
