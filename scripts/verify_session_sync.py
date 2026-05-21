@@ -51,7 +51,7 @@ def build_app():
         return full, {"human_benefit_score": 0.5, "confidence": 0.5,
                       "should_assist": True, "flags": []}, 1
     symbion.respond = fake_respond
-    return s.build_web_app(symbion), cfg
+    return s.build_web_app(symbion), cfg, symbion
 
 
 def run_server_in_thread(app, cfg, ready_event):
@@ -78,7 +78,7 @@ def run_server_in_thread(app, cfg, ready_event):
 
 
 async def main():
-    app, cfg = build_app()
+    app, cfg, symbion = build_app()
     base = f"http://{cfg.web_host}:{cfg.web_port}"
     ready = threading.Event()
 
@@ -256,6 +256,54 @@ async def main():
         has_active = api.get("active") and api.get("active") == session_id
         log("PROBE: /api/sessions returns active pointer", "PASS" if has_active else "FAIL",
             f"active={api.get('active', '<none>')[:12]!r} sessions={len(api.get('sessions', []))}")
+
+        # Step 8+: sidebar collapse with "Show all (N)" expander.
+        # First move the browser to a fresh empty session via "+ New"
+        # so the CURRENT session isn't in the message list (it has 0
+        # turns). That way the collapsed view shows exactly 5 — not 5+1
+        # via the "pin current session" branch (covered by the unit test
+        # of renderSidebar's logic, not this probe).
+        await page.bring_to_front()
+        await page.click("#sidebar-btn")
+        await page.wait_for_selector("#sidebar.open", timeout=3000)
+        await page.click("#sidebar-new")
+        await page.wait_for_function(
+            "() => document.querySelectorAll('#chat-inner .msg').length === 0",
+            timeout=4000)
+        # Now seed 6 sessions on the server, all distinct from current.
+        for i in range(6):
+            sess = f"seed_{i:02d}"
+            symbion.memory.add("user",      f"Seed topic {i}", sess, user="aaron")
+            symbion.memory.add("assistant", f"Seed reply {i}", sess, user="aaron")
+        await page.click("#sidebar-btn")
+        await page.wait_for_selector("#sidebar.open", timeout=3000)
+        await page.wait_for_selector(".session-row", timeout=3000)
+        rows = await page.query_selector_all(".session-row")
+        toggle = await page.query_selector(".session-toggle")
+        toggle_txt = (await toggle.inner_text()).strip() if toggle else None
+        log("collapsed: 5 visible + Show-all toggle",
+            "PASS" if len(rows) == 5 and toggle_txt and toggle_txt.startswith("Show all") else "FAIL",
+            f"rows={len(rows)} toggle={toggle_txt!r}")
+        await page.screenshot(path=str(ART / "08_collapsed_5.png"), full_page=True)
+
+        if toggle:
+            await toggle.click()
+            await page.wait_for_function(
+                "() => document.querySelectorAll('.session-row').length > 5",
+                timeout=3000)
+            rows = await page.query_selector_all(".session-row")
+            toggle2 = await page.query_selector(".session-toggle")
+            toggle2_txt = (await toggle2.inner_text()).strip() if toggle2 else None
+            log("expanded: all rows + Show-fewer toggle",
+                "PASS" if len(rows) > 5 and toggle2_txt == "Show fewer" else "FAIL",
+                f"rows={len(rows)} toggle={toggle2_txt!r}")
+            await page.screenshot(path=str(ART / "09_expanded.png"), full_page=True)
+
+            await toggle2.click()
+            await page.wait_for_function(
+                "() => document.querySelectorAll('.session-row').length === 5",
+                timeout=3000)
+            log("PROBE: Show-fewer collapses back to 5", "PASS")
 
         await browser.close()
 
