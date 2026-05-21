@@ -90,6 +90,17 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat{
   flex:1;overflow-y:auto;overflow-x:hidden;
   padding:1.5rem 1rem 1rem;
+  /* Bottom padding reserves space for the FIXED footer so the last
+     message can scroll above it rather than getting tucked underneath.
+     --footer-height is set by a ResizeObserver on the footer so multi-
+     line composer + attach previews don't crash the last message into
+     the input. */
+  padding-bottom:calc(1rem + var(--footer-height, 5rem));
+  /* overscroll-behavior:contain stops iOS rubber-band from scrolling
+     the BODY when the chat is at its top/bottom edge. Without this,
+     overscrolling the chat at the top can pull the whole layout up
+     and unstick the composer on some iOS builds. */
+  overscroll-behavior:contain;
   /* scroll-behavior left at auto (browser default). With smooth, each
      streaming-token `scrollTop = scrollHeight` kicks off an animation,
      and reads of scrollTop during the animation return the interpolated
@@ -180,15 +191,19 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 }
 
 footer{
+  /* FIXED positioning so the composer stays welded to the bottom of
+     the viewport even when the parent flex layout gets confused (iOS
+     URL-bar collapse, PWA mode, in-app webviews, Android keyboard
+     resize). flex:column on the inside still stacks attach-strip
+     above .composer. JS keeps --footer-height in sync with the
+     element's offsetHeight so #chat reserves enough bottom padding
+     not to hide messages behind the input. z-index sits above the
+     header (50) but below modals (1000+). */
+  position:fixed;left:0;right:0;bottom:0;z-index:60;
   padding:.65rem 1rem;
   padding-bottom:max(.65rem,env(safe-area-inset-bottom));
   border-top:1px solid var(--border);
   background:var(--bg);
-  /* COLUMN so .attach-strip stacks ABOVE .composer (was display:flex row,
-     which made them siblings competing for horizontal space — the
-     attach previews ended up half-width on the left and the Send button
-     got pushed off the right edge). align-items:center keeps both
-     children centered up to their max-width:1200px. */
   display:flex;flex-direction:column;align-items:center;flex-shrink:0;
 }
 .composer{
@@ -672,6 +687,31 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll',  updateVV);
   updateVV();
 }
+
+// --- Pinned footer height tracker ----------------------------------------
+// Footer is position:fixed so it doesn't scroll with content. #chat
+// needs bottom-padding equal to the footer height so the last message
+// scrolls above it instead of underneath. The composer grows when the
+// user types multi-line, and the attach-strip appears when files are
+// attached — both change footer height. ResizeObserver keeps the CSS
+// custom property in sync; the !window.ResizeObserver fallback uses
+// a window resize listener which catches viewport changes if not the
+// composer/strip growth (acceptable degradation on older browsers).
+(function syncFooterHeight(){
+  const footer = document.querySelector('footer');
+  if(!footer) return;
+  const apply = () => {
+    document.documentElement.style.setProperty(
+      '--footer-height', footer.offsetHeight + 'px');
+  };
+  apply();
+  if(window.ResizeObserver){
+    const ro = new ResizeObserver(apply);
+    ro.observe(footer);
+  } else {
+    window.addEventListener('resize', apply);
+  }
+})();
 
 const chat=document.getElementById('chat');
 const chatInner=document.getElementById('chat-inner');
