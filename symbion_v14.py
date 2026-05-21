@@ -6803,6 +6803,101 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     if saved_rel:
                         attach_line = "[attached image" + ("s" if len(saved_rel)>1 else "") + ": " + ", ".join(saved_rel) + "]"
                         text = (text + "\n\n" + attach_line) if text else attach_line
+
+                # Non-image attachments (PDFs, text, code, etc). Parallel
+                # to the image block above but extension-whitelisted +
+                # filename-sanitised. The agent loop's read_pdf / read_file
+                # tools handle the actual reading; we just deliver the
+                # file into the workspace and point the model at the path.
+                attachments = payload.get("attachments") or []
+                if attachments and isinstance(attachments, list):
+                    paste_dir = Path(symbion.tools._workspace) / "_pastes"
+                    try:
+                        paste_dir.mkdir(exist_ok=True)
+                    except Exception as ex:
+                        logger.warning(f"WS file: paste dir mkdir failed: {ex}")
+                        paste_dir = None
+                    _MAX_FILE_DATAURL = 15 * 1024 * 1024
+                    _MAX_FILE_B64     = 14 * 1024 * 1024
+                    _MAX_FILE_RAW     = 10 * 1024 * 1024
+                    # Whitelist of safe extensions. Everything here is
+                    # readable as text/structured-doc via the existing
+                    # tool layer (read_file / read_pdf / read_file_chunk).
+                    # Executables and binary formats with no reader are
+                    # omitted on purpose — silent drop is safer than
+                    # writing a .exe into _pastes/ and confusing the user.
+                    _ALLOWED_FILE_EXTS = {
+                        "pdf",
+                        "txt", "md", "rst", "tex", "org", "adoc",
+                        "csv", "tsv", "json", "jsonl", "xml",
+                        "yaml", "yml", "html", "htm",
+                        "py", "js", "ts", "tsx", "jsx", "mjs", "cjs",
+                        "go", "rs", "c", "cpp", "cc", "h", "hpp",
+                        "java", "kt", "kts", "swift", "rb", "php",
+                        "cs", "vb", "scala", "lua", "r", "jl",
+                        "css", "scss", "less",
+                        "sh", "bash", "zsh", "ps1", "bat", "cmd",
+                        "sql", "toml", "ini", "conf", "cfg", "env",
+                        "log", "out",
+                    }
+                    saved_files: List[str] = []
+                    for n, att in enumerate(attachments[:6]):
+                        if not isinstance(att, dict):
+                            continue
+                        du   = att.get("dataurl") if isinstance(att.get("dataurl"), str) else ""
+                        name = (att.get("name") or "").strip()
+                        if not du.startswith("data:"):
+                            continue
+                        if len(du) > _MAX_FILE_DATAURL:
+                            logger.warning(f"WS file #{n}: data URL too large ({len(du)} bytes), skipping")
+                            continue
+                        try:
+                            header, b64 = du.split(",", 1)
+                        except ValueError:
+                            continue
+                        if len(b64) > _MAX_FILE_B64:
+                            logger.warning(f"WS file #{n}: base64 too large ({len(b64)} bytes), skipping")
+                            continue
+                        # Pull extension from the client-supplied filename
+                        # rather than the data URL's MIME (often
+                        # application/octet-stream for unrecognised types
+                        # — useless). Lowercase, strip non-alphanum, cap
+                        # length so a hostile client can't smuggle path
+                        # separators or oversized junk.
+                        if "." in name:
+                            base_part, _, ext_part = name.rpartition(".")
+                        else:
+                            base_part, ext_part = name, ""
+                        ext = "".join(c for c in ext_part.lower() if c.isalnum())[:8]
+                        if ext not in _ALLOWED_FILE_EXTS:
+                            logger.warning(f"WS file #{n}: ext '{ext}' not in whitelist, skipping")
+                            continue
+                        # Sanitise base name (preserve readable chars,
+                        # collapse anything else to _). Falls back to
+                        # 'attachment' for anonymous / fully-stripped names.
+                        safe = "".join(c if (c.isalnum() or c in "_-") else "_"
+                                       for c in base_part)[:64].strip("_")
+                        if not safe:
+                            safe = "attachment"
+                        try:
+                            import base64 as _b64
+                            try:
+                                raw = _b64.b64decode(b64, validate=True)
+                            except Exception:
+                                logger.warning(f"WS file #{n}: invalid base64, skipping")
+                                continue
+                            if len(raw) > _MAX_FILE_RAW:
+                                continue
+                            ts = int(time.time() * 1000)
+                            fname = f"paste_{ts}_{n}__{safe}.{ext}"
+                            if paste_dir:
+                                (paste_dir / fname).write_bytes(raw)
+                                saved_files.append(f"_pastes/{fname}")
+                        except Exception as ex:
+                            logger.warning(f"WS file decode #{n}: {type(ex).__name__}: {ex}")
+                    if saved_files:
+                        attach_line = "[attached file" + ("s" if len(saved_files)>1 else "") + ": " + ", ".join(saved_files) + "]"
+                        text = (text + "\n\n" + attach_line) if text else attach_line
                 if not text: continue
 
                 in_thinking = [False]

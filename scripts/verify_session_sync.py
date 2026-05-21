@@ -305,6 +305,100 @@ async def main():
                 timeout=3000)
             log("PROBE: Show-fewer collapses back to 5", "PASS")
 
+        # Composer affordances added 2026-05-21: autocorrect/spellcheck/
+        # sentence-case ON, plus a visible attach button that opens the
+        # native file picker.
+        await page.click("#sidebar-close")
+        attrs = await page.evaluate("""() => {
+            const i = document.getElementById('inp');
+            return {
+                autocorrect:     i.getAttribute('autocorrect'),
+                autocapitalize:  i.getAttribute('autocapitalize'),
+                spellcheck:      i.getAttribute('spellcheck'),
+                placeholder:     i.getAttribute('placeholder'),
+            };
+        }""")
+        ok = (attrs["autocorrect"] == "on" and
+              attrs["autocapitalize"] == "sentences" and
+              attrs["spellcheck"] == "true")
+        log("composer: autocorrect / spellcheck / sentence-case ON",
+            "PASS" if ok else "FAIL", f"{attrs}")
+
+        # Probe: click the attach button, feed it a tiny PNG via
+        # setInputFiles (no native dialog needed), and verify a
+        # thumbnail lands in #attach-strip. This exercises the same
+        # addFile() path used by paste / drop.
+        tmp_png = Path(tempfile.gettempdir()) / "verify_attach.png"
+        # Minimal 1x1 PNG (header + IHDR + tiny IDAT + IEND)
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452"
+            "00000001000000010806000000"
+            "1f15c4890000000d49444154789c63f8ff"
+            "ff3f0000050001ff7af1d2e30000000049454e44ae426082")
+        tmp_png.write_bytes(png)
+        # Playwright's setInputFiles bypasses the native picker, so we
+        # don't need to actually click the visible button — but we DO
+        # want to confirm the visible button is there and wired.
+        await page.wait_for_selector("#attach-btn", timeout=2000)
+        await page.set_input_files("#file-input", str(tmp_png))
+        try:
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#attach-strip .attach-thumb:not(.file)').length > 0",
+                timeout=3000)
+            log("attach button: image -> image thumb rendered", "PASS")
+        except Exception as ex:
+            log("attach button: image -> image thumb rendered", "FAIL", str(ex)[:120])
+        await page.screenshot(path=str(ART / "11_attach_image.png"), full_page=True)
+
+        # Probe: non-image file (txt). Should appear as a .file chip
+        # with the document glyph and filename, NOT an <img> thumb.
+        tmp_txt = Path(tempfile.gettempdir()) / "verify_attach_notes.txt"
+        tmp_txt.write_text("Hello from the verify harness.\nLine two.\n",
+                            encoding="utf-8")
+        await page.set_input_files("#file-input", str(tmp_txt))
+        try:
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#attach-strip .attach-thumb.file').length > 0 && "
+                "Array.from(document.querySelectorAll('#attach-strip .attach-thumb.file .fname'))."
+                "some(n => (n.textContent||'').includes('verify_attach_notes.txt'))",
+                timeout=3000)
+            log("attach button: text file -> file chip with filename", "PASS")
+        except Exception as ex:
+            log("attach button: text file -> file chip with filename", "FAIL",
+                str(ex)[:120])
+        await page.screenshot(path=str(ART / "12_attach_file.png"), full_page=True)
+
+        # PROBE: send the message; server should write the file into
+        # _pastes/ and append [attached file: ...] to the user text.
+        # Since respond() is stubbed, we can read the recorded user
+        # message from memory to verify the append happened.
+        await page.fill("#inp", "please read this note")
+        await page.click("#btn")
+        await page.wait_for_function(
+            "() => document.querySelectorAll('.msg.you').length > 0 && "
+            "(document.querySelectorAll('.msg.you')[document.querySelectorAll('.msg.you').length-1]"
+            ".textContent || '').includes('please read this note')",
+            timeout=5000)
+        # Pull last user message from memory for this session via /api/sessions/{id}/messages
+        cur_sess = await page.evaluate("() => localStorage.getItem('symbion_session')")
+        msgs_api = await page.evaluate(f"""async () => {{
+            const r = await fetch('/api/sessions/{cur_sess}/messages?limit=10');
+            return await r.json();
+        }}""")
+        last_user = ""
+        for m in (msgs_api.get("messages") or []):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+        log("server writes [attached file: _pastes/...] into user message text",
+            "PASS" if "[attached file:" in last_user and "_pastes/" in last_user else "FAIL",
+            f"last_user[:140]={last_user[:140]!r}")
+        # And the actual file should exist on disk
+        import glob, os
+        pastes = glob.glob(os.path.join(symbion.tools._workspace, "_pastes", "paste_*__verify_attach_notes.txt"))
+        log("non-image file written to _pastes/ with sanitised name",
+            "PASS" if pastes else "FAIL",
+            f"matched={pastes[:1]}")
+
         await browser.close()
 
     # Dump log
