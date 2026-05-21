@@ -43,3 +43,7 @@ Model9/
 
 # Web UI image paste cache — written by the WS handler, scrubbed per-session
 _pastes/
+
+# Browser-verify run artifacts (screenshots + log) from
+# scripts/verify_session_sync.py. Each run overwrites; reproducible.
+verify_artifacts/
