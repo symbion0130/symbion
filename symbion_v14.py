@@ -435,6 +435,8 @@ CAPABILITIES_BASE = """Your tools:
 - read_pdf(path) — extract text from PDF files anywhere on the machine
 - list_dir(path) — list files and subdirectories under any path on the machine
 - write_file(path, content) — write a text file (workspace-only — writes are still sandboxed)
+- get_weather(lat, lon) — current weather at coordinates via Open-Meteo (free, no key). Use for "is it raining?", "how hot?", etc. when the user has shared their location.
+- get_local_time(timezone) — current time in an IANA timezone (e.g. Europe/Madrid). Use when the user asks locally-anchored time questions; system-prompt "Current time" is server-local and may differ when the user is traveling.
 
 Read tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`, `C:\\Users\\me\\Desktop\\img.png`) or relative to the workspace root. Relative paths resolve against the project dir (typically D:\\symbion). Write_file is workspace-only and rejects absolute paths.
 
@@ -883,6 +885,29 @@ TOOL_SCHEMAS = [
                 "content": {"type": "string"},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "get_weather",
+        "description": "Current weather at a lat/lon via Open-Meteo (free, no API key). Use when the user asks about weather, temperature, rain, or related conditions for THEIR location — read lat/lon off the 'User's current location' context line and pass them in.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lat": {"type": "number", "description": "Latitude in degrees (-90 to 90)"},
+                "lon": {"type": "number", "description": "Longitude in degrees (-180 to 180)"},
+            },
+            "required": ["lat", "lon"],
+        },
+    },
+    {
+        "name": "get_local_time",
+        "description": "Current date and time in the user's local timezone. Use when the user asks 'what time is it' or 'is it late here' — read the IANA timezone off the 'User's current location' context line and pass it in. Note: the system prompt's 'Current time' is server-local, which may differ from the user's wall clock when traveling.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timezone": {"type": "string", "description": "IANA timezone (e.g. 'Europe/Madrid', 'America/Los_Angeles')"},
+            },
+            "required": ["timezone"],
         },
     },
 ]
@@ -2499,10 +2524,91 @@ class SymbionTools:
                 return jina
             return f"Error fetching {url}: {ex}"
 
+    # ---- Location-aware tools ----
+    # Both consume the location surfaced in build_context: the model
+    # reads lat/lon (or timezone) off the system-prompt context line
+    # and passes them in. No memory plumbing through SymbionTools.
+
+    _WEATHER_CODE = {
+        0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
+        45: "fog", 48: "depositing rime fog",
+        51: "light drizzle", 53: "drizzle", 55: "dense drizzle",
+        56: "light freezing drizzle", 57: "freezing drizzle",
+        61: "light rain", 63: "rain", 65: "heavy rain",
+        66: "light freezing rain", 67: "freezing rain",
+        71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
+        80: "light rain showers", 81: "rain showers", 82: "violent rain showers",
+        85: "light snow showers", 86: "snow showers",
+        95: "thunderstorm", 96: "thunderstorm with light hail",
+        99: "thunderstorm with heavy hail",
+    }
+
+    async def get_weather(self, lat: float, lon: float) -> str:
+        """Open-Meteo current weather (free, no API key). Returns a short
+        natural-language summary so the model can quote it directly."""
+        if not _HTTPX:
+            return "Error: httpx not installed; cannot fetch weather"
+        try:
+            lat = float(lat); lon = float(lon)
+        except (TypeError, ValueError):
+            return "Error: lat and lon must be numbers"
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            return "Error: lat/lon out of range"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cli:
+                r = await cli.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": lat, "longitude": lon,
+                        "current": "temperature_2m,relative_humidity_2m,"
+                                   "apparent_temperature,is_day,precipitation,"
+                                   "weather_code,wind_speed_10m",
+                        "timezone": "auto",
+                    })
+            if r.status_code != 200:
+                return f"Error fetching weather: HTTP {r.status_code}"
+            data = r.json()
+            cur = data.get("current") or {}
+            if not cur:
+                return "Error: weather response missing 'current' block"
+            code = int(cur.get("weather_code", -1))
+            desc = self._WEATHER_CODE.get(code, f"unknown weather code {code}")
+            temp = cur.get("temperature_2m")
+            feels = cur.get("apparent_temperature")
+            precip = cur.get("precipitation")
+            wind = cur.get("wind_speed_10m")
+            hum = cur.get("relative_humidity_2m")
+            lines = [f"Currently {desc}."]
+            if temp is not None:
+                feels_part = f" (feels {feels:g}°C)" if feels is not None else ""
+                lines.append(f"Temperature: {temp:g}°C{feels_part}.")
+            if hum is not None:
+                lines.append(f"Humidity: {hum:g}%.")
+            if precip is not None and float(precip) > 0:
+                lines.append(f"Precipitation: {precip:g} mm in the last hour.")
+            if wind is not None:
+                lines.append(f"Wind: {wind:g} km/h.")
+            return " ".join(lines)
+        except Exception as ex:
+            return f"Error fetching weather: {type(ex).__name__}: {ex}"
+
+    def get_local_time(self, timezone: str) -> str:
+        """Current time in the given IANA timezone. The model reads the
+        user's timezone off the context line and passes it here when the
+        question is locally-anchored ('what time is it', 'is it late')."""
+        try:
+            from zoneinfo import ZoneInfo
+            zi = ZoneInfo(str(timezone))
+        except Exception:
+            return f"Error: unknown timezone '{timezone}' (expected IANA name like Europe/Madrid)"
+        now = datetime.now(zi)
+        return now.strftime("%A, %B %d %Y, %I:%M %p %Z").lstrip("0")
+
     _ALLOWED_TOOLS = frozenset({
         "calculate","datetime","read_file","read_file_chunk",
         "read_image","read_pdf","list_dir",
         "write_file","web_search","fetch_url",
+        "get_weather","get_local_time",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -2610,6 +2716,20 @@ class SymbionTools:
             url = _str("url", cls._MAX_URL_LEN)
             if url is None: return False, "fetch_url requires string url", {}
             out["url"] = url
+        elif tool == "get_weather":
+            for key in ("lat", "lon"):
+                v = args.get(key)
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    return False, f"get_weather requires numeric {key}", {}
+                out[key] = fv
+            if not (-90 <= out["lat"] <= 90 and -180 <= out["lon"] <= 180):
+                return False, "lat/lon out of range", {}
+        elif tool == "get_local_time":
+            tz = _str("timezone", 64)
+            if tz is None: return False, "get_local_time requires IANA timezone string", {}
+            out["timezone"] = tz
 
         return True, "", out
 
@@ -2629,6 +2749,8 @@ class SymbionTools:
         if tool=="write_file":      return self.write_file(a["path"], a["content"])
         if tool=="web_search":      return await self.web_search(a["query"], cfg.brave_api_key, cfg.search_max_chars)
         if tool=="fetch_url":       return await self.fetch_url(a["url"], cfg.search_max_chars)
+        if tool=="get_weather":     return await self.get_weather(a["lat"], a["lon"])
+        if tool=="get_local_time":  return self.get_local_time(a["timezone"])
         return f"Unknown tool: {tool}"
 
 
@@ -3665,6 +3787,87 @@ class SymbionMemory:
                 (session,)).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
+    # Location services: stored per-user in user_profile under `__loc_*`
+    # keys (filtered out of get_profile_with_meta by the `__` prefix so
+    # they don't leak into /profile output). Lat/lon are floats, tz is
+    # IANA name from the browser, city/country may be empty until the
+    # async reverse-geocode lands. Freshness is checked by ts to decide
+    # how to phrase the model-visible context line.
+    _LOC_KEYS = ("__loc_lat", "__loc_lon", "__loc_tz", "__loc_accuracy",
+                 "__loc_city", "__loc_country", "__loc_ts")
+
+    def set_location(self, user: str = "aaron", *,
+                      lat: Optional[float] = None,
+                      lon: Optional[float] = None,
+                      tz: Optional[str] = None,
+                      accuracy: Optional[float] = None,
+                      city: Optional[str] = None,
+                      country: Optional[str] = None) -> None:
+        """Upsert location fields for `user`. Pass only the fields that
+        changed; missing fields leave the prior value alone. ts is bumped
+        when ANY field is touched so freshness reflects the latest write.
+        Called twice per geolocation event: once when the browser frame
+        lands (lat/lon/tz/accuracy), once when reverse-geocode resolves
+        (city/country)."""
+        updates: Dict[str, str] = {}
+        if lat      is not None: updates["__loc_lat"]      = str(float(lat))
+        if lon      is not None: updates["__loc_lon"]      = str(float(lon))
+        if tz       is not None: updates["__loc_tz"]       = str(tz)[:64]
+        if accuracy is not None: updates["__loc_accuracy"] = str(float(accuracy))
+        if city     is not None: updates["__loc_city"]     = str(city)[:96]
+        if country  is not None: updates["__loc_country"]  = str(country)[:96]
+        if not updates: return
+        now = datetime.now().isoformat()
+        updates["__loc_ts"] = now
+        with sqlite3.connect(self.db) as c:
+            for k, v in updates.items():
+                c.execute("INSERT OR REPLACE INTO user_profile VALUES (?,?,?)",
+                          (f"{user}:{k}", v, now))
+            c.commit()
+
+    def get_location(self, user: str = "aaron",
+                      max_age_hours: Optional[float] = None) -> Optional[Dict]:
+        """Return the location dict for `user`, or None if never set or
+        stale beyond `max_age_hours`. When max_age_hours is None, age is
+        not checked (caller decides how to phrase staleness)."""
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT key, value FROM user_profile "
+                f"WHERE key IN ({','.join('?' * len(self._LOC_KEYS))})",
+                [f"{user}:{k}" for k in self._LOC_KEYS]).fetchall()
+        if not rows: return None
+        d = {k.split(":", 1)[1]: v for k, v in rows}
+        ts_str = d.get("__loc_ts")
+        if not ts_str: return None
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            return None
+        if max_age_hours is not None:
+            if (datetime.now() - ts).total_seconds() > max_age_hours * 3600:
+                return None
+        try:
+            lat = float(d["__loc_lat"]); lon = float(d["__loc_lon"])
+        except (KeyError, ValueError):
+            return None
+        return {
+            "lat": lat, "lon": lon,
+            "tz": d.get("__loc_tz", ""),
+            "accuracy": float(d["__loc_accuracy"]) if "__loc_accuracy" in d else None,
+            "city": d.get("__loc_city", ""),
+            "country": d.get("__loc_country", ""),
+            "ts": ts_str,
+            "age_hours": (datetime.now() - ts).total_seconds() / 3600.0,
+        }
+
+    def clear_location(self, user: str = "aaron") -> None:
+        """Remove all location fields for `user`. UI 'forget my location'
+        path; also useful when the user explicitly opts out."""
+        with sqlite3.connect(self.db) as c:
+            for k in self._LOC_KEYS:
+                c.execute("DELETE FROM user_profile WHERE key=?", (f"{user}:{k}",))
+            c.commit()
+
     def get_session_messages(self, session: str, user: str = "aaron",
                               limit: int = 200) -> List[Dict]:
         """All messages in `session` belonging to `user`, oldest first.
@@ -4105,6 +4308,36 @@ class SymbionMemory:
         # where the assistant assumed lunch when it was 8:36 PM.
         now = datetime.now()
         parts.append(f"Current time: {now.strftime('%A, %B %d %Y, %I:%M %p').lstrip('0')}")
+
+        # Location anchor. Symbion sees city/country + timezone when the
+        # web UI has pushed coords (browser geolocation). Falls through
+        # silently when no location is set — terminal sessions and
+        # permission-denied web sessions just don't get this line. Stale
+        # notes appear past 24h so the model knows when not to trust it
+        # (user might be in another city since the last update).
+        loc = self.get_location(user=user)
+        if loc:
+            place = ""
+            if loc.get("city") and loc.get("country"):
+                place = f"{loc['city']}, {loc['country']}"
+            elif loc.get("city"):
+                place = loc["city"]
+            elif loc.get("country"):
+                place = loc["country"]
+            else:
+                # Reverse-geocode hasn't landed yet; lat/lon still useful
+                # for the model to acknowledge location is known.
+                place = "unknown city"
+            tz_note = f", timezone {loc['tz']}" if loc.get("tz") else ""
+            age_h = loc.get("age_hours") or 0
+            stale = ""
+            if   age_h >= 72: stale = f" (last updated {int(age_h/24)} days ago — may be stale)"
+            elif age_h >= 24: stale = f" (last updated ~{int(age_h)}h ago)"
+            # Coordinate hint: included so the model can pass them to
+            # get_weather without needing a separate lookup step. Kept
+            # to 4 decimal places so the prompt doesn't bloat.
+            coord_hint = f" [coords: lat={loc['lat']:.4f}, lon={loc['lon']:.4f}]"
+            parts.append(f"User's current location: {place}{tz_note}{stale}{coord_hint} (use for context only; do not bring up unprompted unless directly relevant)")
 
         if profile:
             # current_situation is the load-bearing life-events field. Surface
@@ -4848,6 +5081,50 @@ class SYMBION:
                     if not peers_set:
                         self._ws_clients.pop(session_id, None)
         return sent
+
+    # --- Location services ----
+    # Reverse-geocode the most recent lat/lon for `user` via Nominatim
+    # (OpenStreetMap, free, no API key). Their usage policy requires a
+    # unique User-Agent and a low request rate; the WS handler only
+    # invokes this on actual location updates so the rate stays well
+    # under 1 req/sec. Failure is silent (the model just lacks city
+    # context until next try).
+    async def _reverse_geocode_and_store(self, user: str, lat: float, lon: float,
+                                          session_id: Optional[str] = None,
+                                          tz: str = "") -> None:
+        if not _HTTPX:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cli:
+                r = await cli.get(
+                    "https://nominatim.openstreetmap.org/reverse",
+                    params={"lat": lat, "lon": lon, "format": "json", "zoom": 10},
+                    headers={"User-Agent": "symbion/14 (https://github.com/symbion0130/symbion)",
+                             "Accept-Language": "en"},
+                )
+            if r.status_code != 200:
+                logger.warning(f"reverse-geocode HTTP {r.status_code}")
+                return
+            data = r.json()
+            addr = (data.get("address") or {}) if isinstance(data, dict) else {}
+            # Address structure varies by region; pick the most specific
+            # locality field present (city > town > village > suburb).
+            city = (addr.get("city") or addr.get("town") or addr.get("village")
+                    or addr.get("suburb") or addr.get("hamlet") or "")
+            country = addr.get("country") or ""
+            if city or country:
+                self.memory.set_location(user=user, city=city or None,
+                                          country=country or None)
+                # Push the resolved name back to any open WS on this
+                # session so the status pill switches from "lat,lon" to
+                # "City, Country" without a refresh.
+                if session_id:
+                    await self.broadcast_to_session(
+                        session_id,
+                        {"t": "location_update", "city": city,
+                         "country": country, "tz": tz})
+        except Exception as ex:
+            logger.warning(f"reverse-geocode failed: {type(ex).__name__}: {ex}")
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -6753,6 +7030,60 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     # user for memory + profile reads/writes.
                     name = symbion._set_session_user(session_id, str(payload.get("name", "")))
                     await send({"t":"user_ok","v":name})
+                    continue
+
+                if payload.get("type")=="location":
+                    # Browser-side geolocation frame. Persists lat/lon/tz
+                    # to user_profile; fires a fire-and-forget reverse-
+                    # geocode to fill city/country via Nominatim. Used
+                    # by get_weather, get_local_time, and the context
+                    # line build_context surfaces to the model.
+                    try:
+                        lat = float(payload.get("lat"))
+                        lon = float(payload.get("lon"))
+                    except (TypeError, ValueError):
+                        await send({"t":"error","v":"invalid lat/lon"})
+                        continue
+                    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                        await send({"t":"error","v":"lat/lon out of range"})
+                        continue
+                    tz = str(payload.get("tz") or "")[:64]
+                    accuracy = payload.get("accuracy")
+                    try:
+                        accuracy = float(accuracy) if accuracy is not None else None
+                    except (TypeError, ValueError):
+                        accuracy = None
+                    active_u = symbion._active_user(session_id)
+                    try:
+                        symbion.memory.set_location(
+                            user=active_u, lat=lat, lon=lon,
+                            tz=tz or None, accuracy=accuracy)
+                    except Exception as ex:
+                        logger.warning(f"WS set_location: {ex}")
+                    # Reverse-geocode in the background so we don't block
+                    # the WS turn loop. Nominatim's usage policy requires
+                    # a unique User-Agent string + low request rate, both
+                    # honored in _reverse_geocode_and_store. session_id +
+                    # tz let the task push a location_update back to the
+                    # client so the status pill updates without refresh.
+                    asyncio.create_task(
+                        symbion._reverse_geocode_and_store(
+                            active_u, lat, lon, session_id=session_id, tz=tz))
+                    await send({"t":"location_ok",
+                                "lat": lat, "lon": lon, "tz": tz})
+                    continue
+
+                if payload.get("type")=="location_clear":
+                    # User opted out from the status sheet. Wipe profile
+                    # fields so build_context stops surfacing location
+                    # and downstream tools fall back to needing explicit
+                    # coords from the model.
+                    try:
+                        symbion.memory.clear_location(
+                            user=symbion._active_user(session_id))
+                    except Exception as ex:
+                        logger.warning(f"WS clear_location: {ex}")
+                    await send({"t":"location_update","city":"","country":"","tz":""})
                     continue
 
                 if payload.get("type")=="summarize":

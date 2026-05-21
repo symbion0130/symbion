@@ -596,8 +596,14 @@ footer{
         <span class="status-label">⚠ Welfare</span>
         <span class="status-value">flagged</span>
       </div>
+      <div class="status-row" id="st-location-pill">
+        <span class="status-label">Location</span>
+        <span class="status-value" id="st-location">not shared</span>
+      </div>
     </div>
     <div class="status-sheet-actions">
+      <button id="loc-share-btn" class="ghost-btn" type="button">Share location</button>
+      <button id="loc-clear-btn" class="ghost-btn" type="button">Clear location</button>
       <button id="key-btn-sheet" class="ghost-btn" type="button">Change API key</button>
     </div>
   </div>
@@ -825,6 +831,79 @@ function hideKeyModal(){keyModal.classList.add('hidden');keyError.textContent=''
 // cleanly, then open the key entry modal. Matches the prior single-tap
 // behaviour of the old header key-btn.
 keyBtnSheet.onclick=()=>{ closeStatusSheet(); showKeyModal(''); };
+
+// --- Location services -------------------------------------------------
+// On WS open we attempt to share the browser's geolocation with Symbion
+// so the server can store it (user_profile), reverse-geocode via
+// Nominatim, and expose it to the model + get_weather / get_local_time
+// tools. We only PROMPT once per browser: LOCATION_OPT_IN stores the
+// user's choice ("granted" / "denied" / "" untouched). Re-prompts are
+// via the status sheet's "Share location" button.
+const LOCATION_OPT_IN = 'symbion_location_opt_in';
+const locPill   = document.getElementById('st-location');
+const locShare  = document.getElementById('loc-share-btn');
+const locClear  = document.getElementById('loc-clear-btn');
+
+function _renderLocationPill(text){
+  if(locPill) locPill.textContent = text || 'not shared';
+}
+
+function _sendLocationToServer(pos){
+  if(!ws || ws.readyState !== 1) return;
+  let tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch(e){}
+  try {
+    ws.send(JSON.stringify({
+      type: 'location',
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      tz: tz,
+      accuracy: pos.coords.accuracy || null,
+    }));
+    _renderLocationPill(`${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)} (${tz||'?'})`);
+  } catch(e) { /* WS broken; will retry next connect */ }
+}
+
+function _requestGeoOnce(force){
+  if(!('geolocation' in navigator)){
+    _renderLocationPill('not supported');
+    return;
+  }
+  if(!force && localStorage.getItem(LOCATION_OPT_IN) === 'denied'){
+    _renderLocationPill('opted out');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      localStorage.setItem(LOCATION_OPT_IN, 'granted');
+      _sendLocationToServer(pos);
+    },
+    err => {
+      // PERMISSION_DENIED=1, POSITION_UNAVAILABLE=2, TIMEOUT=3.
+      if(err && err.code === 1){
+        localStorage.setItem(LOCATION_OPT_IN, 'denied');
+        _renderLocationPill('opted out');
+      } else {
+        _renderLocationPill('unavailable');
+      }
+    },
+    {enableHighAccuracy:false, timeout:10000, maximumAge:300000},
+  );
+}
+
+locShare.onclick = ()=>{
+  // Re-prompt even if previously denied (resets the opt-in).
+  localStorage.removeItem(LOCATION_OPT_IN);
+  closeStatusSheet();
+  _requestGeoOnce(true);
+};
+locClear.onclick = ()=>{
+  localStorage.setItem(LOCATION_OPT_IN, 'denied');
+  if(ws && ws.readyState === 1){
+    try{ ws.send(JSON.stringify({type:'location_clear'})); }catch(e){}
+  }
+  _renderLocationPill('opted out');
+};
 keyClear.onclick=()=>{
   localStorage.removeItem(KEY_STORE);
   apiKey='';
@@ -1064,6 +1143,13 @@ function connect(){
     if(storedUser && storedUser !== 'aaron'){
       try{ws.send(JSON.stringify({type:'set_user', name:storedUser}));}catch(e){}
     }
+    // Share browser geolocation if previously granted (or not yet
+    // decided). Skips the request when explicitly opted out.
+    if(localStorage.getItem(LOCATION_OPT_IN) !== 'denied'){
+      _requestGeoOnce(false);
+    } else {
+      _renderLocationPill('opted out');
+    }
   };
   ws.onclose=()=>{
     document.getElementById('dot').classList.add('dead');
@@ -1155,6 +1241,18 @@ function connect(){
       }
     } else if(d.t==='user_ok'){
       // Server acknowledged the set_user frame. No UI change needed.
+    } else if(d.t==='location_ok'){
+      // Server stored the lat/lon and kicked off async reverse-geocoding.
+      // The pill already shows the coords from the local _sendLocationToServer
+      // call; we'll refresh to a city name when location_update arrives.
+    } else if(d.t==='location_update'){
+      // Reverse-geocode completed and the server now has city/country.
+      // Show the friendlier display.
+      const city = d.city || '';
+      const country = d.country || '';
+      const tz = d.tz || '';
+      const place = city ? (country ? `${city}, ${country}` : city) : (country || 'unknown');
+      _renderLocationPill(`${place}${tz?' ('+tz+')':''}`);
     } else if(d.t==='summarize_ok'){
       // Session was flushed to a summary server-side. Start a fresh
       // conversation: clear the chat, generate a new SESSION, reconnect.
