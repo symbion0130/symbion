@@ -94,8 +94,13 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
      message can scroll above it rather than getting tucked underneath.
      --footer-height is set by a ResizeObserver on the footer so multi-
      line composer + attach previews don't crash the last message into
-     the input. */
-  padding-bottom:calc(1rem + var(--footer-height, 5rem));
+     the input. The extra 1.5rem buffer is breathing room on top of
+     the exact footer height — without it the last line sits flush
+     against the composer's top edge, which reads as "cut off" even
+     when math says zero overlap. Fallback (7rem ≈ 112px) is generous
+     enough to cover a composer with attach previews even before the
+     ResizeObserver has had a chance to fire. */
+  padding-bottom:calc(1.5rem + var(--footer-height, 7rem));
   /* overscroll-behavior:contain stops iOS rubber-band from scrolling
      the BODY when the chat is at its top/bottom edge. Without this,
      overscrolling the chat at the top can pull the whole layout up
