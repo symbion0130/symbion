@@ -906,10 +906,21 @@ function _renderLocationPill(text){
   if(locPill) locPill.textContent = text || 'not shared';
 }
 
+// Loud feedback in the chat too — the status pill is only visible
+// while the status sheet is open, so on its own it leaves the user
+// with no signal that anything happened when they tap Share location.
+function _toastLocation(text){
+  _renderLocationPill(text);
+  try { addSymStatic(text); } catch(e) {}
+}
+
 function _sendLocationToServer(pos){
-  if(!ws || ws.readyState !== 1) return;
   let tz = '';
   try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch(e){}
+  if(!ws || ws.readyState !== 1){
+    _toastLocation('Got your coordinates but not connected to Symbion yet — will retry on reconnect.');
+    return;
+  }
   try {
     ws.send(JSON.stringify({
       type: 'location',
@@ -918,19 +929,30 @@ function _sendLocationToServer(pos){
       tz: tz,
       accuracy: pos.coords.accuracy || null,
     }));
-    _renderLocationPill(`${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)} (${tz||'?'})`);
-  } catch(e) { /* WS broken; will retry next connect */ }
+    _toastLocation(`Location shared: ${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)} (${tz||'?'}). Looking up city...`);
+  } catch(e) {
+    _toastLocation(`Failed to send location to Symbion: ${e.message||e}`);
+  }
 }
 
 function _requestGeoOnce(force){
   if(!('geolocation' in navigator)){
-    _renderLocationPill('not supported');
+    _toastLocation('Browser doesn’t support location services.');
+    return;
+  }
+  // Secure-context gate. Browsers silently refuse geolocation on plain
+  // HTTP origins (except localhost / 127.0.0.1). When that's the case
+  // the prompt never appears AND no error fires in some builds — so
+  // diagnose up front rather than leaving the user wondering.
+  if(window.isSecureContext === false){
+    _toastLocation('Location needs HTTPS. This server is being served over plain HTTP from a non-localhost origin — browsers refuse geolocation here. Reach Symbion via localhost, https://, or Tailscale funnel to enable.');
     return;
   }
   if(!force && localStorage.getItem(LOCATION_OPT_IN) === 'denied'){
     _renderLocationPill('opted out');
     return;
   }
+  _renderLocationPill('requesting...');
   navigator.geolocation.getCurrentPosition(
     pos => {
       localStorage.setItem(LOCATION_OPT_IN, 'granted');
@@ -940,9 +962,11 @@ function _requestGeoOnce(force){
       // PERMISSION_DENIED=1, POSITION_UNAVAILABLE=2, TIMEOUT=3.
       if(err && err.code === 1){
         localStorage.setItem(LOCATION_OPT_IN, 'denied');
-        _renderLocationPill('opted out');
+        _toastLocation('Location permission denied. To re-enable, allow location for this site in your browser settings, then tap Share location again.');
+      } else if(err && err.code === 3){
+        _toastLocation('Location request timed out. Try again with a clearer view of the sky if you’re indoors.');
       } else {
-        _renderLocationPill('unavailable');
+        _toastLocation(`Couldn’t get your location: ${(err&&err.message)||'unknown error'}`);
       }
     },
     {enableHighAccuracy:false, timeout:10000, maximumAge:300000},
@@ -950,9 +974,11 @@ function _requestGeoOnce(force){
 }
 
 locShare.onclick = ()=>{
-  // Re-prompt even if previously denied (resets the opt-in).
+  // Re-prompt even if previously denied (resets our opt-in flag —
+  // can't override a browser-level deny without user action in
+  // browser settings). Keep the status sheet OPEN so the pill update
+  // is visible; the user can dismiss the sheet themselves.
   localStorage.removeItem(LOCATION_OPT_IN);
-  closeStatusSheet();
   _requestGeoOnce(true);
 };
 locClear.onclick = ()=>{
@@ -960,7 +986,7 @@ locClear.onclick = ()=>{
   if(ws && ws.readyState === 1){
     try{ ws.send(JSON.stringify({type:'location_clear'})); }catch(e){}
   }
-  _renderLocationPill('opted out');
+  _toastLocation('Location cleared. Symbion will stop referencing it.');
 };
 keyClear.onclick=()=>{
   localStorage.removeItem(KEY_STORE);
