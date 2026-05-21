@@ -3790,11 +3790,14 @@ class SymbionMemory:
     # Location services: stored per-user in user_profile under `__loc_*`
     # keys (filtered out of get_profile_with_meta by the `__` prefix so
     # they don't leak into /profile output). Lat/lon are floats, tz is
-    # IANA name from the browser, city/country may be empty until the
-    # async reverse-geocode lands. Freshness is checked by ts to decide
-    # how to phrase the model-visible context line.
+    # IANA name from the browser, city/state/country may be empty until
+    # the async reverse-geocode lands. State is mostly populated for
+    # US/CA/AU addresses where it carries the regional anchor a user
+    # actually identifies with ("Austin, Texas" > "Austin, United
+    # States"). Freshness is checked by ts to decide how to phrase the
+    # model-visible context line.
     _LOC_KEYS = ("__loc_lat", "__loc_lon", "__loc_tz", "__loc_accuracy",
-                 "__loc_city", "__loc_country", "__loc_ts")
+                 "__loc_city", "__loc_state", "__loc_country", "__loc_ts")
 
     def set_location(self, user: str = "aaron", *,
                       lat: Optional[float] = None,
@@ -3802,19 +3805,21 @@ class SymbionMemory:
                       tz: Optional[str] = None,
                       accuracy: Optional[float] = None,
                       city: Optional[str] = None,
+                      state: Optional[str] = None,
                       country: Optional[str] = None) -> None:
         """Upsert location fields for `user`. Pass only the fields that
         changed; missing fields leave the prior value alone. ts is bumped
         when ANY field is touched so freshness reflects the latest write.
         Called twice per geolocation event: once when the browser frame
         lands (lat/lon/tz/accuracy), once when reverse-geocode resolves
-        (city/country)."""
+        (city/state/country)."""
         updates: Dict[str, str] = {}
         if lat      is not None: updates["__loc_lat"]      = str(float(lat))
         if lon      is not None: updates["__loc_lon"]      = str(float(lon))
         if tz       is not None: updates["__loc_tz"]       = str(tz)[:64]
         if accuracy is not None: updates["__loc_accuracy"] = str(float(accuracy))
         if city     is not None: updates["__loc_city"]     = str(city)[:96]
+        if state    is not None: updates["__loc_state"]    = str(state)[:96]
         if country  is not None: updates["__loc_country"]  = str(country)[:96]
         if not updates: return
         now = datetime.now().isoformat()
@@ -3855,6 +3860,7 @@ class SymbionMemory:
             "tz": d.get("__loc_tz", ""),
             "accuracy": float(d["__loc_accuracy"]) if "__loc_accuracy" in d else None,
             "city": d.get("__loc_city", ""),
+            "state": d.get("__loc_state", ""),
             "country": d.get("__loc_country", ""),
             "ts": ts_str,
             "age_hours": (datetime.now() - ts).total_seconds() / 3600.0,
@@ -4317,13 +4323,16 @@ class SymbionMemory:
         # (user might be in another city since the last update).
         loc = self.get_location(user=user)
         if loc:
-            place = ""
-            if loc.get("city") and loc.get("country"):
-                place = f"{loc['city']}, {loc['country']}"
-            elif loc.get("city"):
-                place = loc["city"]
-            elif loc.get("country"):
-                place = loc["country"]
+            # Compose "City, State, Country" from whichever pieces the
+            # reverse-geocode gave us. State is the anchor a US/CA/AU
+            # user actually identifies with — "Austin, Texas" reads as
+            # ground truth, "Austin, United States" reads as the model
+            # being vague. Falls back gracefully when state is absent
+            # (most of Europe / Asia).
+            place_parts = [p for p in (loc.get("city"), loc.get("state"),
+                                        loc.get("country")) if p]
+            if place_parts:
+                place = ", ".join(place_parts)
             else:
                 # Reverse-geocode hasn't landed yet; lat/lon still useful
                 # for the model to acknowledge location is known.
@@ -5108,23 +5117,54 @@ class SYMBION:
             data = r.json()
             addr = (data.get("address") or {}) if isinstance(data, dict) else {}
             # Address structure varies by region; pick the most specific
-            # locality field present (city > town > village > suburb).
+            # locality field present. Fallbacks past 'hamlet' catch rural
+            # US (county-only response), unincorporated areas, etc. —
+            # without these, a Texan-in-the-country gets "" for city and
+            # the model context just shows "United States", which is
+            # what's-where-am-I? unhelpful.
             city = (addr.get("city") or addr.get("town") or addr.get("village")
-                    or addr.get("suburb") or addr.get("hamlet") or "")
+                    or addr.get("suburb") or addr.get("hamlet")
+                    or addr.get("municipality") or addr.get("county") or "")
+            # State / region carries the regional anchor a user identifies
+            # with ("Texas" >> "United States"). state_district is the
+            # German-style fallback; province covers CA/CN/IT.
+            state = (addr.get("state") or addr.get("state_district")
+                     or addr.get("province") or addr.get("region") or "")
             country = addr.get("country") or ""
-            if city or country:
-                self.memory.set_location(user=user, city=city or None,
+            if city or state or country:
+                self.memory.set_location(user=user,
+                                          city=city or None,
+                                          state=state or None,
                                           country=country or None)
                 # Push the resolved name back to any open WS on this
                 # session so the status pill switches from "lat,lon" to
-                # "City, Country" without a refresh.
+                # "City, State, Country" without a refresh.
                 if session_id:
                     await self.broadcast_to_session(
                         session_id,
                         {"t": "location_update", "city": city,
-                         "country": country, "tz": tz})
+                         "state": state, "country": country, "tz": tz})
+            else:
+                logger.warning(
+                    f"reverse-geocode at ({lat},{lon}) returned no city/state/country; "
+                    f"address keys: {list(addr.keys())}")
+                if session_id:
+                    await self.broadcast_to_session(
+                        session_id,
+                        {"t": "location_update", "city": "", "state": "",
+                         "country": "", "tz": tz,
+                         "error": "reverse-geocode returned no place name"})
         except Exception as ex:
             logger.warning(f"reverse-geocode failed: {type(ex).__name__}: {ex}")
+            if session_id:
+                try:
+                    await self.broadcast_to_session(
+                        session_id,
+                        {"t": "location_update", "city": "", "state": "",
+                         "country": "", "tz": tz,
+                         "error": f"reverse-geocode failed: {type(ex).__name__}"})
+                except Exception:
+                    pass
 
     def _jmodel(self) -> str:
         if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
@@ -7083,7 +7123,7 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                             user=symbion._active_user(session_id))
                     except Exception as ex:
                         logger.warning(f"WS clear_location: {ex}")
-                    await send({"t":"location_update","city":"","country":"","tz":""})
+                    await send({"t":"location_update","city":"","state":"","country":"","tz":""})
                     continue
 
                 if payload.get("type")=="summarize":

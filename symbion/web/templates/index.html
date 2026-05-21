@@ -1330,13 +1330,20 @@ function connect(){
       // The pill already shows the coords from the local _sendLocationToServer
       // call; we'll refresh to a city name when location_update arrives.
     } else if(d.t==='location_update'){
-      // Reverse-geocode completed and the server now has city/country.
-      // Show the friendlier display.
-      const city = d.city || '';
-      const country = d.country || '';
+      // Reverse-geocode completed (or failed) and the server has a
+      // new place name to surface. Compose "City, State, Country"
+      // from whatever pieces are present so US/CA/AU users see their
+      // state, not a vague country.
+      const parts = [d.city, d.state, d.country].filter(Boolean);
+      const place = parts.length ? parts.join(', ') : (d.error ? '' : 'unknown');
       const tz = d.tz || '';
-      const place = city ? (country ? `${city}, ${country}` : city) : (country || 'unknown');
-      _renderLocationPill(`${place}${tz?' ('+tz+')':''}`);
+      if(d.error){
+        _toastLocation(`Location lookup: ${d.error}.`);
+      } else if(place){
+        _toastLocation(`Location: ${place}${tz?' ('+tz+')':''}.`);
+      } else {
+        _renderLocationPill('cleared');
+      }
     } else if(d.t==='summarize_ok'){
       // Session was flushed to a summary server-side. Start a fresh
       // conversation: clear the chat, generate a new SESSION, reconnect.
