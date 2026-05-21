@@ -4582,6 +4582,15 @@ class SYMBION:
         # set mutated mid-iteration would raise RuntimeError.
         self._ws_clients_lock: Optional[asyncio.Lock] = None
 
+        # Per-session record of the LAST turn's tool calls. Read by the
+        # eval harness to assert tool-judgment rules (max_tool_calls,
+        # must_call_tools, must_not_call_tools) without changing the
+        # respond() return signature. Keyed by session so concurrent
+        # eval cases don't clobber each other. Each entry is a list of
+        # the tool-call dicts collected during the agent loop (same
+        # shape as AnthropicClient.stream_with_tools emits).
+        self._session_last_tool_calls: Dict[str, List[Dict]] = {}
+
         self._providers: List[BaseClient] = []
         self._build_providers()
         self.client = self._providers[0] if self._providers else None
@@ -5977,6 +5986,16 @@ class SYMBION:
             agent_tool_calls=agent_tool_calls if agent_tool_calls else None,
             agent_iterations=agent_iterations,
             request_id=request_id,
+        )
+
+        # Cache this turn's tool calls so the eval harness can read them
+        # back without changing respond()'s return signature. Single-shot
+        # mode that fired _maybe_tool counts as one "auto" tool dispatch;
+        # capture that too so cases that should reach for tools through
+        # the legacy path are testable as well.
+        self._session_last_tool_calls[session] = (
+            list(agent_tool_calls) if agent_tool_calls
+            else ([{"name": "_auto_dispatch", "input": None}] if tool_context else [])
         )
 
         return full_response, evaluation, iid

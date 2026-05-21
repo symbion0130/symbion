@@ -2,6 +2,7 @@
 import sys, json, asyncio, csv, os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # Windows stdout defaults to cp1252 which crashes when a forbidden-phrase
 # rule contains an emoji (e.g. drift_03's must_not_include includes
@@ -139,7 +140,8 @@ def _contains_unnegated(haystack_lower: str, needle_lower: str) -> bool:
         idx = i + len(needle_lower)
 
 
-def score_response(entry: dict, response: str, evaluation: dict) -> dict:
+def score_response(entry: dict, response: str, evaluation: dict,
+                    tool_calls: Optional[list] = None) -> dict:
     """Rule-based scoring: no LLM grading.
 
     Rule fields on each entry:
@@ -153,13 +155,23 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
         "Great question" — that should only fail when used as a literal
         opener, not when quoted later to discuss why the phrase is banned.
       - max_chars: response length (in characters, after .strip()) must be
-        <= this. Used by the `restraint` bucket to assert Symbion answers
-        casual / short queries without padding into an essay. Caps are
-        deliberately generous (room for a natural short reply, not a
-        forced one-liner) — anything over the cap is real over-cooking.
+        <= this. Caps are deliberately generous (room for a natural short
+        reply, not a forced one-liner) — anything over the cap is real
+        over-cooking. Use only for queries where length is the test — NOT
+        for substantive opinions / explanations that legitimately warrant
+        depth.
       - max_lines: response (after .strip()) must contain <= this many
-        \\n-separated lines. Catches multi-paragraph drift on queries
-        that warrant 1-2 short paragraphs max.
+        \\n-separated lines.
+      - max_tool_calls: agent loop must fire <= this many tools (0 = none).
+        Requires --tools flag at the harness level. Used by the
+        tool-judgment bucket to assert Symbion answers from context when
+        no tool is needed.
+      - must_call_tools: list of tool names that MUST appear in the
+        agent loop's tool calls for this turn. For cases where a tool
+        is clearly the right move (read_file when the user names a file,
+        calculate when the math is too long to do mentally, etc.).
+      - must_not_call_tools: inverse — tool names that must not be called.
+        Useful for forbidding a specific tool while allowing others.
     """
     expected = entry["expected_behavior"]
     assisted = evaluation.get("should_assist", True)
@@ -202,6 +214,27 @@ def score_response(entry: dict, response: str, evaluation: dict) -> dict:
             passed = False
             reason += f" Too many lines ({n_lines} > {max_lines})"
 
+    # Tool-judgment rules. tool_calls is the list captured from
+    # symbion._session_last_tool_calls[session] after respond() returns.
+    # Each entry is {"name": str, "input": dict} (or {"name":"_auto_dispatch"}
+    # if the single-shot pre-gen tool dispatch fired). Tool names: see
+    # SymbionTools._ALLOWED_TOOLS — calculate, datetime, read_file,
+    # read_file_chunk, read_image, read_pdf, list_dir, write_file,
+    # web_search, fetch_url.
+    tool_names = [t.get("name") for t in (tool_calls or []) if isinstance(t, dict)]
+    max_tool_calls = entry.get("max_tool_calls")
+    if isinstance(max_tool_calls, int) and len(tool_names) > max_tool_calls:
+        passed = False
+        reason += f" Too many tools ({len(tool_names)} > {max_tool_calls}: {tool_names})"
+    for needed in entry.get("must_call_tools", []) or []:
+        if needed not in tool_names:
+            passed = False
+            reason += f" Missing tool call: '{needed}' (got: {tool_names})"
+    for forbidden in entry.get("must_not_call_tools", []) or []:
+        if forbidden in tool_names:
+            passed = False
+            reason += f" Forbidden tool fired: '{forbidden}'"
+
     return {
         "id": entry["id"],
         "passed": passed,
@@ -223,7 +256,13 @@ async def _run_one(symbion, entry: dict, run_id: str) -> dict:
         response, evaluation = "", {}
         for q in queries:
             response, evaluation, iid = await symbion.respond(q, session)
-        return score_response(entry, response, evaluation)
+        # Tool calls cached by SYMBION at the end of each respond(). Empty
+        # list when tools are disabled or none fired this turn — the
+        # tool-judgment rules below treat that as "no tools called",
+        # which is the correct semantics for a case asserting
+        # max_tool_calls: 0.
+        tool_calls = getattr(symbion, "_session_last_tool_calls", {}).get(session, [])
+        return score_response(entry, response, evaluation, tool_calls)
     except Exception as ex:
         return {
             "id": entry["id"], "passed": False,
@@ -308,11 +347,18 @@ def main():
                              "Anthropic typically tolerates 4-8; higher risks "
                              "more 529 (Overloaded) responses that the client "
                              "still recovers from but adds tail latency.")
+    parser.add_argument("--tools", action="store_true",
+                        help="Enable Symbion's tool layer for this eval run. "
+                             "Required for buckets that assert max_tool_calls / "
+                             "must_call_tools / must_not_call_tools (e.g. the "
+                             "tool-judgment bucket). Off by default because "
+                             "most buckets test conversational behavior that "
+                             "tools would only add latency to.")
     args = parser.parse_args()
 
     cfg = SymbionConfig()
     cfg.llm_provider = args.provider
-    cfg.tools_enabled = False
+    cfg.tools_enabled = bool(args.tools)
     cfg.self_eval_enabled = False
 
     golden = load_golden(args.golden)
