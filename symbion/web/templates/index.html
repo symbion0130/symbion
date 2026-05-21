@@ -702,12 +702,30 @@ if (window.visualViewport) {
 // custom property in sync; the !window.ResizeObserver fallback uses
 // a window resize listener which catches viewport changes if not the
 // composer/strip growth (acceptable degradation on older browsers).
+//
+// Critically: when the footer GROWS (multi-line typing, attach strip
+// open), the chat's padding-bottom grows too — but the scroll position
+// stays put, so the last message's viewport-y is unchanged while the
+// footer slides up over it. If the user was following the bottom, we
+// re-scroll so the last message stays above the (now-taller) composer.
 (function syncFooterHeight(){
   const footer = document.querySelector('footer');
   if(!footer) return;
+  let prevHeight = -1;
   const apply = () => {
-    document.documentElement.style.setProperty(
-      '--footer-height', footer.offsetHeight + 'px');
+    const h = footer.offsetHeight;
+    if(h === prevHeight) return;
+    const chatEl = document.getElementById('chat');
+    const wasNearBottom = chatEl &&
+      (chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 220);
+    document.documentElement.style.setProperty('--footer-height', h + 'px');
+    prevHeight = h;
+    if(wasNearBottom && chatEl){
+      // Reading scrollHeight forces layout, so the new padding-bottom
+      // is reflected before we compute the scroll target. behavior:auto
+      // overrides any CSS scroll-behavior so the catch-up is instant.
+      chatEl.scrollTo({top: chatEl.scrollHeight, behavior: 'auto'});
+    }
   };
   apply();
   if(window.ResizeObserver){
