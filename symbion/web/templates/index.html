@@ -419,6 +419,18 @@ footer{
   font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 }
 .sidebar-empty{color:var(--muted);font-size:.8rem;padding:.5rem .75rem;line-height:1.5}
+/* Show-all / Show-fewer toggle at the bottom of the session list.
+   Muted by default so it doesn't compete with the session rows; lights
+   up to --sym on hover. Sticks below the last row, not floating. */
+.session-toggle{
+  display:block;width:100%;
+  background:transparent;border:1px dashed var(--border);
+  color:var(--muted-2);font-size:.75rem;font-weight:500;
+  padding:.5rem .7rem;border-radius:8px;
+  margin-top:.4rem;cursor:pointer;font-family:inherit;
+  letter-spacing:.02em;
+}
+.session-toggle:hover{border-color:var(--sym);color:var(--sym)}
 
 /* Slide-up status sheet (Claude-style drawer). z-index above the
    conn-banner (900) and the key/user modals (1000) so it sits on top
@@ -810,6 +822,12 @@ const sidebarNew      = document.getElementById('sidebar-new');
 
 let cachedSessions = [];
 let skipNextHistory = false; // set when we've already REST-hydrated; WS history would clobber
+// Sidebar shows the 5 most-recent sessions by default; tapping the
+// "Show all" footer expands to the full cached list (up to 50). Sticky
+// across opens within the page session — closing the sidebar doesn't
+// re-collapse, but a hard reload starts collapsed again.
+const SIDEBAR_COLLAPSED_LIMIT = 5;
+let sidebarExpanded = false;
 
 function apiHeaders(){
   const h = {};
@@ -856,7 +874,22 @@ function renderSidebar(){
     sidebarList.appendChild(empty);
     return;
   }
-  for(const s of cachedSessions){
+  // Always keep the CURRENT session visible even when collapsed — if
+  // it sits past the 5th slot, sliceing the first 5 would hide it and
+  // leave the user unable to tell which row they're on. So when
+  // collapsed, render: [first 5] ∪ [current session if not already in].
+  const total = cachedSessions.length;
+  let visible;
+  if(sidebarExpanded || total <= SIDEBAR_COLLAPSED_LIMIT){
+    visible = cachedSessions.slice();
+  } else {
+    visible = cachedSessions.slice(0, SIDEBAR_COLLAPSED_LIMIT);
+    if(SESSION && !visible.some(s => s.id === SESSION)){
+      const cur = cachedSessions.find(s => s.id === SESSION);
+      if(cur) visible.push(cur);
+    }
+  }
+  for(const s of visible){
     const row = document.createElement('div');
     row.className = 'session-row' + (s.id === SESSION ? ' current' : '');
     row.setAttribute('role','button');
@@ -874,6 +907,17 @@ function renderSidebar(){
       if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); switchToSession(s.id); }
     };
     sidebarList.appendChild(row);
+  }
+  // Footer toggle: only shows when there's actually something hidden.
+  if(total > SIDEBAR_COLLAPSED_LIMIT){
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'session-toggle';
+    toggle.textContent = sidebarExpanded
+      ? `Show fewer`
+      : `Show all (${total})`;
+    toggle.onclick = () => { sidebarExpanded = !sidebarExpanded; renderSidebar(); };
+    sidebarList.appendChild(toggle);
   }
 }
 
