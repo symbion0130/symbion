@@ -1812,11 +1812,23 @@ class KimiClient(BaseClient):
 
     def _h(self): return {"Authorization":f"Bearer {self.api_key}","Content-Type":"application/json"}
 
+    def _eff_temp(self, model: str, requested: float) -> float:
+        """Kimi K2.* models (kimi-k2.5, kimi-k2.6, ...) reject any
+        temperature other than 1 with a 400 'invalid temperature: only
+        1 is allowed for this model'. Older moonshot-v1-* models accept
+        the full range. Clamp here so callers don't need to know which
+        model family they're on."""
+        m = (model or self.model or "").lower()
+        if m.startswith("kimi-k2"):
+            return 1.0
+        return requested
+
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
         async def _call():
+            m = model or self.model
             async with httpx.AsyncClient(timeout=60) as c:
                 r = await c.post(self._url, headers=self._h(), json={
-                    "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,
+                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),
                     "messages":[{"role":"system","content":system},{"role":"user","content":user}]})
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"].strip()
@@ -1824,16 +1836,18 @@ class KimiClient(BaseClient):
 
     async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
         async def _call():
+            m = model or self.model
             async with httpx.AsyncClient(timeout=90) as c:
                 r = await c.post(self._url, headers=self._h(), json={
-                    "model":model or self.model,"max_tokens":max_tokens,"temperature":temp,"messages":messages})
+                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),"messages":messages})
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
-        body = {"model":model or self.model,"max_tokens":cfg.max_tokens,
-                "temperature":cfg.temperature,"messages":messages,"stream":True}
+        m = model or self.model
+        body = {"model":m,"max_tokens":cfg.max_tokens,
+                "temperature":self._eff_temp(m, cfg.temperature),"messages":messages,"stream":True}
         if cfg.kimi_thinking_enabled:
             body["chat_template_kwargs"] = {"thinking": True}
         self._last_reasoning = ""
