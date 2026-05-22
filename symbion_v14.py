@@ -7824,22 +7824,34 @@ def run_terminal(symbion: "SYMBION"):
         print(yellow(f"  MCP       :  {len(symbion.cfg.mcp_servers)} server(s) configured but "
                      "MCP is only active in web mode (`--web`)."))
 
-    # Unicode box-drawing title bar with the brand mark inside (2026-05-21).
-    # ASCII rendering of the split-S logo: top horizontal block with a
-    # short notch on the left, three nodes on the centerline (dot/ring/dot),
-    # bottom horizontal block with a short notch on the right. Mirrors the
-    # graphical mark used by the Electron app + installer EXE. Width 66
-    # chars inside the corners; mark is 12 chars wide, centered (27-space
-    # leading indent + 12 mark + 27 trailing = 66).
+    # Unicode box-drawing title bar with the brand mark rendered as
+    # terminal-resolution block art (2026-05-21). The disc + edge ring +
+    # split-S mark are converted from the actual PNG icon at 28 px wide
+    # / 14 rows tall using `▀`/`▄`/`█`/` ` half-block chars (each row =
+    # 2 pixel rows). Regenerate by running scripts/_gen_icon_set.py and
+    # pasting the printed banner block here.
+    # Mark is 28 chars wide; centered in 66-char content area means
+    # 19-space leading + 28 mark + 19 trailing = 66.
     print()
     print(amber("  ╔══════════════════════════════════════════════════════════════════╗"))
     print(amber("  ║") + " " * 66 + amber("║"))
-    print(amber("  ║") + " " * 27 + warm_white("██████████  ") + " " * 27 + amber("║"))
-    print(amber("  ║") + " " * 27 + warm_white("██          ") + " " * 27 + amber("║"))
-    print(amber("  ║") + " " * 27 + warm_white("   •  ◯  •  ") + " " * 27 + amber("║"))
-    print(amber("  ║") + " " * 27 + warm_white("        ██  ") + " " * 27 + amber("║"))
-    print(amber("  ║") + " " * 27 + warm_white("  ██████████") + " " * 27 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("         ▄▄▄▄██▄▄▄▄         ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("      ▄█▀▀        ▀▀█▄      ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("    █▀▀              ▀▀█    ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("  ▄█▀  ▄▄▄▄▄▄▄▄▄▄▄▄▄   ▀█▄  ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white(" ▄█    █████████████     █▄ ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white(" █     ████▀▀▀▀▀▀▀▀▀      █ ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("▄█       ▄▄  ▄▄  ▄▄       █▄") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("▀█       ▀▀  ▀▀  ▀▀       █▀") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white(" █      ▄▄▄▄▄▄▄▄▄████     █ ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white(" ▀█     █████████████    █▀ ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("  ▀█▄   ▀▀▀▀▀▀▀▀▀▀▀▀▀  ▄█▀  ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("    █▄▄              ▄▄█    ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("      ▀█▄▄        ▄▄█▀      ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 19 + warm_white("         ▀▀▀▀██▀▀▀▀         ") + " " * 19 + amber("║"))
+    print(amber("  ║") + " " * 66 + amber("║"))
     print(amber("  ║") + warm_white(bold("                       SYMBION v14.0                              ")) + amber("║"))
+    print(amber("  ║") + " " * 66 + amber("║"))
     print(amber("  ╚══════════════════════════════════════════════════════════════════╝"))
     print()
 
