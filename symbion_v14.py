@@ -1175,6 +1175,18 @@ class CircuitBreaker:
     def record_success(self):
         self._failures = 0; self.is_open = False; self.last_error = ""
 
+    def trip(self, err: str = ""):
+        """Open the breaker immediately, bypassing the failure-count threshold.
+        Use for hard transient failures (HTTP 529 Overloaded, gateway timeouts
+        on the provider side) where retrying within the same turn wastes
+        latency but the issue should clear within the reset window. The
+        circuit auto-resets after `_reset_after` seconds, so a 529 burst
+        doesn't permanently sideline the provider."""
+        self._failures = self._open_after
+        self.is_open = True
+        self._opened_at = time.time()
+        if err: self.last_error = err
+
     def allow(self) -> bool:
         if not self.is_open: return True
         if time.time() - self._opened_at > self._reset_after:
@@ -1245,10 +1257,21 @@ class BaseClient:
             except Exception as e:
                 last = e
                 msg = str(e)
-                if self.cb: self.cb.record_failure(msg)
+                msg_low = msg.lower()
                 # Don't retry non-transient 4xx errors (bad key, billing, bad request)
                 if any(f" {code}:" in msg for code in ("400", "401", "403", "404")):
+                    if self.cb: self.cb.record_failure(msg)
                     break
+                # 529 Overloaded (Anthropic capacity) and similar "the
+                # service is briefly unavailable" signals — retrying within
+                # the same turn just stalls; trip the breaker immediately so
+                # SYMBION._active() routes the NEXT turn to the fallback
+                # provider (Ollama, OpenAI). Auto-resets after the breaker's
+                # window so we resume trying the primary once capacity clears.
+                if " 529:" in msg or "overloaded" in msg_low or " 503:" in msg:
+                    if self.cb: self.cb.trip(msg)
+                    break
+                if self.cb: self.cb.record_failure(msg)
                 if i < retries: await asyncio.sleep(backoff ** i)
         raise last
 
@@ -1400,6 +1423,8 @@ class AnthropicClient(BaseClient):
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
         system, msgs = self._split(messages)
         _m = model or self.model
+        if self.cb and not self.cb.allow():
+            raise RuntimeError(f"Circuit open: {self.cb.name}")
         async with httpx.AsyncClient(timeout=180) as c:
             async with c.stream("POST", self._url, headers=self._h(), json={
                 "model":_m,"max_tokens":cfg.max_tokens,
@@ -1411,6 +1436,14 @@ class AnthropicClient(BaseClient):
                         msg = json.loads(body).get("error",{}).get("message", body[:200].decode())
                     except Exception:
                         msg = body[:200].decode(errors="replace")
+                    # Trip the breaker immediately on capacity errors so
+                    # SYMBION._active() routes the next turn to the
+                    # fallback provider (Ollama). stream() doesn't go
+                    # through _retry, so the trip has to happen here.
+                    if resp.status_code in (529, 503) and self.cb:
+                        self.cb.trip(f"{resp.status_code}: {msg}")
+                    elif self.cb:
+                        self.cb.record_failure(f"{resp.status_code}: {msg}")
                     raise RuntimeError(f"Anthropic API {resp.status_code}: {msg}")
 
                 async for line in resp.aiter_lines():
@@ -1492,6 +1525,13 @@ class AnthropicClient(BaseClient):
                             err = json.loads(body).get("error",{}).get("message", body[:200].decode())
                         except Exception:
                             err = body[:200].decode(errors="replace")
+                        # Trip the breaker immediately on capacity errors
+                        # so the next turn falls back to Ollama via
+                        # _active() instead of replaying the same 529.
+                        if resp.status_code in (529, 503) and self.cb:
+                            self.cb.trip(f"{resp.status_code}: {err}")
+                        elif self.cb:
+                            self.cb.record_failure(f"{resp.status_code}: {err}")
                         raise RuntimeError(f"Anthropic API {resp.status_code}: {err}")
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "): continue
@@ -8649,6 +8689,12 @@ Examples:
     if args.kimi_thinking:       cfg.kimi_thinking_enabled          = True
     if not hasattr(cfg,'fallback_chain') or not cfg.fallback_chain:
         cfg.fallback_chain=[p for p in ["anthropic","openai","ollama"] if p!=cfg.llm_provider]
+    # Always ensure Ollama is in the chain as the local-only safety net.
+    # When Anthropic capacity 529s and OpenAI is unconfigured (or also
+    # down), the breaker still has somewhere to route to. Skipped only
+    # when Ollama IS the primary provider (no point being its own fallback).
+    if cfg.llm_provider != "ollama" and "ollama" not in cfg.fallback_chain:
+        cfg.fallback_chain.append("ollama")
 
     if args.save_config:
         cfg.save(); print(green(f"OK Saved to {CONFIG_FILE}")); sys.exit(0)
