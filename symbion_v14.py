@@ -437,6 +437,7 @@ CAPABILITIES_BASE = """Your tools:
 - write_file(path, content) — write a text file (workspace-only — writes are still sandboxed)
 - get_weather(lat, lon) — current weather at coordinates via Open-Meteo (free, no key). Use for "is it raining?", "how hot?", etc. when the user has shared their location.
 - get_local_time(timezone) — current time in an IANA timezone (e.g. Europe/Madrid). Use when the user asks locally-anchored time questions; system-prompt "Current time" is server-local and may differ when the user is traveling.
+- get_user_recent_activity(user, hours) — cross-user retrieval. When the active user asks about ANOTHER household user by name ("what was lala working on?"), pulls that user's recent summaries + message snippets. Symmetric — any known user can query any other. Validated against cfg.known_users; unknown names rejected.
 
 Read tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`, `C:\\Users\\me\\Desktop\\img.png`) or relative to the workspace root. Relative paths resolve against the project dir (typically D:\\symbion). Write_file is workspace-only and rejects absolute paths.
 
@@ -908,6 +909,18 @@ TOOL_SCHEMAS = [
                 "timezone": {"type": "string", "description": "IANA timezone (e.g. 'Europe/Madrid', 'America/Los_Angeles')"},
             },
             "required": ["timezone"],
+        },
+    },
+    {
+        "name": "get_user_recent_activity",
+        "description": "CROSS-USER ONLY. Return ANOTHER household user's recent activity (summaries + message snippets within the last `hours`). NEVER use this for the ACTIVE user — the active user's own recent history is already in your context via build_context. Calling it on yourself is redundant and explicitly wrong; the persona's 'Currently talking to: <name>' line names the active user, and the `user` arg MUST be a different name. Use ONLY when the active user explicitly asks about another known household user by name — 'what was lala working on?', 'is lala still up?', 'did lala mention X?'. Valid names: see the 'Other household users with recent Symbion activity' line in your system prompt. If that line isn't present, no other users have recent activity — don't fabricate names.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user":  {"type": "string", "description": "Name of the OTHER household user to query (e.g. 'lala'). Must match one of the names in cfg.known_users."},
+                "hours": {"type": "number", "description": "Look-back window in hours (default 24, capped at 336 / 2 weeks)", "default": 24},
+            },
+            "required": ["user"],
         },
     },
 ]
@@ -2056,9 +2069,16 @@ class SymbionTools:
     # turn doesn't burn ~2s per call hammering a known-bad key.
     _brave_auth_failed: bool = False
 
-    def __init__(self, workspace_root: str = "./symbion_workspace"):
+    def __init__(self, workspace_root: str = "./symbion_workspace",
+                  memory: Optional["SymbionMemory"] = None):
         self._workspace = Path(workspace_root)
         self._workspace.mkdir(parents=True, exist_ok=True)
+        # Memory reference: only the cross-user retrieval tool needs it
+        # (get_user_recent_activity). Optional so existing callers that
+        # build SymbionTools standalone (tests, helpers) still work; the
+        # cross-user tool just returns an error string when memory is
+        # missing. SYMBION wires it in at __init__ time.
+        self._memory = memory
 
     @staticmethod
     def calculate(expr: str) -> str:
@@ -2604,11 +2624,66 @@ class SymbionTools:
         now = datetime.now(zi)
         return now.strftime("%A, %B %d %Y, %I:%M %p %Z").lstrip("0")
 
+    def get_user_recent_activity(self, target_user: str, cfg: "SymbionConfig",
+                                  hours: float = 24.0) -> str:
+        """Cross-user retrieval (Phase 2). When ONE household member asks
+        Symbion about another ('what was lala working on', 'is lala
+        still up?'), this tool returns a formatted snapshot of the
+        target user's recent summaries + a few raw message snippets.
+        Validated against cfg.known_users so a malicious / confused
+        call can't leak arbitrary names.
+
+        Symmetric: any known user can query any other known user.
+        Returns a single string so the model can quote it directly."""
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        target = (target_user or "").strip().lower()
+        known = [u.lower() for u in (cfg.known_users or [])]
+        if not target or target not in known:
+            return (f"Error: unknown user '{target_user}'. Known users in "
+                    f"this household: {', '.join(cfg.known_users or [])}")
+        # Refuse self-queries: the active user's own recent history is
+        # already in the build_context recent + summary blocks. The tool
+        # exists specifically to fetch OTHER household users' activity.
+        # Approximated against cfg.active_user — for per-session user
+        # overrides this can't catch every case, but it does catch the
+        # common case + the eval harness's default user.
+        active = (cfg.active_user or "").strip().lower()
+        if active and target == active:
+            return (f"Error: get_user_recent_activity is for OTHER household "
+                    f"members. '{target}' is the active user — their recent "
+                    f"history is already in your system-prompt context. "
+                    f"Just answer from that.")
+        try:
+            hours_f = float(hours)
+        except (TypeError, ValueError):
+            hours_f = 24.0
+        hours_f = max(0.1, min(hours_f, 24.0 * 14))  # cap at 2 weeks
+        data = self._memory.get_user_recent_activity(target, hours=hours_f)
+        out = [f"{target} — last active: {data['last_active_ago']}"]
+        if data["summaries"]:
+            out.append("\nRecent summaries:")
+            for s in data["summaries"]:
+                ts = (s.get("ts") or "")[:16].replace("T", " ")
+                out.append(f"  [{ts}] {s['content']}")
+        if data["messages"]:
+            out.append("\nRecent message snippets:")
+            for m in data["messages"]:
+                ts = (m.get("ts") or "")[:16].replace("T", " ")
+                role = "you (sym)" if m["role"] == "assistant" else target
+                snippet = (m["content"] or "").replace("\n", " ")[:140]
+                out.append(f"  [{ts}] {role}: {snippet}")
+        if not data["summaries"] and not data["messages"]:
+            out.append("(No content in the last "
+                       f"{int(hours_f) if hours_f>=1 else hours_f}h.)")
+        return "\n".join(out)
+
     _ALLOWED_TOOLS = frozenset({
         "calculate","datetime","read_file","read_file_chunk",
         "read_image","read_pdf","list_dir",
         "write_file","web_search","fetch_url",
         "get_weather","get_local_time",
+        "get_user_recent_activity",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -2730,6 +2805,15 @@ class SymbionTools:
             tz = _str("timezone", 64)
             if tz is None: return False, "get_local_time requires IANA timezone string", {}
             out["timezone"] = tz
+        elif tool == "get_user_recent_activity":
+            target = _str("user", 32)
+            if target is None: return False, "get_user_recent_activity requires 'user' string", {}
+            out["user"] = target
+            hrs = args.get("hours", 24)
+            try:
+                out["hours"] = float(hrs)
+            except (TypeError, ValueError):
+                out["hours"] = 24.0
 
         return True, "", out
 
@@ -2751,6 +2835,8 @@ class SymbionTools:
         if tool=="fetch_url":       return await self.fetch_url(a["url"], cfg.search_max_chars)
         if tool=="get_weather":     return await self.get_weather(a["lat"], a["lon"])
         if tool=="get_local_time":  return self.get_local_time(a["timezone"])
+        if tool=="get_user_recent_activity":
+            return self.get_user_recent_activity(a["user"], cfg, a.get("hours", 24.0))
         return f"Unknown tool: {tool}"
 
 
@@ -3866,6 +3952,75 @@ class SymbionMemory:
             "age_hours": (datetime.now() - ts).total_seconds() / 3600.0,
         }
 
+    # --- Cross-user presence + retrieval (Phase 1 + 2) ----
+    # Both built on existing user_profile + messages + summaries tables.
+    # No new schema. Symmetric: any known user can read any other known
+    # user's recent activity — the cfg.known_users list is the trust
+    # boundary, enforced by the tool layer (which validates user names).
+
+    def get_user_last_activity(self, user: str) -> Optional[datetime]:
+        """Last respond() timestamp for `user`, derived from the
+        __active_session_ts row that set_active_session writes every
+        turn. Returns None if the user has never used Symbion."""
+        with sqlite3.connect(self.db) as c:
+            row = c.execute(
+                "SELECT value FROM user_profile WHERE key=?",
+                (f"{user}:{self._ACTIVE_SESSION_TS_KEY}",)).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return datetime.fromisoformat(row[0])
+        except Exception:
+            return None
+
+    def get_user_recent_activity(self, user: str,
+                                  hours: float = 24.0,
+                                  max_summaries: int = 5,
+                                  max_messages: int = 6) -> Dict:
+        """Pull `user`'s recent summaries + a few raw message snippets
+        within the last `hours`. Used by the get_user_recent_activity
+        tool when one household member asks Symbion about another.
+        Bypasses the user-scope filter on cross-session reads — that
+        filter exists to keep retrieval CLEAN, not to enforce isolation.
+
+        Returns:
+          {
+            "user": "lala",
+            "last_active_at": "2026-05-21T17:42:00",  # ISO or None
+            "last_active_ago": "5m ago" | "2d ago" | "never",
+            "summaries": [{"ts": ..., "content": ...}, ...],
+            "messages":  [{"ts": ..., "role": ..., "content": ...}, ...],
+          }
+        """
+        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+        with sqlite3.connect(self.db) as c:
+            sum_rows = c.execute(
+                "SELECT timestamp, content FROM summaries "
+                "WHERE user=? AND timestamp >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (user, cutoff, max_summaries)).fetchall()
+            msg_rows = c.execute(
+                "SELECT timestamp, role, content FROM messages "
+                "WHERE user=? AND timestamp >= ? AND length(content) >= 20 "
+                "ORDER BY id DESC LIMIT ?",
+                (user, cutoff, max_messages)).fetchall()
+        last_active = self.get_user_last_activity(user)
+        if last_active:
+            ago_secs = (datetime.now() - last_active).total_seconds()
+            if   ago_secs < 60:    ago = f"{int(ago_secs)}s ago"
+            elif ago_secs < 3600:  ago = f"{int(ago_secs/60)}m ago"
+            elif ago_secs < 86400: ago = f"{int(ago_secs/3600)}h ago"
+            else:                  ago = f"{int(ago_secs/86400)}d ago"
+        else:
+            ago = "never"
+        return {
+            "user": user,
+            "last_active_at": last_active.isoformat() if last_active else None,
+            "last_active_ago": ago,
+            "summaries": [{"ts": r[0], "content": r[1]} for r in reversed(sum_rows)],
+            "messages":  [{"ts": r[0], "role": r[1], "content": r[2]} for r in reversed(msg_rows)],
+        }
+
     def clear_location(self, user: str = "aaron") -> None:
         """Remove all location fields for `user`. UI 'forget my location'
         path; also useful when the user explicitly opts out."""
@@ -4359,6 +4514,37 @@ class SymbionMemory:
                 f"no 'as a fellow Texan', no name-dropping the city to seem "
                 f"attentive): {place}{tz_note}{stale}{coord_hint}")
 
+        # Cross-user presence (Phase 1). When the household has more than
+        # one known user, surface who else has been talking to Symbion
+        # recently — last-activity timestamp only, no content. Used as
+        # ambient signal: the model knows lala is around (in case the
+        # user asks); doesn't surface her content without an explicit
+        # ask (Phase 2's get_user_recent_activity tool handles that).
+        known_users = list(self.cfg.known_users or [])
+        if len(known_users) > 1:
+            others = []
+            now = datetime.now()
+            for u in known_users:
+                if u == user:
+                    continue
+                la = self.get_user_last_activity(u)
+                if not la:
+                    continue
+                secs = (now - la).total_seconds()
+                if secs > 7 * 86400:  # stale beyond a week — don't mention
+                    continue
+                if   secs < 60:    ago = f"{int(secs)}s ago"
+                elif secs < 3600:  ago = f"{int(secs/60)}m ago"
+                elif secs < 86400: ago = f"{int(secs/3600)}h ago"
+                else:              ago = f"{int(secs/86400)}d ago"
+                others.append(f"{u} ({ago})")
+            if others:
+                parts.append(
+                    f"Other household users with recent Symbion activity: "
+                    f"{', '.join(others)}. (Ambient — don't mention unprompted. "
+                    f"If the active user asks 'what was {known_users[1] if known_users[1]!=user else known_users[0]} working on?' "
+                    f"or similar, call get_user_recent_activity to pull their content.)")
+
         if profile:
             # current_situation is the load-bearing life-events field. Surface
             # it FIRST and labeled clearly so the model treats it as ambient
@@ -4787,7 +4973,7 @@ class SYMBION:
         self.learner        = SymbionLearner(_db)
         self.health          = HealthMetrics()
         self.heuristic      = OfflineJudgeStub()
-        self.tools          = SymbionTools(str(_REPO_ROOT))
+        self.tools          = SymbionTools(str(_REPO_ROOT), memory=self.memory)
         self.events         = EventLogger()
         self.embeddings     = EmbeddingClient(self.cfg)
 

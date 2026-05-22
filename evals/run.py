@@ -360,6 +360,16 @@ def main():
     cfg.llm_provider = args.provider
     cfg.tools_enabled = bool(args.tools)
     cfg.self_eval_enabled = False
+    # Isolation: route to a fresh temp DB so the eval can't pick up the
+    # user's real Symbion history (location, cross-user activity, prior
+    # sessions) AND can't pollute the real DB with test sessions. Previous
+    # runs were using symbion.db in the cwd — bucket cases that asserted
+    # "no location set" were instead reading the user's real coords,
+    # which silently invalidated several "should not use tool" assertions.
+    import tempfile as _tf
+    cfg.db_path = _tf.NamedTemporaryFile(suffix=".db", prefix="symbion_eval_",
+                                          delete=False).name
+    print(f"  Isolated eval DB: {cfg.db_path}")
 
     golden = load_golden(args.golden)
     print(f"\n  Running {len(golden)} eval cases with provider={args.provider}  "
