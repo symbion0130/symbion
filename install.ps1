@@ -81,7 +81,8 @@ param(
     [string]$InstallDir,
     [string]$Branch,
     [switch]$SkipSetup,
-    [switch]$SkipLaunch
+    [switch]$SkipLaunch,
+    [switch]$SkipOllama
 )
 
 $ErrorActionPreference = 'Stop'
@@ -324,6 +325,43 @@ try {
     }
 } finally {
     Pop-Location
+}
+
+# ------------------------------------------------------------------------
+# Phase 2.5: Ollama + local models
+#   Symbion's default config (symbion.json) names mistral / llama3.2 /
+#   mxbai-embed-large. They're optional — a user running with
+#   --provider anthropic doesn't need any of this — but a fresh-machine
+#   install that mirrors the development setup wants them. The helper
+#   skips Ollama install when ollama is already on PATH, and skips
+#   each individual model pull when it's already in `ollama list`, so
+#   re-running is cheap. Failures don't abort the install — the user
+#   can still run Symbion with --provider anthropic if Ollama setup
+#   fails. Skipped entirely when -SkipOllama is passed, or when env
+#   var SYMBION_SKIP_OLLAMA is set to anything truthy (lets the iex
+#   pipeline override without param syntax).
+# ------------------------------------------------------------------------
+$skipOllamaFlag = $SkipOllama -or ($env:SYMBION_SKIP_OLLAMA -and $env:SYMBION_SKIP_OLLAMA -ne '0')
+if ($skipOllamaFlag) {
+    Write-Section "Skipping Ollama setup (-SkipOllama or SYMBION_SKIP_OLLAMA set)"
+} else {
+    Write-Section "Ollama + local models (idempotent; skips already-installed pieces)"
+    $ollamaScript = Join-Path $RepoDir 'scripts\install-ollama.ps1'
+    if (Test-Path -LiteralPath $ollamaScript) {
+        try {
+            & $ollamaScript
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[warn] Ollama setup exited with code $LASTEXITCODE -- continuing." -ForegroundColor Yellow
+                Write-Host "       You can re-run later: powershell -ExecutionPolicy Bypass -File $ollamaScript"
+                Write-Host "       Or use --provider anthropic to skip Ollama entirely."
+            }
+        } catch {
+            Write-Host "[warn] Ollama setup threw: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "       Symbion still works with --provider anthropic. Re-run scripts\install-ollama.ps1 manually to retry."
+        }
+    } else {
+        Write-Host "[note] $ollamaScript not present in this checkout; skipping. (Pull main if you want it.)"
+    }
 }
 
 # ------------------------------------------------------------------------

@@ -155,6 +155,7 @@ Kimi and DeepSeek were deliberately removed from Worker injection on 2026-05-19 
 | `scripts/verify-worker.ps1` | 11-check smoke test of the Worker (gate behaviour + placeholder substitution + key presence). Run after any Worker change. Never echoes secrets. |
 | `scripts/push-env.ps1` | Push local `.env` → `%OneDrive%\Symbion\sync\.env` so future installs on other machines pull it. `-Pull` reverses direction. |
 | `scripts/tailscale-https.ps1` | Wrap `tailscale serve` / `tailscale funnel` to expose Symbion at `https://<host>.<tailnet>.ts.net`. Needed for browser geolocation (secure-context API) on phones / non-localhost devices. `-Funnel` opens it publicly (must enable per-node in admin console); default is tailnet-only. `-Off` tears down. |
+| `scripts/install-ollama.ps1` | Install Ollama via winget + pull the default models (`mistral`, `llama3.2`, `mxbai-embed-large`). Idempotent: skips Ollama install when already present, skips each model pull when already in `ollama list`. Called automatically by `install.ps1` unless `-SkipOllama` / `$env:SYMBION_SKIP_OLLAMA` is set. `-SkipModels` installs Ollama without pulling, `-Models "a,b,c"` overrides the list. |
 
 **Edit constraints when touching install/deploy:**
 
