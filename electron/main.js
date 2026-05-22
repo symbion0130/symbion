@@ -143,6 +143,17 @@ function waitForBackend(timeoutMs = 30_000) {
 
 // ---- Window ----
 function createWindow() {
+  // Per-platform icon. The installer (electron-builder) bakes
+  // assets/symbion.ico into the EXE itself, but the BrowserWindow icon
+  // is what shows in the taskbar / alt-tab / window title bar — Electron
+  // doesn't pick that up from the EXE on Windows, so we set it
+  // explicitly. macOS reads icon from .icns in the bundle and ignores
+  // this; Linux uses the PNG.
+  const iconPath = path.join(__dirname, 'assets',
+    process.platform === 'win32'  ? 'symbion.ico'  :
+    process.platform === 'darwin' ? 'symbion.icns' :
+                                    'symbion-512.png');
+
   mainWindow = new BrowserWindow({
     width:  1280,
     height: 800,
@@ -150,6 +161,7 @@ function createWindow() {
     minHeight: 480,
     backgroundColor: '#0c0a08',  // matches Symbion's web UI --bg
     title: 'Symbion',
+    icon: iconPath,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration:  false,

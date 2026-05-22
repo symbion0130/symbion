@@ -21,12 +21,14 @@
     "files": [
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "assets/**"
     ],
     "directories": {
       "output": "dist"
     },
     "win": {
+      "icon": "assets/symbion.ico",
       "target": [
         {
           "target": "nsis",
@@ -34,10 +36,18 @@
         }
       ]
     },
+    "mac": {
+      "icon": "assets/symbion.icns"
+    },
+    "linux": {
+      "icon": "assets/symbion-512.png"
+    },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/symbion.ico",
+      "uninstallerIcon": "assets/symbion.ico"
     }
   }
 }
