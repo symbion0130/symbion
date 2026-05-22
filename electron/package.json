@@ -24,6 +24,20 @@
       "package.json",
       "assets/**"
     ],
+    "extraResources": [
+      {
+        "from": "../.python",
+        "to": ".python",
+        "filter": [
+          "**/*",
+          "!**/__pycache__",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/tests/**",
+          "!**/test/**"
+        ]
+      }
+    ],
     "directories": {
       "output": "dist"
     },

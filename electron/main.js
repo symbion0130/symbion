@@ -60,12 +60,26 @@ const HOST     = '127.0.0.1';
 const HEALTH_URL = `http://${HOST}:${PORT}/health`;
 const UI_URL     = `http://${HOST}:${PORT}/`;
 
-// Pick the Python interpreter. Prefer the portable copy that ships with
-// Symbion (scripts/bootstrap-portable.bat puts it at .python/python.exe);
-// fall back to `python` on PATH. Returns null when REPO_ROOT couldn't
-// be located AND `python` isn't an obvious option — caller surfaces a
-// dialog rather than spawning a doomed child.
+// Pick the Python interpreter. Priority order:
+//   1. Bundled Python shipped with the Electron installer (packaged mode):
+//      extraResources puts .python/ at process.resourcesPath/.python/.
+//      Lets the desktop installer work standalone without install.ps1
+//      having pre-staged a portable Python.
+//   2. Repo's portable Python at $REPO_ROOT/.python/python.exe (dev mode,
+//      or installed-mode where install.ps1 already ran bootstrap-portable).
+//   3. `python` on PATH (last resort — system Python may not have deps).
+// Returns "python" as a final fallback so the spawn at least tries; the
+// startBackend → waitForBackend chain will surface a clear error if it
+// fails. Never returns null — falling back to PATH-python lets the user
+// recover by setting up their own env without reinstalling.
 function resolvePython() {
+  // Packaged mode: extraResources lives at process.resourcesPath. In dev
+  // this points at Electron's own resources dir which doesn't have .python,
+  // so the check falls through to REPO_ROOT/.python below.
+  if (app.isPackaged) {
+    const bundled = path.join(process.resourcesPath, '.python', 'python.exe');
+    if (fs.existsSync(bundled)) return bundled;
+  }
   if (REPO_ROOT) {
     const portable = path.join(REPO_ROOT, '.python', 'python.exe');
     if (fs.existsSync(portable)) return portable;
@@ -260,6 +274,148 @@ function probeHealth(timeoutMs = 1500) {
   });
 }
 
+// Probe Ollama's /api/tags to see (a) whether Ollama is running, (b) which
+// models are pulled. Resolves to { ok, models[] } or { ok: false }. Short
+// timeout because this is a non-blocking startup check; if Ollama is slow
+// we'd rather skip the check than hold up the window.
+function probeOllamaTags(host, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let urlBase;
+    try { urlBase = new URL(host); }
+    catch (e) { return resolve({ ok: false }); }
+    const tagsUrl = `${urlBase.protocol}//${urlBase.host}/api/tags`;
+    const req = http.get(tagsUrl, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        return resolve({ ok: false });
+      }
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { buf += chunk; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(buf);
+          const models = (data.models || []).map((m) => String(m.name || ''));
+          resolve({ ok: true, models });
+        } catch (e) {
+          resolve({ ok: false });
+        }
+      });
+    });
+    req.on('error', () => resolve({ ok: false }));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve({ ok: false }); });
+  });
+}
+
+// Async first-run check: surface a one-time dialog if Ollama is missing or
+// the embedding model isn't pulled. Non-blocking — dialog fires after the
+// main window is up so it doesn't gate startup. Skips entirely when
+// embeddings are disabled in symbion.json (the user has opted out of
+// semantic retrieval and doesn't need Ollama for that path).
+//
+// Why a dialog instead of auto-pulling: mxbai-embed-large is ~670 MB.
+// Triggering a download of that size without user consent is bad UX,
+// especially on metered connections. install-ollama.ps1 is the canonical
+// installer and already handles idempotent pulls — point users there
+// rather than duplicating its logic in Electron.
+async function maybeShowOllamaDialog(parentWindow) {
+  // Honor user opt-out from symbion.json.
+  if (cfg.embedding_enabled === false) return;
+  // Default ollama host comes from SymbionConfig (http://localhost:11434).
+  const ollamaHost = cfg.ollama_host || 'http://localhost:11434';
+  const embedModel = cfg.embedding_model || 'mxbai-embed-large';
+
+  const probe = await probeOllamaTags(ollamaHost);
+  if (probe.ok) {
+    // Ollama reachable. Match by base name — Ollama tags include `:latest`
+    // (e.g. "mxbai-embed-large:latest") so a substring match is the right
+    // semantics for "is this model pulled".
+    const hasModel = probe.models.some((n) => n.startsWith(embedModel));
+    if (hasModel) return;
+    const choice = await dialog.showMessageBox(parentWindow, {
+      type: 'info',
+      title: 'Symbion: embedding model missing',
+      message: `Ollama is running but the "${embedModel}" model isn't pulled.`,
+      detail:
+        `Symbion uses ${embedModel} for semantic memory retrieval (~670 MB ` +
+        `download). Without it, retrieval falls back to BM25 (keyword-only) — ` +
+        `Symbion will still work, just less effective at recalling paraphrased ` +
+        `past context.\n\n` +
+        `Run install-ollama.ps1 or "ollama pull ${embedModel}" to enable it.`,
+      buttons: ['OK', 'Open install script'],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    if (choice.response === 1) openInstallOllamaScript();
+    return;
+  }
+  // Ollama not reachable.
+  const choice = await dialog.showMessageBox(parentWindow, {
+    type: 'info',
+    title: 'Symbion: Ollama not detected',
+    message: `Ollama isn't running at ${ollamaHost}.`,
+    detail:
+      `Symbion works fine with cloud LLM providers (Anthropic, OpenAI) — ` +
+      `you don't need Ollama for chat. But local LLM mode and semantic ` +
+      `memory retrieval require Ollama.\n\n` +
+      `Run install-ollama.ps1 in PowerShell to install Ollama + pull the ` +
+      `models Symbion uses.`,
+    buttons: ['OK', 'Open install script'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (choice.response === 1) openInstallOllamaScript();
+}
+
+// Spawn install-ollama.ps1 in a visible PowerShell window. Uses
+// ExecutionPolicy Bypass so the script runs even when the user's
+// machine-wide policy is Restricted (the default on locked-down Windows).
+// Detached so closing the PowerShell window doesn't kill Symbion.
+function openInstallOllamaScript() {
+  if (!REPO_ROOT) {
+    dialog.showErrorBox(
+      'Install script not found',
+      'Could not locate the Symbion repo. Run install.ps1 first to set up ' +
+      'the repo at %USERPROFILE%\\symbion, then re-launch Symbion.');
+    return;
+  }
+  const script = path.join(REPO_ROOT, 'scripts', 'install-ollama.ps1');
+  if (!fs.existsSync(script)) {
+    dialog.showErrorBox(
+      'Install script not found',
+      `Expected install-ollama.ps1 at:\n${script}\n\n` +
+      `The Symbion repo may be partially installed — re-run install.ps1 ` +
+      `or clone a fresh copy.`);
+    return;
+  }
+  if (process.platform === 'win32') {
+    try {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoExit', '-ExecutionPolicy', 'Bypass', '-File', script],
+        { detached: true, stdio: 'ignore' });
+      child.unref();
+    } catch (e) {
+      dialog.showErrorBox('Failed to launch installer',
+        `Could not start PowerShell:\n${e.message}\n\n` +
+        `Open a PowerShell window manually and run:\n  ${script}`);
+    }
+  } else {
+    // Non-Windows: install-ollama.ps1 is Windows-specific. Surface the path
+    // so the user can run the equivalent steps manually.
+    dialog.showMessageBox(mainWindow || null, {
+      type: 'info',
+      title: 'Manual install required',
+      message: 'install-ollama.ps1 is Windows-only.',
+      detail:
+        `On macOS/Linux, install Ollama from https://ollama.com and run:\n` +
+        `  ollama pull ${cfg.embedding_model || 'mxbai-embed-large'}\n` +
+        `  ollama pull mistral\n` +
+        `  ollama pull llama3.2`,
+    });
+  }
+}
+
 // ---- App lifecycle ----
 app.whenReady().then(async () => {
   buildMenu();
@@ -272,6 +428,9 @@ app.whenReady().then(async () => {
   if (existing) {
     console.log('[symbion] existing backend detected — attaching');
     createWindow();
+    maybeShowOllamaDialog(mainWindow).catch((e) => {
+      console.warn('[symbion] Ollama check failed:', e);
+    });
     return;
   }
   // No backend running and no repo found — we can't spawn. Surface a
@@ -303,7 +462,16 @@ app.whenReady().then(async () => {
       `Couldn't reach ${HEALTH_URL} (${ready.reason}).\n\n` +
       `Possible causes: port ${PORT} already in use by another process; Python deps missing;\n` +
       `bootstrap script never ran. Check the console output in View > Toggle DevTools.`);
+    return;
   }
+  // Backend is up. Run the Ollama / embedding-model check non-blockingly:
+  // we don't await here because the result drives a dialog the user can
+  // dismiss; the main window is fully usable while it's open. Errors in
+  // the check itself swallow silently — better to skip the dialog than
+  // to block on a flaky probe.
+  maybeShowOllamaDialog(mainWindow).catch((e) => {
+    console.warn('[symbion] Ollama check failed:', e);
+  });
 });
 
 app.on('window-all-closed', () => {

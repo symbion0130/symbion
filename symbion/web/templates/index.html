@@ -1022,6 +1022,12 @@ const sidebarNew      = document.getElementById('sidebar-new');
 
 let cachedSessions = [];
 let skipNextHistory = false; // set when we've already REST-hydrated; WS history would clobber
+// Map<request_id, {el, body}> for in-flight peer-streaming bubbles. A
+// remote_tok frame creates or extends the entry; remote_assistant swaps
+// in the authoritative full text and removes the entry. Survives until
+// the page reloads — entries without a matching remote_assistant leak
+// silently (DOM stays, map entry stays ~80 bytes). Acceptable scale.
+const remoteStreaming = new Map();
 // Sidebar shows the 5 most-recent sessions by default; tapping the
 // "Show all" footer expands to the full cached list (up to 50). Sticky
 // across opens within the page session — closing the sidebar doesn't
@@ -1303,11 +1309,34 @@ function connect(){
       // will follow as remote_assistant once the server completes.
       addYouRemote(d.text||'');
       fetchSessions().catch(()=>{});
+    } else if(d.t==='remote_tok'){
+      // Peer device's response is streaming. When cfg.peer_token_streaming
+      // is on, the server fans each token out as a remote_tok frame so
+      // this client can paint the response live instead of waiting for
+      // remote_assistant. Keyed by request_id so two devices typing
+      // concurrently keep their streams separate.
+      const rid = d.request_id || 'rt';
+      let entry = remoteStreaming.get(rid);
+      if(!entry){
+        entry = addSymStreamingRemote();
+        remoteStreaming.set(rid, entry);
+      }
+      entry.body.textContent += (d.v || '');
+      scrollToBottom();
     } else if(d.t==='remote_assistant'){
       // Symbion finished a turn that another device initiated on the
-      // same session. Render the full response as a static block (no
-      // token streaming for peers — they get the final text).
-      addSymStaticRemote(d.text||'');
+      // same session. When remote_tok already painted a partial bubble
+      // for this request_id, swap in the authoritative full text and
+      // drop the map entry. Otherwise (peer streaming off, or this
+      // client missed the early frames) render as a fresh static block.
+      const rid = d.request_id;
+      if(rid && remoteStreaming.has(rid)){
+        const entry = remoteStreaming.get(rid);
+        entry.body.textContent = d.text || entry.body.textContent;
+        remoteStreaming.delete(rid);
+      } else {
+        addSymStaticRemote(d.text||'');
+      }
       fetchSessions().catch(()=>{});
     } else if(d.t==='user_init'){
       // Server-advertised user roster. Prompt once per browser; if the
@@ -1523,6 +1552,22 @@ function addSymStaticRemote(text){
   d.querySelector('.msg-body').textContent=text;
   chatInner.appendChild(d);
   scrollToBottom(true);
+}
+// Live-streaming peer bubble. Created on the first remote_tok frame for
+// a given request_id; tokens append into .body. The matching
+// remote_assistant frame later replaces the partial text with the
+// authoritative full text and removes the map entry. Same visual shape
+// as addSymStaticRemote so the user can't tell mid-stream from a static
+// fall-back (when peer streaming is off the static one is used instead).
+function addSymStreamingRemote(){
+  const d=document.createElement('div');
+  d.className='msg sym';
+  d.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  const label=d.querySelector('.msg-label');
+  label.appendChild(_syncedChip('synced'));
+  chatInner.appendChild(d);
+  scrollToBottom(true);
+  return { el: d, body: d.querySelector('.msg-body') };
 }
 
 // Render the server's {t:'history',messages:[...]} payload. role==='user'

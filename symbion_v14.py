@@ -189,6 +189,19 @@ class SymbionConfig:
     brave_api_key:     str = field(default_factory=lambda: os.getenv("BRAVE_API_KEY",""))
     anthropic_model:   str = "claude-sonnet-4-6"
     anthropic_judge_model: str = "claude-haiku-4-5-20251001"
+    # Per-role model overrides. Empty ("") = use anthropic_judge_model
+    # (the cheap classifier default). Set in symbion.json when a specific
+    # role benefits from a stronger or weaker model than the judge default.
+    # Anthropic-only for now; other providers still use _jmodel()'s
+    # provider-level model selection. Roles wired through _jmodel(role=...):
+    #   self_eval   — post-gen quality reviewer
+    #   summarize   — rolling-summary + consolidate
+    #   profile     — user-profile updater
+    #   proactive   — proactive scheduler check-ins
+    anthropic_self_eval_model: str = ""
+    anthropic_summarize_model: str = ""
+    anthropic_profile_model:   str = ""
+    anthropic_proactive_model: str = ""
     # Escalation: when the pre-gen judge marks a turn as high-stakes
     # (clinical/medical, complex multi-step reasoning, contested factual
     # synthesis, deep architecture analysis), the responder for THAT TURN ONLY
@@ -346,6 +359,18 @@ class SymbionConfig:
     # Each socket runs its own asyncio loop; cancelled cleanly on
     # disconnect.
     proactive_web_push_seconds: int = 0
+
+    # Mirror generated tokens to peer WebSocket clients on the same
+    # session in real time. When False (default), peers only see the
+    # final response via remote_assistant after generation completes.
+    # When True, each turn's tokens fan out as `remote_tok` frames so
+    # a phone watching the laptop's session sees the response build up
+    # live. Frames are keyed by per-turn request_id so two devices
+    # typing concurrently don't cross-contaminate streams. Off by
+    # default because one socket per session is the common case and
+    # the extra per-token broadcast is wasted work for solo use; flip
+    # to True when you regularly watch the same session across devices.
+    peer_token_streaming: bool = False
 
     voice_loosen_enabled:      bool = True
 
@@ -2716,11 +2741,18 @@ class SymbionTools:
         # Refuse self-queries: the active user's own recent history is
         # already in the build_context recent + summary blocks. The tool
         # exists specifically to fetch OTHER household users' activity.
-        # Prefer the caller-supplied active_user (resolved per-session via
-        # SYMBION._active_user(session)), fall back to cfg.active_user
-        # for older callers / evals that don't thread session through.
-        active = ((active_user or cfg.active_user or "").strip().lower())
-        if active and target == active:
+        # The caller MUST pass active_user (resolved per-session via
+        # SYMBION._active_user(session)). Falling back to cfg.active_user
+        # was wrong: a session where /user switched to lala but cfg.active_user
+        # is still "aaron" would let a Lala-querying-Lala call slip past.
+        # Fail closed when active_user is missing so unthreaded paths are
+        # caught loud instead of letting the wrong user's data through.
+        active = (active_user or "").strip().lower()
+        if not active:
+            return ("Error: get_user_recent_activity needs session context. "
+                    "Caller must thread the per-session active user (via "
+                    "SYMBION._active_user) into tools.dispatch.")
+        if target == active:
             return (f"Error: get_user_recent_activity is for OTHER household "
                     f"members. '{target}' is the active user — their recent "
                     f"history is already in your system-prompt context. "
@@ -5103,6 +5135,19 @@ class SYMBION:
         # shape as AnthropicClient.stream_with_tools emits).
         self._session_last_tool_calls: Dict[str, List[Dict]] = {}
 
+        # Self-eval gets its own circuit breaker so a responder-provider
+        # 529 burst doesn't also dark out the post-gen quality review.
+        # Fire-and-forget telemetry calls are cheap to retry; a shorter
+        # reset window (30s vs the responder's 60s) lets self-eval recover
+        # independently. The breaker still trips after 4 consecutive
+        # failures so genuine Anthropic outages don't spin wasted calls.
+        # When cfg.self_eval_provider routes self-eval through a different
+        # provider entirely, that client's OWN cb still applies on top —
+        # this breaker is in addition, not instead.
+        self._self_eval_breaker = CircuitBreaker(name="self_eval",
+                                                  open_after=4,
+                                                  reset_after=30.0)
+
         self._providers: List[BaseClient] = []
         self._build_providers()
         self.client = self._providers[0] if self._providers else None
@@ -5347,27 +5392,44 @@ class SYMBION:
                     self._ws_clients.pop(session_id, None)
 
     async def broadcast_to_session(self, session_id: str, frame: Dict,
-                                    exclude=None) -> int:
+                                    exclude=None,
+                                    per_peer_timeout: float = 1.0) -> int:
         """Send `frame` (a JSON-serialisable dict) to every WS client
         registered for `session_id` except `exclude`. Returns the number
-        of peers the frame was sent to. Per-socket send failures are
-        swallowed and the dead socket is dropped from the registry — one
-        broken peer can't block the rest."""
+        of peers the frame was successfully sent to. Per-socket send
+        failures (including timeout) are swallowed and the dead socket
+        is dropped from the registry — one broken peer can't block the
+        rest.
+
+        Peer sends fan out via asyncio.gather so a slow peer doesn't
+        delay the next. Each send is capped at `per_peer_timeout`
+        seconds; without this, the per-token broadcast hot path (used
+        when cfg.peer_token_streaming is True) could be stalled by a
+        single peer whose TCP buffer is full."""
         if self._ws_clients_lock is None:
             self._ws_clients_lock = asyncio.Lock()
         async with self._ws_clients_lock:
             peers = list(self._ws_clients.get(session_id, set()))
+        targets = [ws for ws in peers if ws is not exclude]
+        if not targets:
+            return 0
+        payload = json.dumps(frame, default=str)
+
+        async def _send_one(ws):
+            try:
+                await asyncio.wait_for(ws.send_text(payload),
+                                       timeout=per_peer_timeout)
+                return ws, None
+            except Exception as ex:
+                return ws, ex
+
+        results = await asyncio.gather(*(_send_one(ws) for ws in targets),
+                                        return_exceptions=False)
         sent = 0
         dead: List = []
-        payload = json.dumps(frame, default=str)
-        for ws in peers:
-            if ws is exclude:
-                continue
-            try:
-                await ws.send_text(payload)
-                sent += 1
-            except Exception:
-                dead.append(ws)
+        for ws, err in results:
+            if err is None: sent += 1
+            else:           dead.append(ws)
         if dead:
             async with self._ws_clients_lock:
                 peers_set = self._ws_clients.get(session_id)
@@ -5453,8 +5515,16 @@ class SYMBION:
                 except Exception:
                     pass
 
-    def _jmodel(self) -> str:
-        if self.cfg.llm_provider in ("anthropic", "kimi"): return self.cfg.anthropic_judge_model
+    def _jmodel(self, role: str = "") -> str:
+        # Anthropic supports per-role overrides via cfg.anthropic_<role>_model.
+        # Empty override falls back to anthropic_judge_model (the cheap
+        # classifier default). Other providers ignore role for now —
+        # extension point if a provider grows multiple-model addressing.
+        if self.cfg.llm_provider in ("anthropic", "kimi"):
+            if role:
+                override = getattr(self.cfg, f"anthropic_{role}_model", "") or ""
+                if override: return override
+            return self.cfg.anthropic_judge_model
         if self.cfg.llm_provider == "openai":              return self.cfg.openai_model
         if self.cfg.llm_provider == "hf_router":           return self.cfg.hf_router_model
         if self.cfg.llm_provider == "deepseek":            return self.cfg.deepseek_model
@@ -5810,18 +5880,20 @@ class SYMBION:
         if len(draft) < skip_short: return 0.8, False, "", False, False, None
         # Prefer the dedicated self-eval client (cfg.self_eval_provider) so
         # the post-gen quality review survives a responder-provider outage.
-        # Falls back to _judge_active() when no dedicated client is set
-        # (current default — shares responder breaker).
+        # Falls back to _judge_active() when no dedicated client is set.
+        # The responder's circuit breaker no longer gates self-eval —
+        # _self_eval_breaker is our own short-window breaker (open_after=4,
+        # reset_after=30s) so a responder 529 burst doesn't also dark out
+        # the quality review. Self-eval still fails closed when the breaker
+        # is open or when only the offline stub is available.
         client = self._self_eval_client or self._judge_active()
-        unusable = isinstance(client, OfflineJudgeStub) or (
-            hasattr(client, 'cb') and client.cb and not client.cb.allow()
-        )
-        if unusable:
+        if isinstance(client, OfflineJudgeStub) or not self._self_eval_breaker.allow():
             self.health.self_eval_skipped += 1
             return 1.0, False, "", False, False, None
         try:
-            raw = await client.chat_json(self._jmodel(), SELF_EVAL_SYSTEM,
+            raw = await client.chat_json(self._jmodel("self_eval"), SELF_EVAL_SYSTEM,
                                          f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 220)
+            self._self_eval_breaker.record_success()
             r = _parse_json(raw, {"quality_score":0.8,"should_revise":False,"issues":[],
                                   "revision_guidance":"","recklessness_risk":False,
                                   "scope_exceeded":False,"confidence":0.7})
@@ -5841,6 +5913,7 @@ class SYMBION:
                     bool(r.get("scope_exceeded",False)),
                     conf)
         except Exception as ex:
+            self._self_eval_breaker.record_failure(f"{type(ex).__name__}: {ex}")
             logger.error(f"Self-eval: {ex}"); return 1.0, False, "", False, False, None
 
     async def _self_eval_bg(self, query: str, draft: str, request_id: str) -> None:
@@ -5927,7 +6000,7 @@ class SYMBION:
         try:
             conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in msgs)
             summary = await client.chat_text(
-                self._jmodel(),
+                self._jmodel("summarize"),
                 [{"role":"system","content":SUMMARISE_SYSTEM},
                  {"role":"user","content":conv}],
                 0.3, 250)
@@ -5972,7 +6045,7 @@ class SYMBION:
                 f"SUMMARY {i+1}:\n{s}" for i, s in enumerate(sources))
             try:
                 merged = await client.chat_text(
-                    self._jmodel(), CONSOLIDATE_SYSTEM, prompt, 0.3, 400)
+                    self._jmodel("summarize"), CONSOLIDATE_SYSTEM, prompt, 0.3, 400)
             except Exception as ex:
                 logger.error(f"Consolidate cluster: {type(ex).__name__}: {ex}")
                 continue
@@ -6030,7 +6103,7 @@ class SYMBION:
             if len(recent) >= 4:
                 try:
                     conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent)
-                    raw  = await client.chat_json(self._jmodel(), PROFILE_SYSTEM, conv, 0.2, 300)
+                    raw  = await client.chat_json(self._jmodel("profile"), PROFILE_SYSTEM, conv, 0.2, 300)
                     profile = _parse_json(raw, {})
                     if profile: self.memory.update_profile(profile, user=sess_user)
                     if profile.get("core_positions"):
@@ -6755,7 +6828,7 @@ class SYMBION:
             context = (f"User profile: {json.dumps(profile)}\n"
                        f"Active tasks: {json.dumps([{k:v for k,v in t.items() if k in ('title','current_step','steps')} for t in tasks[:2]])}\n"
                        f"Identity context: {identity_ctx}")
-            raw = await client.chat_json(self._jmodel(), PROACTIVE_SYSTEM, context, 0.7, 300)
+            raw = await client.chat_json(self._jmodel("proactive"), PROACTIVE_SYSTEM, context, 0.7, 300)
             r   = _parse_json(raw, {"has_message":False})
             if r.get("has_message") and r.get("message"):
                 return r["message"]
@@ -7658,8 +7731,55 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                 if not text: continue
 
                 in_thinking = [False]
+                # Per-turn id used to tag remote_user / remote_tok /
+                # remote_assistant frames so peers can reconcile a
+                # streaming partial bubble with the authoritative final.
+                # Generated here (not pulled from respond's internal
+                # request_id) so the WS handler can attach it BEFORE
+                # generation starts and to the remote_user frame.
+                req_id = uuid.uuid4().hex[:12]
 
-                async def on_tok(t, _it=in_thinking):
+                # Peer token streaming (gap #3). When cfg.peer_token_streaming
+                # is on AND at least one peer is connected, spawn a per-turn
+                # broadcaster that drains an asyncio.Queue and fans tokens
+                # out as remote_tok frames. Queue is the in-order channel so
+                # peers see deltas in the same sequence the originator does;
+                # one task per turn (not per token) keeps the overhead
+                # bounded. Thinking-block tokens and revise markers are NOT
+                # mirrored — peers see the visible response only.
+                peer_streaming = bool(symbion.cfg.peer_token_streaming)
+                peer_q: Optional[asyncio.Queue] = None
+                peer_task: Optional[asyncio.Task] = None
+                if peer_streaming:
+                    # Skip the broadcaster entirely when no peer is on the
+                    # session — saves a coroutine and a queue per solo turn.
+                    peers_now = len(symbion._ws_clients.get(session_id, set()))
+                    if peers_now > 1:
+                        peer_q = asyncio.Queue()
+                        _local_req_id = req_id
+                        _local_ws     = websocket
+                        async def _peer_token_broadcaster(
+                                q: asyncio.Queue, rid: str, originator):
+                            while True:
+                                try:
+                                    tok = await q.get()
+                                except asyncio.CancelledError:
+                                    return
+                                if tok is None:  # sentinel = end of stream
+                                    return
+                                try:
+                                    await symbion.broadcast_to_session(
+                                        session_id,
+                                        {"t": "remote_tok",
+                                         "request_id": rid,
+                                         "v": tok},
+                                        exclude=originator)
+                                except Exception as ex:
+                                    logger.warning(f"WS peer broadcast token: {ex}")
+                        peer_task = asyncio.create_task(
+                            _peer_token_broadcaster(peer_q, _local_req_id, _local_ws))
+
+                async def on_tok(t, _it=in_thinking, _q=peer_q):
                     if t=="\n\n[SYMBION_REVISE]":
                         await send({"t":"revise"})
                     elif t=="[THINKING_END]":
@@ -7671,6 +7791,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                         _it[0]=True
                     else:
                         await send({"t":"tok","v":t})
+                        # Mirror to peers in-order via the bg broadcaster.
+                        # Skipped when peer streaming is off or there are
+                        # no peers (peer_q is None in either case).
+                        if _q is not None:
+                            try: _q.put_nowait(t)
+                            except Exception: pass
 
                 # Fan out the just-received user message to peer clients
                 # on the same session BEFORE respond() runs, so the other
@@ -7681,6 +7807,7 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     await symbion.broadcast_to_session(
                         session_id,
                         {"t": "remote_user", "text": text,
+                         "request_id": req_id,
                          "user": symbion._active_user(session_id),
                          "timestamp": datetime.now().isoformat()},
                         exclude=websocket)
@@ -7693,17 +7820,41 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     logger.error(f"WS respond error: {ex}", exc_info=True)
                     await send({"t":"tok","v":f"(Error: {ex})"})
                     await send({"t":"done","meta":"","badges":[],"emotion":"","tasks":[],"integrity":{},"status":{}})
+                    # Tear down the peer broadcaster on error so it doesn't
+                    # leak a hanging task waiting on an empty queue.
+                    if peer_q is not None:
+                        try: peer_q.put_nowait(None)
+                        except Exception: pass
+                    if peer_task is not None:
+                        try: await asyncio.wait_for(peer_task, timeout=1.0)
+                        except Exception: peer_task.cancel()
                     continue
 
+                # Drain the peer-token queue BEFORE sending remote_assistant
+                # so peers receive their final remote_tok frame before the
+                # authoritative final-block replaces the partial bubble.
+                # Bounded wait — if the broadcaster is stuck on a slow peer,
+                # remote_assistant will arrive anyway and reconcile the state.
+                if peer_q is not None:
+                    try: peer_q.put_nowait(None)
+                    except Exception: pass
+                if peer_task is not None:
+                    try: await asyncio.wait_for(peer_task, timeout=2.0)
+                    except Exception: peer_task.cancel()
+
                 # Fan out the final assistant response to peer clients.
-                # No token streaming for peers — they get the full reply
-                # as a single block. Real-time multi-client streaming is
-                # a bigger feature; this delivers the seamless-switch UX
-                # without the extra protocol surface.
+                # The remote_tok partial (when peer_token_streaming is on)
+                # has already painted the response in real time; this
+                # remote_assistant frame is the authoritative replacement
+                # keyed by request_id, so peers swap their partial bubble
+                # for the canonical full text. When peer_token_streaming
+                # is off, this is the FIRST frame peers see for the turn
+                # — they render it as a single static block.
                 try:
                     await symbion.broadcast_to_session(
                         session_id,
                         {"t": "remote_assistant", "text": full,
+                         "request_id": req_id,
                          "interaction_id": iid,
                          "timestamp": datetime.now().isoformat()},
                         exclude=websocket)
@@ -8381,7 +8532,7 @@ def run_terminal(symbion: "SYMBION"):
                     try:
                         full,ev,_=asyncio.run(symbion.respond(q,sess))
                         raw_e=asyncio.run(jclient.chat_json(
-                            symbion._jmodel(),SELF_EVAL_SYSTEM,
+                            symbion._jmodel("self_eval"),SELF_EVAL_SYSTEM,
                             f"Query:\n{q}\n\nDraft:\n{full}",0.1,250))
                         er=_parse_json(raw_e,{"quality_score":0.8})
                         qscore=er.get("quality_score",0.8)

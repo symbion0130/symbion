@@ -120,6 +120,19 @@ scripts/
                             #   session sync, sidebar collapse, attachments, scroll
                             #   follow, location pipeline, cross-user presence +
                             #   retrieval, peer WS broadcast.
+  verify_peer_token_streaming.py
+                            # Lighter WS-only harness (no browser, websockets
+                            #   client). Boots Symbion in-process with stubbed
+                            #   respond(), drives three scenarios:
+                            #   (a) peer_token_streaming=True + 2 peers →
+                            #       expect remote_user/remote_tok*/remote_assistant
+                            #       sequence with consistent request_id, deltas
+                            #       concat to authoritative final;
+                            #   (b) peer_token_streaming=True + 1 peer →
+                            #       no broadcaster spun up, turn completes;
+                            #   (c) peer_token_streaming=False + 2 peers →
+                            #       no remote_tok frames, remote_assistant still
+                            #       delivered (gate works).
   install-ollama.ps1        # winget-install Ollama + pull mistral/llama3.2/
                             #   mxbai-embed-large. Idempotent. Called by install.ps1.
   tailscale-https.ps1       # tailscale serve/funnel wrapper.
@@ -345,7 +358,7 @@ The same conversation can be picked up across terminal and web. Three pieces:
 
 2. **Session list endpoints.** `GET /api/sessions` returns newest-first sessions for the active user (id, title from first user message, last_activity, turn_count) plus the active pointer + the auto-resume flag. `GET /api/sessions/{id}/messages` returns up to 200 messages for sidebar hydration. Both require X-API-Key when configured.
 
-3. **Live multi-device broadcast.** SYMBION has a `_ws_clients` registry (per-session set of WebSockets). When user A on device 1 sends a message, the WS handler broadcasts `remote_user` immediately (before respond) and `remote_assistant` after respond completes, to all OTHER peer sockets on the same session. The receiving client renders both with a "synced from another device" chip. Terminal mode uses a watermark instead (`get_max_message_id` + `get_messages_after`) — drains new peer messages above the next `you >` prompt.
+3. **Live multi-device broadcast.** SYMBION has a `_ws_clients` registry (per-session set of WebSockets). When user A on device 1 sends a message, the WS handler broadcasts `remote_user` immediately (before respond) and `remote_assistant` after respond completes, to all OTHER peer sockets on the same session. The receiving client renders both with a "synced from another device" chip. When `cfg.peer_token_streaming` is True (default False), the originator's visible tokens are ALSO fanned out as `remote_tok` frames mid-stream so peers see the response build up live; `remote_assistant`'s `request_id` reconciles the partial bubble with the authoritative final text. Terminal mode uses a watermark instead (`get_max_message_id` + `get_messages_after`) — drains new peer messages above the next `you >` prompt.
 
 The sidebar in the web UI lists sessions newest-first, collapses to 5 by default with a "Show all (N)" expander, click-to-switch with REST hydration before WS reconnect.
 
@@ -422,11 +435,15 @@ All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat
 
 **Resilience: 529 handling (2026-05-22).** `CircuitBreaker.trip()` opens the breaker immediately on HTTP 529 (Overloaded) and 503 — `_retry()`, `AnthropicClient.stream()`, and `AnthropicClient.stream_with_tools()` all detect those status codes and call `cb.trip(msg)` instead of `record_failure(msg)`. The streaming methods don't go through `_retry`, so the detection lives in each path. After one 529, `SYMBION._active()` looks for the next provider in `cfg.fallback_chain` whose breaker is closed; the primary breaker auto-resets after `_reset_after` (60s by default) so the next turn after the window tries the primary again. **All provider fallback is opt-in (2026-05-22):** both the auto-default chain (`["anthropic","openai"]`) and the force-append of `"ollama"` were removed at the user's request. `cfg.fallback_chain` defaults to `[]` and `symbion.json` is the single source of truth — when empty (the default), a 529 on the primary returns the `(LLM unavailable...)` heuristic stub immediately. Provider switching is **manual**: edit `cfg.llm_provider` and/or `fallback_chain` in `symbion.json` (and restart), or pass `--provider X` at launch. Don't reintroduce auto-rotation without a paired user request — the manual contract is intentional, optimized for predictability over uptime. Known limit: the turn that triggers the 529 still returns the stub; only subsequent turns try the primary again after the breaker resets.
 
+**Self-eval has its own breaker.** `SYMBION._self_eval_breaker` is a separate `CircuitBreaker(open_after=4, reset_after=30s)` independent of the responder client's `cb`. `_self_eval` gates on this breaker so a responder 529 burst doesn't also dark out the post-gen quality review. The shorter reset window (30s vs the responder's 60s) lets self-eval probe recovery sooner without being disruptive — calls are fire-and-forget anyway. When `cfg.self_eval_provider` routes self-eval through a different provider (e.g. `"openai"`), that client's own `cb` still applies on top — `_self_eval_breaker` is *in addition*, not *instead*.
+
+**Per-role model selection.** `_jmodel(role="")` accepts an optional role argument that selects a per-role override from cfg: empty role uses `cfg.anthropic_judge_model` (cheap classifier default); `role="self_eval"` reads `cfg.anthropic_self_eval_model` if set; same pattern for `summarize`, `profile`, `proactive`. Anthropic-only for now — other providers ignore the role argument. All overrides default to `""` so the cheap-classifier behavior is unchanged unless explicitly set in `symbion.json`.
+
 **Responder output cap.** `cfg.max_tokens` defaults to **16384**. Anthropic Sonnet 4.6 accepts up to 64K output; OpenAI accepts much higher; Ollama is bottlenecked by the local model's context window (typically 4–8K usable), so on Ollama drop this to ~4000–8000 in `symbion.json` or at config load.
 
 **Embedding stack.** Default model is `mxbai-embed-large` (1024 dims) via Ollama. `EmbeddingClient.is_available()` does a one-time probe and caches the result. If absent, `embed()` returns None and `build_context` falls back to BM25-only retrieval — no crash, no error to the user, just a silent capability downgrade visible in startup logs. **Model-change handling:** `SymbionMemory.reset_embeddings_for_model_change()` nulls all stored embeddings on model change and `_backfill_embeddings` repopulates with the new model. Mixing dimensions silently breaks cosine retrieval.
 
-**Proactive scheduler.** `proactive_interval_minutes` defaults to 0 (DISABLED — was 30 in earlier configs, reduced because of the connect/turn-only-drain limitation noted under Known gaps). When > 0 and a real judge is present, terminal and web both spawn a daemon thread running `proactive_loop` that enqueues messages to `proactive_queue`. Terminal drains before each prompt; web drains on WS connect + after each turn (NOT spontaneously — see Known gaps).
+**Proactive scheduler.** `proactive_interval_minutes` defaults to 0 (DISABLED). When > 0 and a real judge is present, terminal and web both spawn a daemon thread running `proactive_loop` that enqueues messages to `proactive_queue`. Terminal drains before each prompt; web drains on WS connect + after each turn, and **also on a per-socket timer when `cfg.proactive_web_push_seconds > 0`** (each WS spawns its own asyncio task at connect, cancelled cleanly on disconnect). 0 keeps the legacy connect/turn-only behavior.
 
 ## Prompt discipline
 
@@ -470,12 +487,18 @@ Safety is layered. Each layer was added because the layers above it failed in a 
 
 ## Known gaps
 
-- **Per-call model split is not implemented.** Responder and judge both pull from `cfg.anthropic_model` when that provider is active (with `_jmodel()` returning `cfg.anthropic_judge_model` for the cheap classifiers).
-- **Proactive web push is connect/turn-driven, not timer-driven.** `build_web_app` drains `proactive_queue` on WebSocket connect and after each user turn, but does not push spontaneously to an idle open WS. Fix would be a small server-side timer that drains+pushes every N seconds per active socket.
-- **Concurrent same-session writes via WS broadcast** are best-effort. Two devices on the same session see each other's `remote_*` frames in real time, but mid-turn token streaming is NOT mirrored to peers (they get the final block via `remote_assistant`). Multi-client token streaming is bigger protocol work.
-- **`get_user_recent_activity` self-query check uses `cfg.active_user`**, not the per-session `_session_user` override. For a session where Lala is active in a fresh browser but cfg.active_user is still "aaron", the self-check on a Lala-querying-Lala call would not block. Approximate but adequate for the common case.
-- **Electron installer doesn't bundle Python or models.** Targets users who've already run `install.ps1`. Fully self-contained installer (~5 GB) would require a much bigger packaging job.
-- **Self-eval shares the Anthropic breaker.** Self-eval runs fire-and-forget on the same provider as the responder; during 529 bursts both the responder and the post-gen quality-review pass are dark on the same window. Revision (`quality_score < 0.40`) cannot fire while the breaker is open. Not catastrophic — the design is fire-and-forget — but worth knowing that during sustained 529s the post-gen safety net is silently absent. Confirmed empirically in `scripts/stress_chat.py` runs on 2026-05-22 during an Anthropic incident.
+*(None open — see Recently closed below.)*
+
+## Recently closed gaps (2026-05-22)
+
+Six gaps from this section's previous version were addressed in the same session and are listed here briefly so the next reader knows where the wiring lives:
+
+- **Per-call model split** — `_jmodel(role="self_eval" | "summarize" | "profile" | "proactive")` reads optional `cfg.anthropic_<role>_model` overrides; empty default falls back to `cfg.anthropic_judge_model`. Only Anthropic supports per-role for now.
+- **Proactive web push timer** — `cfg.proactive_web_push_seconds` (default 0 = legacy connect/turn drain). When > 0, each WS socket spawns its own `_proactive_push_loop` task that drains `proactive_queue` on a cadence; cancelled in the WS `finally`.
+- **`get_user_recent_activity` self-query** — `active_user` is now threaded end-to-end (`respond` → `_maybe_tool` / agent-loop `_exec_tool` → `_dispatch_tool` → `tools.dispatch`). The fallback to `cfg.active_user` was removed; missing context fails closed with a clear error rather than silently using the global default.
+- **Self-eval breaker** — `SYMBION._self_eval_breaker` is a separate `CircuitBreaker(open_after=4, reset_after=30s)`. `_self_eval` gates on this breaker, not the responder client's `cb`, so a 529 burst on the responder no longer dark-outs the post-gen quality review.
+- **Electron installer bundles Python + nudges to install Ollama models** — `electron/package.json` ships `.python/` via `extraResources` (filtered to drop `__pycache__`/`.pyc`/test dirs); installer grows by ~140 MB compressed. `electron/main.js` `resolvePython()` now prefers `process.resourcesPath/.python/python.exe` in packaged mode, falls through to repo `.python/` for dev. On first launch (and every launch where the embedding model is still missing) the app probes Ollama at `cfg.ollama_host` and shows a dismissible dialog: "Ollama running but `mxbai-embed-large` missing → run install script" OR "Ollama not detected → cloud LLM still works, run install script for full setup". Dialog offers an "Open install script" button that launches `scripts/install-ollama.ps1` via `powershell -ExecutionPolicy Bypass`. Model weights themselves are NOT bundled (670 MB for mxbai alone, 4 GB for mistral) — the dialog points at the canonical installer instead, which already does idempotent pulls. The Symbion Python repo is also still expected at `%USERPROFILE%\symbion` (or `$SYMBION_REPO`) — only the runtime is bundled, not the application code, so users get fresh code from `git pull` instead of stale from the installer.
+- **Mid-turn token streaming to peer WS clients** — `cfg.peer_token_streaming` (class default `False`; **currently set to `true` in `symbion.json`**). When True AND a peer socket is connected on the session, the WS handler spawns a per-turn `_peer_token_broadcaster` task that drains an `asyncio.Queue` and fans the originator's visible tokens out to peers as `remote_tok` frames (keyed by a per-turn `request_id`). Thinking-block tokens and revise sentinels are NOT mirrored — peers see the visible response only. `remote_assistant` now also carries `request_id` so the client can reconcile the partial-streamed bubble with the authoritative final text. `broadcast_to_session` switched from sequential `await ws.send_text(...)` to `asyncio.gather` with a per-peer 1.0s timeout so one slow peer can't stall the rest. Client (`index.html`) maintains a `remoteStreaming` Map keyed by `request_id`; `addSymStreamingRemote()` creates the partial bubble on first `remote_tok`, `remote_assistant` swaps in the authoritative text and drops the entry. Verified end-to-end by `scripts/verify_peer_token_streaming.py` against three scenarios (streaming-on + 2 peers, solo + streaming-on, streaming-off + 2 peers); all three pass with request_id consistency confirmed and `remote_tok` deltas concatenating to the authoritative final text.
 
 ## Working style
 
