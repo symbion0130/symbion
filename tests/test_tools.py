@@ -148,10 +148,16 @@ class TestWorkspaceSandbox:
         result = tools.read_file("../../etc/passwd")
         assert "outside" not in result.lower() and "sandbox" not in result.lower()
 
-    def test_write_escape_blocked(self, tmp_path):
+    def test_write_machine_wide_allowed(self, tmp_path):
+        # As of 2026-05-22 writes are machine-wide, mirroring reads. An
+        # absolute path under tmp_path is allowed and the file appears
+        # at exactly that location.
         tools = SymbionTools(str(tmp_path))
-        result = tools.write_file("/tmp/pwned", "x")
-        assert "Error" in result
+        target = tmp_path / "outside_workspace" / "file.txt"
+        result = tools.write_file(str(target), "machine-wide ok")
+        assert "Written" in result
+        assert target.exists()
+        assert target.read_text() == "machine-wide ok"
 
 
 # === 4.3: SSRF protection ===

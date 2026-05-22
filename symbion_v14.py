@@ -483,12 +483,12 @@ CAPABILITIES_BASE = """Your tools:
 - read_image(path, prompt?) — describe an image (vision; png/jpg/gif/webp/bmp)
 - read_pdf(path) — extract text from PDF files anywhere on the machine
 - list_dir(path) — list files and subdirectories under any path on the machine
-- write_file(path, content) — write a text file (workspace-only — writes are still sandboxed)
+- write_file(path, content) — write a text file anywhere on the machine. Path can be absolute (e.g. `D:\\notes\\plan.md`, `C:\\Users\\me\\Desktop\\out.txt`) or relative to the workspace root.
 - get_weather(lat, lon) — current weather at coordinates via Open-Meteo (free, no key). Use for "is it raining?", "how hot?", etc. when the user has shared their location.
 - get_local_time(timezone) — current time in an IANA timezone (e.g. Europe/Madrid). Use when the user asks locally-anchored time questions; system-prompt "Current time" is server-local and may differ when the user is traveling.
 - get_user_recent_activity(user, hours) — cross-user retrieval. When the active user asks about ANOTHER household user by name ("what was lala working on?"), pulls that user's recent summaries + message snippets. Symmetric — any known user can query any other. Validated against cfg.known_users; unknown names rejected.
 
-Read tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`, `C:\\Users\\me\\Desktop\\img.png`) or relative to the workspace root. Relative paths resolve against the project dir (typically D:\\symbion). Write_file is workspace-only and rejects absolute paths.
+Read AND write tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`, `C:\\Users\\me\\Desktop\\img.png`) or relative to the workspace root. Relative paths resolve against the project dir (typically D:\\symbion).
 
 Do NOT claim you have no file system access — you can read anywhere on the machine. If a specific path failed, say which path and why (missing file, permission denied, wrong type), not a blanket "I have no access"."""
 
@@ -746,7 +746,7 @@ Tools: web_search(query), fetch_url(url), calculate(expression), datetime(), rea
 - read_image: describe an image file (.png/.jpg/.jpeg/.gif/.webp/.bmp) anywhere on the machine. Use this for ANY image path — screenshots, photos, diagrams, charts. tool_args: {"path": "...", "prompt": "optional focus, e.g. 'what error is shown?'"}. NEVER use read_file on an image path. Absolute paths (e.g. C:\\Users\\...\\foo.png) are accepted directly.
 - read_pdf: extract text from a .pdf file anywhere on the machine. Use this for ANY .pdf path. NEVER use read_file on a PDF (it returns binary garbage). tool_args: {"path": "..."}. Requires pypdf — returns a clear error if the user needs to install it.
 - list_dir: list the contents of any directory on the machine. Use this when the user asks to "read folder", "list files", "show directory", "what's in <folder>", or refers to a folder by name without a specific file. tool_args: {"path": "."} or {"path": "Model9"} or absolute like {"path": "D:\\\\"}. Empty path defaults to workspace root.
-- write_file: write/create a local file. Path MUST be relative to the workspace root (writes are still sandboxed).
+- write_file: write/create a local file anywhere on the machine. Path can be absolute (e.g. `C:\\Users\\me\\Desktop\\out.txt`) or relative to the workspace root. Use SPARINGLY — only when the user clearly asked you to create or modify a file.
 Use web_search aggressively — if the user is asking about anything time-sensitive, factual, or where
 the model's knowledge might be stale, search. Better to search unnecessarily than to answer from stale data.
 If the query mentions an image path (ends in .png/.jpg/.jpeg/.gif/.webp/.bmp, or the user says "screenshot"/"image"/"picture"/"this photo"/"the attached image"), use read_image.
@@ -927,7 +927,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "write_file",
-        "description": "Write or overwrite a text file inside the workspace. Path MUST be relative. USE SPARINGLY — do not write speculatively; only when the user has clearly asked you to create or modify a file.",
+        "description": "Write or overwrite a text file anywhere on the machine. Path can be absolute (e.g. 'D:/notes/out.md', 'C:/Users/me/Desktop/file.txt') or relative to workspace root. USE SPARINGLY — do not write speculatively; only when the user has clearly asked you to create or modify a file.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2125,19 +2125,23 @@ def _is_safe_url(url: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
-def _resolve_in_workspace(path: str, root: Path, read_only: bool = False) -> Path:
+def _resolve_in_workspace(path: str, root: Path, machine_wide: bool = False) -> Path:
     """Resolve a path for a file tool.
 
-    Invariant #7 (CLAUDE.md): WRITES are workspace-sandboxed; READS are
-    machine-wide. When read_only=False (the default, used by write_file),
-    absolute paths, parent-directory traversal, and symlinks pointing
-    outside the workspace all raise ValueError. When read_only=True, the
-    path resolves anywhere on the machine — relative paths are still
-    interpreted against the workspace root for ergonomic continuity, but
-    absolute paths are accepted and no containment check fires.
+    Invariant #7 (CLAUDE.md): both reads AND writes are machine-wide as
+    of 2026-05-22 (writes joined reads when the user opted in to broader
+    write access). When machine_wide=True, absolute paths anywhere on
+    the machine are accepted; relative paths are still anchored to `root`
+    for ergonomic continuity, but no containment check fires.
+
+    When machine_wide=False, the legacy sandbox semantics apply: absolute
+    paths, parent-directory traversal, and symlinks pointing outside the
+    workspace all raise ValueError. This mode is no longer used by any
+    Symbion call site but is preserved as a library primitive — flip it
+    back on via a cfg toggle if writes ever need re-sandboxing.
     """
     pth = Path(path)
-    if read_only:
+    if machine_wide:
         if pth.is_absolute():
             return pth.resolve()
         return (root / path).resolve()
@@ -2201,7 +2205,7 @@ class SymbionTools:
                           max_bytes: int = 5_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
-            p = _resolve_in_workspace(path.strip(), self._workspace, read_only=True)
+            p = _resolve_in_workspace(path.strip(), self._workspace, machine_wide=True)
             name = self._safe_name(path)
             if not p.exists(): return f"Not found: {name}"
             if p.is_dir(): return f"That is a directory, not a file: {name}"
@@ -2226,7 +2230,7 @@ class SymbionTools:
     def read_file(self, path: str, offset: int = 0, max_chars: int = 2_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
-            p = _resolve_in_workspace(path.strip(), self._workspace, read_only=True)
+            p = _resolve_in_workspace(path.strip(), self._workspace, machine_wide=True)
             name = self._safe_name(path)
             if not p.exists(): return f"Not found: {name}"
             if p.is_dir(): return f"That is a directory, not a file: {name}"
@@ -2255,7 +2259,7 @@ class SymbionTools:
 
     def list_dir(self, path: str = ".", max_entries: int = 200) -> str:
         try:
-            p = _resolve_in_workspace((path or ".").strip(), self._workspace, read_only=True)
+            p = _resolve_in_workspace((path or ".").strip(), self._workspace, machine_wide=True)
             if not p.exists():
                 return f"Not found: {self._safe_name(path)}"
             if not p.is_dir():
@@ -2336,7 +2340,7 @@ class SymbionTools:
     def read_pdf(self, path: str, max_chars: int = 50_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
-            p = _resolve_in_workspace(path.strip(), self._workspace, read_only=True)
+            p = _resolve_in_workspace(path.strip(), self._workspace, machine_wide=True)
             name = self._safe_name(path)
             if not p.exists(): return f"Not found: {name}"
             if p.is_dir(): return f"That is a directory, not a file: {name}"
@@ -2394,12 +2398,16 @@ class SymbionTools:
 
     def write_file(self, path: str, content: str) -> str:
         try:
-            p = _resolve_in_workspace(path.strip(), self._workspace)
+            # Machine-wide writes (2026-05-22): writes joined reads in the
+            # machine-wide access pattern. Absolute paths anywhere on the
+            # machine are accepted; relative paths anchor to the workspace
+            # for ergonomic continuity. Safety is enforced upstream by the
+            # judge and persona layers, not by a path sandbox here.
+            p = _resolve_in_workspace(path.strip(), self._workspace,
+                                       machine_wide=True)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding='utf-8')
-            return f"Written {len(content)} chars to {p.name}"
-        except ValueError:
-            return "Error: path not allowed (sandbox)"
+            return f"Written {len(content)} chars to {p}"
         except Exception as ex:
             return f"Error writing {self._safe_name(path)}: {type(ex).__name__}"
 
