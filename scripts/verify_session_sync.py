@@ -497,6 +497,69 @@ async def main():
             "PASS" if not exe_match else "FAIL",
             f"unexpected matches={exe_match}")
 
+        # ---- Cross-user presence (Phase 1) + retrieval (Phase 2) ----
+        # Direct server-side checks — no browser needed. Seed activity
+        # for a second user (lala), then verify:
+        #   * build_context for aaron surfaces lala's presence line
+        #   * cross-user tool returns lala's data
+        #   * self-query is refused at the tool layer
+        #   * unknown-user is rejected
+        # cfg.known_users must include lala for this to work; the verify
+        # harness sets it to ['aaron'] for the multi-user-modal suppression
+        # earlier, so flip it here for the cross-user block.
+        symbion.cfg.known_users = ['aaron', 'lala']
+        symbion.memory.add('user',      'job interview tomorrow',         'lala_sess', user='lala')
+        symbion.memory.add('assistant', 'tell me about it',               'lala_sess', user='lala')
+        symbion.memory.add('user',      'principal engineer at a fintech', 'lala_sess', user='lala')
+        symbion.memory.set_active_session('lala_sess', user='lala')
+        symbion.memory.save_summary('lala_sess',
+            'Lala prepped for a principal engineer interview at a fintech.',
+            3, user='lala')
+
+        # 1. Presence line shows in aaron's build_context
+        _, preamble = symbion.memory.build_context(
+            'aaron_probe', symbion.identity, symbion.tasks, symbion.gaps,
+            user='aaron')
+        log("Phase 1: aaron's build_context lists lala as recently active",
+            "PASS" if 'lala' in preamble and 'Other household users' in preamble else "FAIL",
+            f"preamble has 'lala' = {('lala' in preamble)}, has 'Other household' = {('Other household users' in preamble)}")
+
+        # 2. Cross-user tool returns lala's data when aaron asks
+        symbion.cfg.active_user = 'aaron'
+        result = symbion.tools.get_user_recent_activity('lala', symbion.cfg, hours=24)
+        ok = ('lala' in result and 'principal engineer' in result and
+              'last active' in result)
+        log("Phase 2: aaron queries lala -> tool returns her snippets",
+            "PASS" if ok else "FAIL",
+            f"first 140 chars: {result[:140]!r}")
+
+        # 3. Self-query is refused
+        self_result = symbion.tools.get_user_recent_activity('aaron', symbion.cfg, hours=24)
+        log("Phase 2: aaron tries to query SELF -> refused",
+            "PASS" if 'for OTHER household' in self_result else "FAIL",
+            f"got: {self_result[:140]!r}")
+
+        # 4. Symmetric: lala can query aaron the same way.
+        # The test DB has aaron's messages from the earlier upload tests
+        # plus what we add here. Assert the tool returns aaron's data
+        # generically — exact content depends on earlier harness state.
+        symbion.cfg.active_user = 'lala'
+        symbion.memory.add('user', 'thai food nearby?', 'aaron_probe', user='aaron')
+        symbion.memory.set_active_session('aaron_probe', user='aaron')
+        symm = symbion.tools.get_user_recent_activity('aaron', symbion.cfg, hours=24)
+        ok = ('aaron' in symm
+              and 'last active' in symm
+              and ('Recent message snippets' in symm or 'Recent summaries' in symm))
+        log("Phase 2: SYMMETRIC -- lala queries aaron successfully",
+            "PASS" if ok else "FAIL",
+            f"first 140 chars: {symm[:140]!r}")
+
+        # 5. Unknown user rejected
+        bogus = symbion.tools.get_user_recent_activity('eve', symbion.cfg, hours=24)
+        log("Phase 2: unknown user 'eve' rejected with known list",
+            "PASS" if "unknown user 'eve'" in bogus.lower() or 'unknown user' in bogus else "FAIL",
+            f"got: {bogus[:140]!r}")
+
         await browser.close()
 
     # Dump log
