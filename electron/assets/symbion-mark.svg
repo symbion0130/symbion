@@ -1,15 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">
   <title>Symbion</title>
-  <desc>Symbion logo mark — split angular S with three nodes representing mutual partnership.</desc>
-  <!-- Top-left L half -->
-  <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="currentColor"/>
-  <!-- Bottom-right L half -->
-  <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="currentColor"/>
-  <!-- Left solid satellite -->
-  <circle cx="30" cy="50" r="4" fill="currentColor"/>
-  <!-- Heavy hollow focal ring (center) -->
-  <circle cx="50" cy="50" r="6.5" fill="none" stroke="currentColor" stroke-width="3.5"/>
-  <!-- Right solid satellite -->
-  <circle cx="70" cy="50" r="4" fill="currentColor"/>
+  <desc>Symbion logo mark in white on transparent.</desc>
+  <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#FFFFFF"/>
+  <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#FFFFFF"/>
+  <circle cx="30" cy="50" r="4" fill="#FFFFFF"/>
+  <circle cx="50" cy="50" r="6.5" fill="none" stroke="#FFFFFF" stroke-width="3.5"/>
+  <circle cx="70" cy="50" r="4" fill="#FFFFFF"/>
 </svg>
