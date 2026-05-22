@@ -82,7 +82,8 @@ param(
     [string]$Branch,
     [switch]$SkipSetup,
     [switch]$SkipLaunch,
-    [switch]$SkipOllama
+    [switch]$SkipOllama,
+    [switch]$SkipElectronApp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -361,6 +362,39 @@ if ($skipOllamaFlag) {
         }
     } else {
         Write-Host "[note] $ollamaScript not present in this checkout; skipping. (Pull main if you want it.)"
+    }
+}
+
+# ------------------------------------------------------------------------
+# Phase 2.6: Electron desktop app (build + silently install)
+#   Idempotent helper handles the whole flow:
+#     - winget-installs Node.js LTS if missing
+#     - npm install in electron/ (cached via package-lock.json mtime)
+#     - npm run build:win (cached via dist installer mtime vs src mtime)
+#     - silent NSIS install (cached via installed Symbion.exe mtime)
+#   Skipped via -SkipElectronApp or SYMBION_SKIP_ELECTRON_APP env var.
+#   On a fully-cached re-run (everything current), adds <2 seconds.
+#   First-run adds ~2-3 minutes (Node install + electron download).
+# ------------------------------------------------------------------------
+$skipAppFlag = $SkipElectronApp -or ($env:SYMBION_SKIP_ELECTRON_APP -and $env:SYMBION_SKIP_ELECTRON_APP -ne '0')
+if ($skipAppFlag) {
+    Write-Section "Skipping Electron app build (-SkipElectronApp or SYMBION_SKIP_ELECTRON_APP set)"
+} else {
+    Write-Section "Electron desktop app (idempotent build + install)"
+    $appScript = Join-Path $RepoDir 'scripts\install-electron-app.ps1'
+    if (Test-Path -LiteralPath $appScript) {
+        try {
+            & $appScript -RepoRoot $RepoDir
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[warn] Electron app build exited with code $LASTEXITCODE -- continuing." -ForegroundColor Yellow
+                Write-Host "       You can re-run later: powershell -ExecutionPolicy Bypass -File $appScript"
+            }
+        } catch {
+            Write-Host "[warn] Electron app build threw: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "       The terminal symbion command still works. Re-run scripts\install-electron-app.ps1 manually to retry."
+        }
+    } else {
+        Write-Host "[note] $appScript not present in this checkout; skipping. (Pull main if you want it.)"
     }
 }
 

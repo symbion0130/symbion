@@ -169,8 +169,9 @@ Kimi and DeepSeek were deliberately removed from Worker injection on 2026-05-19 
 1. Locate or fetch the repo (in-clone or git clone via PAT)
 2. Bootstrap portable Python + deps + shim (`scripts/bootstrap-portable.bat`)
 3. **Ollama + local models** (`scripts/install-ollama.ps1`) — idempotent: skips Ollama install when already present, skips each model pull when in `ollama list`. Suppressed with `-SkipOllama` or `$env:SYMBION_SKIP_OLLAMA`. Failures don't abort the install; user can fall back to `--provider anthropic`.
-4. `.env` source priority: existing → OneDrive seed → Worker-injected → interactive `--setup`
-5. Launch Symbion in a new window
+4. **Electron desktop app** (`scripts/install-electron-app.ps1`) — idempotent: winget-installs Node.js LTS if missing, `npm install` (cached via package-lock.json mtime), `npm run build:win` (cached via dist mtime vs source mtime), silent NSIS install. ~2-3 minutes first run (Node + Electron download), <30 seconds fully-cached. Suppressed with `-SkipElectronApp` or `$env:SYMBION_SKIP_ELECTRON_APP`.
+5. `.env` source priority: existing → OneDrive seed → Worker-injected → interactive `--setup`
+6. Launch Symbion in a new window
 
 **Tooling around the install:**
 
@@ -181,6 +182,7 @@ Kimi and DeepSeek were deliberately removed from Worker injection on 2026-05-19 
 | `scripts/verify-worker.ps1` | 11-check smoke test of the Worker. Run after any Worker change. Never echoes secrets. |
 | `scripts/push-env.ps1` | `.env` ⇄ OneDrive sync. `-Pull` reverses direction. |
 | `scripts/install-ollama.ps1` | Install Ollama + pull `mistral`, `llama3.2`, `mxbai-embed-large`. `-SkipModels`, `-Models "a,b,c"`. |
+| `scripts/install-electron-app.ps1` | Winget-install Node.js LTS, `npm install` in `electron/`, `npm run build:win`, silent NSIS install. Idempotent across each phase. `-Force` rebuilds + reinstalls. Called by `install.ps1` Phase 2.6 unless `-SkipElectronApp` / `$env:SYMBION_SKIP_ELECTRON_APP`. |
 | `scripts/tailscale-https.ps1` | Tailscale serve/funnel wrapper for HTTPS on `*.ts.net`. Required for browser geolocation on non-localhost devices. |
 
 **Edit constraints when touching install/deploy:**
