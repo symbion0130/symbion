@@ -6341,6 +6341,7 @@ class SYMBION:
         # cross-session retrieval can use the BM25 + cosine hybrid path).
         # If retrieval crashes (transient SQLite lock, corrupted embedding
         # row), respond with empty context rather than killing the turn.
+        _ctx_t0 = time.monotonic()
         try:
             history, preamble = self.memory.build_context(
                 session, self.identity, self.tasks, self.gaps,
@@ -6496,6 +6497,15 @@ class SYMBION:
         if not escalated:
             evaluation["escalated"] = False
 
+        # Context-build is done; generation begins. _ttft_ms captures the
+        # first emitted token (network + queue latency to the model API);
+        # _gen_ms is the full generation window. Both are -1 when no
+        # token ever emits (refusal, stub, exception path).
+        _ctx_ms = int((time.monotonic() - _ctx_t0) * 1000)
+        _gen_t0 = time.monotonic()
+        _ttft_ms = -1
+        _gen_ms = -1
+
         if not isinstance(resp_client, OfflineJudgeStub):
             if agent_loop_active and not refusal:
                 # AGENT LOOP: model fires tools itself, results feed back, we
@@ -6523,6 +6533,8 @@ class SYMBION:
                         et = ev.get("type")
                         if et == "text":
                             tok = ev.get("text", "")
+                            if _ttft_ms < 0 and tok:
+                                _ttft_ms = int((time.monotonic() - _gen_t0) * 1000)
                             draft += tok
                             if token_callback: await token_callback(tok)
                         elif et == "thinking_start":
@@ -6579,6 +6591,8 @@ class SYMBION:
             else:
                 try:
                     async for tok in resp_client.stream(resp_model, messages, self.cfg):
+                        if _ttft_ms < 0 and tok:
+                            _ttft_ms = int((time.monotonic() - _gen_t0) * 1000)
                         draft += tok
                         if token_callback: await token_callback(tok)
                 except Exception as ex:
@@ -6648,6 +6662,9 @@ class SYMBION:
                          else "(No LLM -- degraded mode)")
             if token_callback: await token_callback(draft)
             task_failed = not bool(refusal)
+
+        # Generation phase done — capture before background tasks fan out.
+        _gen_ms = int((time.monotonic() - _gen_t0) * 1000)
 
         full_response = draft
 
@@ -6739,7 +6756,8 @@ class SYMBION:
                        if not refusal else None),
             revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
             stale_refresh=stale_refresh,
-            latency_ms={"total": _total_ms, "pre_gen": _pre_gen_ms},
+            latency_ms={"total": _total_ms, "pre_gen": _pre_gen_ms,
+                        "ctx": _ctx_ms, "gen": _gen_ms, "ttft": _ttft_ms},
             provider=self.cfg.llm_provider,
             model=resp_model,
             agent_tool_calls=agent_tool_calls if agent_tool_calls else None,
