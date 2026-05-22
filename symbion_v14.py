@@ -228,6 +228,15 @@ class SymbionConfig:
     # a kimi-k2.* responder (e.g. moonshot-v1-* judge calls already pass
     # their own small explicit max_tokens via chat_json/chat_text).
     kimi_max_tokens:   int = 2048
+    # Outbound concurrency cap for Moonshot. Empirically Moonshot's K2.6
+    # scheduler queues parallel requests aggressively — under 5 simultaneous
+    # turns, individual ttft can balloon from ~2s to 20s+. Throttling at the
+    # client level (asyncio.Semaphore in KimiClient) trades a tiny amount of
+    # average latency for a much tighter p95 by NOT letting Symbion pile
+    # bursts of requests into Moonshot's queue. 2 is conservative; raise
+    # if you've negotiated more throughput with Moonshot, lower if you're
+    # seeing consistent ttft spikes. Set to 0 to disable the cap entirely.
+    kimi_max_concurrent: int = 2
     kimi_base_url:     str = "https://api.moonshot.ai/v1"
     use_kimi_responder: bool = False
 
@@ -1820,6 +1829,17 @@ class OpenAIClient(BaseClient):
                     except (json.JSONDecodeError,KeyError): continue
 
 
+class _NullAsyncCtx:
+    """Async no-op context manager. Used by KimiClient when the outbound
+    concurrency cap is disabled (cfg.kimi_max_concurrent == 0) so the
+    `async with` site stays uniform."""
+    async def __aenter__(self): return self
+    async def __aexit__(self, *exc): return False
+
+
+_NULL_ASYNC_CTX = _NullAsyncCtx()
+
+
 class KimiClient(BaseClient):
     def __init__(self, api_key: str, model: str, base_url: str, cfg: SymbionConfig):
         self.api_key = api_key; self.model = model; self.cfg = cfg
@@ -1834,6 +1854,23 @@ class KimiClient(BaseClient):
         self._http = httpx.AsyncClient(timeout=180,
                                         headers={"Authorization": f"Bearer {api_key}",
                                                  "Content-Type": "application/json"})
+        # Outbound concurrency cap (lever 1 in the p95-followup). Lazy-init
+        # the semaphore so it binds to whatever event loop is actually
+        # running when the first call happens, not the one alive at
+        # construction (which may be different in test harnesses).
+        self._sem_cap: int = max(0, getattr(cfg, "kimi_max_concurrent", 0))
+        self._sem: Optional[asyncio.Semaphore] = None
+
+    def _slot(self):
+        """Return an async context manager that acquires/releases an
+        outbound concurrency slot. Returns a no-op ctx when the cap is
+        0. Held FOR THE DURATION of streaming, not just per chunk —
+        otherwise a slow stream wouldn't actually throttle anything."""
+        if self._sem_cap <= 0:
+            return _NULL_ASYNC_CTX
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self._sem_cap)
+        return self._sem
 
     async def aclose(self) -> None:
         """Release the persistent connection pool. Idempotent."""
@@ -1868,20 +1905,22 @@ class KimiClient(BaseClient):
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
         async def _call():
             m = model or self.model
-            r = await self._http.post(self._url, json={
-                "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),
-                "messages":[{"role":"system","content":system},{"role":"user","content":user}]})
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            async with self._slot():
+                r = await self._http.post(self._url, json={
+                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),
+                    "messages":[{"role":"system","content":system},{"role":"user","content":user}]})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
         async def _call():
             m = model or self.model
-            r = await self._http.post(self._url, json={
-                "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),"messages":messages})
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            async with self._slot():
+                r = await self._http.post(self._url, json={
+                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),"messages":messages})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
@@ -1892,30 +1931,34 @@ class KimiClient(BaseClient):
             body["chat_template_kwargs"] = {"thinking": True}
         self._last_reasoning = ""
         in_reasoning = False
-        async with self._http.stream("POST", self._url, json=body) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "): continue
-                data=line[6:]
-                if data=="[DONE]": break
-                try:
-                    chunk=json.loads(data)
-                    delta=chunk["choices"][0].get("delta",{})
-                    reasoning_tok=delta.get("reasoning_content","")
-                    if reasoning_tok:
-                        self._last_reasoning += reasoning_tok
-                        if cfg.show_reasoning:
-                            if not in_reasoning:
-                                yield "\n[Thinking...]\n"
-                                in_reasoning = True
-                            yield reasoning_tok
-                    tok=delta.get("content","")
-                    if tok:
-                        if in_reasoning and cfg.show_reasoning:
-                            yield "\n[/Thinking]\n"
-                            in_reasoning = False
-                        yield tok
-                except (json.JSONDecodeError,KeyError): continue
+        # Slot is held for the FULL stream duration, not per chunk —
+        # otherwise a slow stream wouldn't actually throttle the next
+        # caller waiting on the semaphore.
+        async with self._slot():
+            async with self._http.stream("POST", self._url, json=body) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "): continue
+                    data=line[6:]
+                    if data=="[DONE]": break
+                    try:
+                        chunk=json.loads(data)
+                        delta=chunk["choices"][0].get("delta",{})
+                        reasoning_tok=delta.get("reasoning_content","")
+                        if reasoning_tok:
+                            self._last_reasoning += reasoning_tok
+                            if cfg.show_reasoning:
+                                if not in_reasoning:
+                                    yield "\n[Thinking...]\n"
+                                    in_reasoning = True
+                                yield reasoning_tok
+                        tok=delta.get("content","")
+                        if tok:
+                            if in_reasoning and cfg.show_reasoning:
+                                yield "\n[/Thinking]\n"
+                                in_reasoning = False
+                            yield tok
+                    except (json.JSONDecodeError,KeyError): continue
 
 
 class HFRouterClient(OpenAIClient):
