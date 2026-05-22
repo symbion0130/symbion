@@ -212,6 +212,22 @@ class SymbionConfig:
     openai_model:      str = "gpt-4o"
     kimi_api_key:      str = field(default_factory=lambda: os.getenv("KIMI_API_KEY",""))
     kimi_model:        str = "kimi-k2.6"
+    # Cheap classifier / judge model for the Moonshot pair (analogue of
+    # claude-haiku-4-5 in the Anthropic pair). Used by `_jmodel()` when
+    # llm_provider="kimi" — pre-gen judge, tool dispatch, self-eval,
+    # summarize, profile, proactive, etc. all route here. v1-8k accepts
+    # variable temperatures (the kimi-k2.* family doesn't), so it works
+    # for the structured-JSON paths that need temp=0.1.
+    kimi_judge_model:  str = "moonshot-v1-8k"
+    # Responder-side max_tokens for Kimi specifically. cfg.max_tokens
+    # (16384) is sized for Sonnet's roomy output budget; Moonshot's K2.6
+    # is meaningfully slower per-token, and Symbion's persona is terse
+    # by design, so allocating 16K is wasted scheduler budget. 2048 fits
+    # any normal reply and signals to Moonshot's scheduler that the call
+    # is small. Falls back to cfg.max_tokens when the active model isn't
+    # a kimi-k2.* responder (e.g. moonshot-v1-* judge calls already pass
+    # their own small explicit max_tokens via chat_json/chat_text).
+    kimi_max_tokens:   int = 2048
     kimi_base_url:     str = "https://api.moonshot.ai/v1"
     use_kimi_responder: bool = False
 
@@ -1809,8 +1825,22 @@ class KimiClient(BaseClient):
         self.api_key = api_key; self.model = model; self.cfg = cfg
         self._url = base_url.rstrip("/") + "/chat/completions"
         self.cb   = CircuitBreaker("kimi", cfg.circuit_open_after)
+        # Persistent client: reuses TLS sessions + HTTP/2 connection across
+        # turns. Saves ~200-400ms per call on the China-to-elsewhere route
+        # by skipping the handshake. Single client serves chat_json,
+        # chat_text, and stream — timeout is the max any caller could need
+        # (matches the prior stream timeout). Closed via aclose() on
+        # SYMBION shutdown.
+        self._http = httpx.AsyncClient(timeout=180,
+                                        headers={"Authorization": f"Bearer {api_key}",
+                                                 "Content-Type": "application/json"})
 
-    def _h(self): return {"Authorization":f"Bearer {self.api_key}","Content-Type":"application/json"}
+    async def aclose(self) -> None:
+        """Release the persistent connection pool. Idempotent."""
+        try:
+            await self._http.aclose()
+        except Exception:
+            pass
 
     def _eff_temp(self, model: str, requested: float) -> float:
         """Kimi K2.* models (kimi-k2.5, kimi-k2.6, ...) reject any
@@ -1823,60 +1853,69 @@ class KimiClient(BaseClient):
             return 1.0
         return requested
 
+    def _eff_max_tokens(self, model: str, cfg) -> int:
+        """For Kimi-family responder calls (kimi-k2.*), use the smaller
+        cfg.kimi_max_tokens cap — Moonshot's K2 is slower per-token and
+        Symbion's persona is terse, so allocating Sonnet-scale headroom
+        is wasted scheduler budget. Non-K2 models (moonshot-v1-*) fall
+        back to cfg.max_tokens since they're typically used for short
+        explicit-max judge calls anyway."""
+        m = (model or self.model or "").lower()
+        if m.startswith("kimi-k2"):
+            return cfg.kimi_max_tokens
+        return cfg.max_tokens
+
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
         async def _call():
             m = model or self.model
-            async with httpx.AsyncClient(timeout=60) as c:
-                r = await c.post(self._url, headers=self._h(), json={
-                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),
-                    "messages":[{"role":"system","content":system},{"role":"user","content":user}]})
-                r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"].strip()
+            r = await self._http.post(self._url, json={
+                "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),
+                "messages":[{"role":"system","content":system},{"role":"user","content":user}]})
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
         async def _call():
             m = model or self.model
-            async with httpx.AsyncClient(timeout=90) as c:
-                r = await c.post(self._url, headers=self._h(), json={
-                    "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),"messages":messages})
-                r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"].strip()
+            r = await self._http.post(self._url, json={
+                "model":m,"max_tokens":max_tokens,"temperature":self._eff_temp(m, temp),"messages":messages})
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
         m = model or self.model
-        body = {"model":m,"max_tokens":cfg.max_tokens,
+        body = {"model":m,"max_tokens":self._eff_max_tokens(m, cfg),
                 "temperature":self._eff_temp(m, cfg.temperature),"messages":messages,"stream":True}
         if cfg.kimi_thinking_enabled:
             body["chat_template_kwargs"] = {"thinking": True}
         self._last_reasoning = ""
         in_reasoning = False
-        async with httpx.AsyncClient(timeout=180) as c:
-            async with c.stream("POST", self._url, headers=self._h(), json=body) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "): continue
-                    data=line[6:]
-                    if data=="[DONE]": break
-                    try:
-                        chunk=json.loads(data)
-                        delta=chunk["choices"][0].get("delta",{})
-                        reasoning_tok=delta.get("reasoning_content","")
-                        if reasoning_tok:
-                            self._last_reasoning += reasoning_tok
-                            if cfg.show_reasoning:
-                                if not in_reasoning:
-                                    yield "\n[Thinking...]\n"
-                                    in_reasoning = True
-                                yield reasoning_tok
-                        tok=delta.get("content","")
-                        if tok:
-                            if in_reasoning and cfg.show_reasoning:
-                                yield "\n[/Thinking]\n"
-                                in_reasoning = False
-                            yield tok
-                    except (json.JSONDecodeError,KeyError): continue
+        async with self._http.stream("POST", self._url, json=body) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "): continue
+                data=line[6:]
+                if data=="[DONE]": break
+                try:
+                    chunk=json.loads(data)
+                    delta=chunk["choices"][0].get("delta",{})
+                    reasoning_tok=delta.get("reasoning_content","")
+                    if reasoning_tok:
+                        self._last_reasoning += reasoning_tok
+                        if cfg.show_reasoning:
+                            if not in_reasoning:
+                                yield "\n[Thinking...]\n"
+                                in_reasoning = True
+                            yield reasoning_tok
+                    tok=delta.get("content","")
+                    if tok:
+                        if in_reasoning and cfg.show_reasoning:
+                            yield "\n[/Thinking]\n"
+                            in_reasoning = False
+                        yield tok
+                except (json.JSONDecodeError,KeyError): continue
 
 
 class HFRouterClient(OpenAIClient):
@@ -5538,23 +5577,33 @@ class SYMBION:
                     pass
 
     def _jmodel(self, role: str = "") -> str:
-        # Anthropic supports per-role overrides via cfg.anthropic_<role>_model.
-        # Empty override falls back to anthropic_judge_model (the cheap
-        # classifier default). Other providers ignore role for now —
-        # extension point if a provider grows multiple-model addressing.
-        if self.cfg.llm_provider in ("anthropic", "kimi"):
+        # Per-role overrides via cfg.<provider>_<role>_model — empty falls
+        # back to the provider's judge model (the cheap-classifier default).
+        # Anthropic and Kimi are the two providers wired with judge/role
+        # model splits; OpenAI / HF Router / DeepSeek use a single model.
+        p = self.cfg.llm_provider
+        if p == "anthropic":
             if role:
                 override = getattr(self.cfg, f"anthropic_{role}_model", "") or ""
                 if override: return override
             return self.cfg.anthropic_judge_model
-        if self.cfg.llm_provider == "openai":              return self.cfg.openai_model
-        if self.cfg.llm_provider == "hf_router":           return self.cfg.hf_router_model
-        if self.cfg.llm_provider == "deepseek":            return self.cfg.deepseek_model
+        if p == "kimi":
+            # Moonshot pair: k2.6 responder + moonshot-v1-8k judge. Per-role
+            # overrides via cfg.kimi_<role>_model (e.g. cfg.kimi_self_eval_model)
+            # are honored if set; empty defaults to kimi_judge_model.
+            if role:
+                override = getattr(self.cfg, f"kimi_{role}_model", "") or ""
+                if override: return override
+            return self.cfg.kimi_judge_model
+        if p == "openai":              return self.cfg.openai_model
+        if p == "hf_router":           return self.cfg.hf_router_model
+        if p == "deepseek":            return self.cfg.deepseek_model
         return self.cfg.judge_model
 
     def _rmodel(self) -> str:
         if self.cfg.use_kimi_responder and self.cfg.kimi_api_key: return self.cfg.kimi_model
         if self.cfg.llm_provider == "anthropic": return self.cfg.anthropic_model
+        if self.cfg.llm_provider == "kimi":      return self.cfg.kimi_model
         if self.cfg.llm_provider == "openai":    return self.cfg.openai_model
         if self.cfg.llm_provider == "hf_router": return self.cfg.hf_router_model
         if self.cfg.llm_provider == "deepseek":  return self.cfg.deepseek_model
@@ -8923,11 +8972,12 @@ Examples:
 
     cfg=SymbionConfig.load()
 
-    # Handle --provider kimi specially
-    if args.provider == "kimi":
-        cfg.llm_provider = "anthropic"
-        cfg.use_kimi_responder = True
-    elif args.provider:
+    # --provider kimi now means PURE Moonshot mode (K2.6 responder +
+    # moonshot-v1-8k judge), parallel to the default Sonnet+Haiku pair.
+    # The hybrid setup (Kimi responder + Anthropic judges) is still
+    # accessible via the explicit --use-kimi-responder flag, which is
+    # orthogonal to llm_provider.
+    if args.provider:
         cfg.llm_provider = args.provider
 
     if args.host:            cfg.web_host         = args.host
