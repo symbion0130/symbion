@@ -5620,21 +5620,29 @@ class SYMBION:
     # -- Judge --------------------------------------------------
 
     def _should_skip_pregen(self, text: str) -> bool:
-        """Fast-path predicate: when True, respond() skips the Haiku pre-gen
-        call entirely and uses neutral defaults (should_assist=True, neutral
-        emotion). Recovers the ~4-6s per-turn latency the judge currently
-        costs without weakening it on any query that hints at risk.
+        """Fast-path predicate: when True, respond() skips the pre-gen
+        judge call entirely and uses neutral defaults (should_assist=True,
+        neutral emotion). Recovers the per-turn latency the judge costs
+        without weakening it on any query that hints at risk.
 
         Skip ONLY when ALL hold:
-          - length < 200 chars (long queries deserve careful evaluation)
+          - length under the length cap (long queries deserve careful evaluation)
           - no _PREGEN_RISK_RE hit (refusal candidates + crisis terms)
+
+        Length cap depends on the active provider — Anthropic Haiku judge
+        is fast (~1s), so the bar for skipping is high (200 chars). Moonshot's
+        v1-8k judge is much slower (3-7s cold), so the value of skipping
+        is bigger; bar widens to 400 chars under `cfg.llm_provider="kimi"`.
+        Use Kimi mode for the responder via --use-kimi-responder doesn't
+        widen this — judges still hit Haiku in that hybrid mode.
 
         Loss budget when we skip: no over_cautious flag, no emotion-mode
         injection. Both are flavor enhancers on the persona, not safety
         gates. Crisis terms are in the risk regex specifically so
         emotional turns still get full pre-gen and the gentle_slow route.
         """
-        if not text or len(text) > 200:
+        cap = 400 if self.cfg.llm_provider == "kimi" else 200
+        if not text or len(text) > cap:
             return False
         if _PREGEN_RISK_RE.search(text):
             return False
