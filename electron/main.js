@@ -17,14 +17,35 @@ const fs   = require('fs');
 const http = require('http');
 const path = require('path');
 
-// Resolve the repo root (one level above this electron/ directory). Used
-// to find the portable Python interpreter, the symbion package, and the
-// symbion.json config.
-const REPO_ROOT = path.resolve(__dirname, '..');
+// Resolve the Symbion repo root. Tried in priority order:
+//   1. $env:SYMBION_REPO override
+//   2. Dev-mode: electron/ is inside the repo, so `..` works
+//   3. Installed-mode: %USERPROFILE%\symbion (canonical install location
+//      from install.ps1) — this is the case for the NSIS-installed app,
+//      where __dirname lives under %LOCALAPPDATA%\Programs\Symbion\ and
+//      `..` would point at Programs\, not at the repo.
+//   4. %USERPROFILE%\SourceCode\symbion (alt user layout)
+// Returns null when none of these have a symbion_v14.py — the user has
+// no Symbion repo on the machine and we surface a clear error dialog.
+function resolveRepoRoot() {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const candidates = [
+    process.env.SYMBION_REPO,
+    path.resolve(__dirname, '..'),
+    home ? path.join(home, 'symbion')            : null,
+    home ? path.join(home, 'SourceCode', 'symbion') : null,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'symbion_v14.py'))) return c;
+  }
+  return null;
+}
+const REPO_ROOT = resolveRepoRoot();
 
 // Config — load symbion.json so we use the same web_port the user has
 // configured. Falls back to 8000 (SymbionConfig default).
 function loadConfig() {
+  if (!REPO_ROOT) return {};
   const p = path.join(REPO_ROOT, 'symbion.json');
   try {
     const raw = fs.readFileSync(p, 'utf8');
@@ -41,10 +62,14 @@ const UI_URL     = `http://${HOST}:${PORT}/`;
 
 // Pick the Python interpreter. Prefer the portable copy that ships with
 // Symbion (scripts/bootstrap-portable.bat puts it at .python/python.exe);
-// fall back to `python` on PATH.
+// fall back to `python` on PATH. Returns null when REPO_ROOT couldn't
+// be located AND `python` isn't an obvious option — caller surfaces a
+// dialog rather than spawning a doomed child.
 function resolvePython() {
-  const portable = path.join(REPO_ROOT, '.python', 'python.exe');
-  if (fs.existsSync(portable)) return portable;
+  if (REPO_ROOT) {
+    const portable = path.join(REPO_ROOT, '.python', 'python.exe');
+    if (fs.existsSync(portable)) return portable;
+  }
   return 'python';
 }
 
@@ -247,6 +272,23 @@ app.whenReady().then(async () => {
   if (existing) {
     console.log('[symbion] existing backend detected — attaching');
     createWindow();
+    return;
+  }
+  // No backend running and no repo found — we can't spawn. Surface a
+  // clear error instead of trying to spawn `python` and letting it fail
+  // silently. Common cause: user installed the desktop app but skipped
+  // install.ps1 so there's no Symbion repo at %USERPROFILE%\symbion.
+  if (!REPO_ROOT) {
+    createWindow();
+    dialog.showErrorBox(
+      'Symbion repo not found',
+      'The Symbion desktop app needs the Symbion Python repo on the same machine to spawn its own backend.\n\n' +
+      'Tried these locations:\n' +
+      '  $env:SYMBION_REPO\n' +
+      '  ' + path.resolve(__dirname, '..') + '\n' +
+      '  %USERPROFILE%\\symbion\n' +
+      '  %USERPROFILE%\\SourceCode\\symbion\n\n' +
+      'Either install Symbion via install.ps1 (default lands at %USERPROFILE%\\symbion) or set the SYMBION_REPO env var to your existing repo, then relaunch.');
     return;
   }
   startBackend();

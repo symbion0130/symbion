@@ -7824,13 +7824,22 @@ def run_terminal(symbion: "SYMBION"):
         print(yellow(f"  MCP       :  {len(symbion.cfg.mcp_servers)} server(s) configured but "
                      "MCP is only active in web mode (`--web`)."))
 
-    # Unicode box-drawing for the title bar (2026-05-19). Width 68 chars
-    # inside the corners; pad the title line so the right border lands
-    # cleanly. Warm palette here -- amber title + warm-white border --
-    # so the chrome reads correctly under a Night-Light-shifted display.
+    # Unicode box-drawing title bar with the brand mark inside (2026-05-21).
+    # ASCII rendering of the split-S logo: top horizontal block with a
+    # short notch on the left, three nodes on the centerline (dot/ring/dot),
+    # bottom horizontal block with a short notch on the right. Mirrors the
+    # graphical mark used by the Electron app + installer EXE. Width 66
+    # chars inside the corners; mark is 12 chars wide, centered (27-space
+    # leading indent + 12 mark + 27 trailing = 66).
     print()
     print(amber("  ╔══════════════════════════════════════════════════════════════════╗"))
-    print(amber("  ║") + warm_white(bold("  SYMBION v14.0                                                  ")) + amber("║"))
+    print(amber("  ║") + " " * 66 + amber("║"))
+    print(amber("  ║") + " " * 27 + warm_white("██████████  ") + " " * 27 + amber("║"))
+    print(amber("  ║") + " " * 27 + warm_white("██          ") + " " * 27 + amber("║"))
+    print(amber("  ║") + " " * 27 + warm_white("   •  ◯  •  ") + " " * 27 + amber("║"))
+    print(amber("  ║") + " " * 27 + warm_white("        ██  ") + " " * 27 + amber("║"))
+    print(amber("  ║") + " " * 27 + warm_white("  ██████████") + " " * 27 + amber("║"))
+    print(amber("  ║") + warm_white(bold("                       SYMBION v14.0                              ")) + amber("║"))
     print(amber("  ╚══════════════════════════════════════════════════════════════════╝"))
     print()
 
