@@ -332,7 +332,7 @@ Entry point              main()
 4. **Only the judge refuses.** There is no survival gate. `HealthMetrics` is telemetry only.
 5. **Config-gated subsystems.** Every subsystem gets a bool in `SymbionConfig` and is skippable.
 6. **DB migrations are additive only.** Never drop columns. `init_db()` uses `CREATE TABLE IF NOT EXISTS` plus idempotent `ALTER TABLE ADD COLUMN` for legacy DB upgrades. Readers tolerate NULL.
-7. **No eval() or exec() on untrusted input.** The calculator uses AST validation. URLs are SSRF-checked. **Both file reads AND writes are machine-wide** as of 2026-05-22. `_resolve_in_workspace(path, root, machine_wide=True)` is used by every file tool; absolute paths anywhere on the machine are accepted, relative paths anchor to the workspace for ergonomic continuity, no containment check fires. The original sandbox semantics (writes confined to the workspace) are preserved in the same function under `machine_wide=False` as a library primitive — flip them back on via a cfg toggle if writes ever need re-sandboxing, but don't narrow the default without explicit user direction. Reads were opted in on 2026-04-25; writes joined them on 2026-05-22. Safety on writes is now enforced by the judge + persona layers, not by a path sandbox.
+7. **No eval() on untrusted input.** AST-validated calculator, SSRF check on URLs. **Both reads and writes are machine-wide** (`_resolve_in_workspace(..., machine_wide=True)` everywhere) — reads opted in 2026-04-25, writes joined 2026-05-22. Safety on writes is enforced by the judge + persona layers, not a path sandbox. The sandbox primitive (`machine_wide=False`) remains in `_resolve_in_workspace` if writes ever need re-narrowing via a cfg toggle; don't narrow the default without explicit user direction.
 8. **No bare `except:`.** Use `except ImportError:` for import guards, `except Exception:` everywhere else.
 9. **Tool registry sync.** Adding a tool requires changes in FOUR places: `SymbionTools._ALLOWED_TOOLS`, `SymbionTools._validate_args`, `SymbionTools.dispatch`, and `TOOL_SCHEMAS`. Plus a CAPABILITIES_BASE line so the model knows it exists.
 
@@ -416,6 +416,19 @@ Symmetric — any household user can query any other.
 
 Filtered subsets (gitignored) like `golden_restraint.jsonl`, `golden_tool_judgment.jsonl` are written by ad-hoc filter scripts and used via `--golden`.
 
+## Verification harnesses
+
+Four levels of "does it work?" check, in increasing cost. Use the cheapest one that covers what you're testing.
+
+| What you're testing | Script | Cost | Time |
+|---|---|---|---|
+| Code-level correctness (calculator, sandbox, SSRF, JSON parse, retrieval) | `pytest tests/ -q` | $0 | ~5s |
+| Per-feature plumbing without a real LLM | `scripts/verify_session_sync.py`, `scripts/verify_peer_token_streaming.py` | $0 (stubbed `respond()`) | 10-30s |
+| Behavioral / persona / tool-judgment regressions | `evals/run.py --provider <p>` | Real LLM calls | minutes |
+| End-to-end against live cfg (sanity smoke after a deploy-like change) | `scripts/smoke.py` (Ollama) or one-off respond() with live `SymbionConfig.load()` | Real LLM calls | seconds |
+
+Verification harnesses are stubbed-`respond()`-based, so they exercise plumbing (broadcast frames, WS protocol, queue draining, session sync) without burning provider budget. They boot Symbion in-process on a temp DB so the real `symbion.db` isn't polluted.
+
 ## Electron desktop shell (2026-05-21)
 
 `electron/` wraps the FastAPI web UI in a native window. Thin shell — no Symbion code changes.
@@ -478,6 +491,18 @@ Safety is layered. Each layer was added because the layers above it failed in a 
 - **`self.survival.metrics`** is now **`self.health`** (a `HealthMetrics` instance)
 - Pre-gen gather: 2 parallel calls (was 3-5). Post-gen probe gather: removed entirely.
 
+## Sister public repos (2026-05-22)
+
+Five focused libraries extracted from `symbion_v14.py` for portfolio + general reuse. Each is its own MIT-licensed package on GitHub, with tests and a README. If you're improving the in-Symbion version of one of these, check the public sibling first — sometimes the extracted version has a cleaner shape (no Symbion-specific assumptions), sometimes Symbion's version is ahead. Keep them roughly in sync when you can.
+
+| Sister repo | In-tree counterpart | Notes |
+|---|---|---|
+| [`pyresilience`](https://github.com/symbion0130/pyresilience) | `CircuitBreaker`, `RateLimiter`, `BaseClient._retry` | The public retry helper is named `retry_async`; logic is the same. |
+| [`safe-llm-tools`](https://github.com/symbion0130/safe-llm-tools) | `_safe_calc`, `_is_safe_url`, `_resolve_in_workspace` | Public `safe_calc` raises `CalcError` instead of returning `"Error: ..."` strings. Symbion's wrapper preserves the string-return convention. |
+| [`hybrid-retrieve`](https://github.com/symbion0130/hybrid-retrieve) | `_bm25_rank`, `_cosine`, `get_relevant_summaries_hybrid` | Public version takes generic `Document` objects; Symbion's variant is wired into `SymbionMemory`'s SQLite + vec0 index path. |
+| [`mcp-stdio-client`](https://github.com/symbion0130/mcp-stdio-client) | `MCPManager` | Effectively a 1:1 extraction. |
+| [`llm-evals`](https://github.com/symbion0130/llm-evals) | `evals/run.py` scoring engine | Public version scopes to JUST the grader + async harness; Symbion bundles in the responder runner. |
+
 ## What Symbion is not
 
 - Does **not** have white-box model access. Probes are behavioral proxies.
@@ -487,23 +512,21 @@ Safety is layered. Each layer was added because the layers above it failed in a 
 
 ## Known gaps
 
-*(None open — see Recently closed below.)*
+*(None open.)*
 
-## Recently closed gaps (2026-05-22)
+## Change log pointers
 
-Six gaps from this section's previous version were addressed in the same session and are listed here briefly so the next reader knows where the wiring lives:
+When a closed gap's wiring is non-obvious, look in the architecture section that owns the subsystem — that's the authoritative spot, not a separate change log.
 
-- **Per-call model split** — `_jmodel(role="self_eval" | "summarize" | "profile" | "proactive")` reads optional `cfg.anthropic_<role>_model` overrides; empty default falls back to `cfg.anthropic_judge_model`. Only Anthropic supports per-role for now.
-- **Proactive web push timer** — `cfg.proactive_web_push_seconds` (default 0 = legacy connect/turn drain). When > 0, each WS socket spawns its own `_proactive_push_loop` task that drains `proactive_queue` on a cadence; cancelled in the WS `finally`.
-- **`get_user_recent_activity` self-query** — `active_user` is now threaded end-to-end (`respond` → `_maybe_tool` / agent-loop `_exec_tool` → `_dispatch_tool` → `tools.dispatch`). The fallback to `cfg.active_user` was removed; missing context fails closed with a clear error rather than silently using the global default.
-- **Self-eval breaker** — `SYMBION._self_eval_breaker` is a separate `CircuitBreaker(open_after=4, reset_after=30s)`. `_self_eval` gates on this breaker, not the responder client's `cb`, so a 529 burst on the responder no longer dark-outs the post-gen quality review.
-- **Electron installer bundles Python + nudges to install Ollama models** — `electron/package.json` ships `.python/` via `extraResources` (filtered to drop `__pycache__`/`.pyc`/test dirs); installer grows by ~140 MB compressed. `electron/main.js` `resolvePython()` now prefers `process.resourcesPath/.python/python.exe` in packaged mode, falls through to repo `.python/` for dev. On first launch (and every launch where the embedding model is still missing) the app probes Ollama at `cfg.ollama_host` and shows a dismissible dialog: "Ollama running but `mxbai-embed-large` missing → run install script" OR "Ollama not detected → cloud LLM still works, run install script for full setup". Dialog offers an "Open install script" button that launches `scripts/install-ollama.ps1` via `powershell -ExecutionPolicy Bypass`. Model weights themselves are NOT bundled (670 MB for mxbai alone, 4 GB for mistral) — the dialog points at the canonical installer instead, which already does idempotent pulls. The Symbion Python repo is also still expected at `%USERPROFILE%\symbion` (or `$SYMBION_REPO`) — only the runtime is bundled, not the application code, so users get fresh code from `git pull` instead of stale from the installer.
-- **Mid-turn token streaming to peer WS clients** — `cfg.peer_token_streaming` (class default `False`; **currently set to `true` in `symbion.json`**). When True AND a peer socket is connected on the session, the WS handler spawns a per-turn `_peer_token_broadcaster` task that drains an `asyncio.Queue` and fans the originator's visible tokens out to peers as `remote_tok` frames (keyed by a per-turn `request_id`). Thinking-block tokens and revise sentinels are NOT mirrored — peers see the visible response only. `remote_assistant` now also carries `request_id` so the client can reconcile the partial-streamed bubble with the authoritative final text. `broadcast_to_session` switched from sequential `await ws.send_text(...)` to `asyncio.gather` with a per-peer 1.0s timeout so one slow peer can't stall the rest. Client (`index.html`) maintains a `remoteStreaming` Map keyed by `request_id`; `addSymStreamingRemote()` creates the partial bubble on first `remote_tok`, `remote_assistant` swaps in the authoritative text and drops the entry. Verified end-to-end by `scripts/verify_peer_token_streaming.py` against three scenarios (streaming-on + 2 peers, solo + streaming-on, streaming-off + 2 peers); all three pass with request_id consistency confirmed and `remote_tok` deltas concatenating to the authoritative final text.
+- **2026-05-22** — gaps #1, #3, #4, #5, #6 closed in one session (commits `8cce939`, `be7fe82`). Per-role model selection (Provider conventions), self-eval breaker (Provider conventions), `get_user_recent_activity` fail-closed (Cross-user retrieval), Electron Python bundling + Ollama dialog (Electron desktop shell), peer token streaming (Cross-interface session sync), and write_file widened to machine-wide (invariant #7).
+- **2026-05-21** — cross-interface session sync, location services, cross-user retrieval, fresh-session-per-launch, web push timer landed (see those sections).
+- **2026-04-25** — read tools opted in to machine-wide paths (invariant #7).
 
 ## Working style
 
 - Push back when a request contradicts an invariant.
 - Ask when unclear — don't guess toward the wrong target.
 - Flag output that looks profound but may be prompt artifact.
-- One subsystem per commit. Prompt changes get a commit note explaining why.
+- **Per-gap commit splits.** When closing multiple distinct gaps/issues in one session, ship each as its own commit. Plan boundaries upfront so changes stay separable; don't batch at the end. (The matching `git add -p` is interactive and doesn't work well through tooling, so the practical pattern is: finish gap N, commit, then start gap N+1.) Prompt changes always get a commit note explaining why.
+- Verification harnesses ship in the same commit as the feature they verify, not later.
 - Never commit API keys. `.env` is gitignored. `config.save()` strips key fields.
