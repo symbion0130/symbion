@@ -199,14 +199,38 @@ async def main():
         # with the .b-synced chip.
         session_id = await page.evaluate("() => localStorage.getItem('symbion_session')")
         page_b = await ctx.new_page()
-        # Tab B shares localStorage via the same context, so it'll pick up
-        # the same SESSION on load.
+        # With cfg.auto_resume_on_start = False (2026-05-21 default),
+        # each page load mints a fresh SESSION. To put tab B on the SAME
+        # session as tab A for the cross-device broadcast probe, we seed
+        # localStorage BEFORE the page's initialConnect runs (init script
+        # fires before any other JS on the page) — then trigger a reload
+        # so connect() reads the seeded SESSION.
+        await page_b.add_init_script(
+            f"localStorage.setItem('symbion_session', {session_id!r});")
         await page_b.goto(base, wait_until="domcontentloaded")
         await page_b.wait_for_function(
             "() => !document.getElementById('dot').classList.contains('dead')",
             timeout=8000)
-        sess_b = await page_b.evaluate("() => localStorage.getItem('symbion_session')")
-        log("tab B picks up same session via localStorage",
+        # Force the page to honor our pre-seeded SESSION even though
+        # initialConnect would otherwise overwrite it on first load.
+        # The reload is enough — by the time it runs, the seed is in
+        # storage and initialConnect picks it up via fetchSessions
+        # being null OR via the explicit setItem above.
+        sess_b = await page_b.evaluate("() => SESSION")
+        # If SESSION drifted (fresh-session mint won), force it explicitly
+        # by re-binding before opening WS for the broadcast assertions.
+        if sess_b != session_id:
+            await page_b.evaluate(f"""() => {{
+                SESSION = {session_id!r};
+                localStorage.setItem('symbion_session', SESSION);
+                if (typeof ws !== 'undefined' && ws) {{ try{{ ws.close(); }}catch(e){{}} }}
+                connect();
+            }}""")
+            await page_b.wait_for_function(
+                "() => !document.getElementById('dot').classList.contains('dead')",
+                timeout=5000)
+            sess_b = await page_b.evaluate("() => SESSION")
+        log("tab B placed on same session as tab A for broadcast probe",
             "PASS" if sess_b == session_id else "FAIL",
             f"A={session_id[:12]!r} B={sess_b[:12]!r}")
 

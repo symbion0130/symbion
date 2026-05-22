@@ -335,8 +335,12 @@ Entry point              main()
 
 The same conversation can be picked up across terminal and web. Three pieces:
 
-1. **Shared `active_session` pointer.** Stored per-user in `user_profile` under `__active_session` / `__active_session_ts` (filtered from /profile display by the `__` prefix check in `get_profile_with_meta`). Updated in `respond()` after every turn. Both `run_terminal()` and the web UI auto-resume the pointer on launch if it was touched in the last 24h.
-2. **Session list endpoints.** `GET /api/sessions` returns newest-first sessions for the active user (id, title from first user message, last_activity, turn_count) plus the active pointer. `GET /api/sessions/{id}/messages` returns up to 200 messages for sidebar hydration. Both require X-API-Key when configured.
+1. **Shared `active_session` pointer.** Stored per-user in `user_profile` under `__active_session` / `__active_session_ts` (filtered from /profile display by the `__` prefix check in `get_profile_with_meta`). Updated in `respond()` after every turn. Used by the sidebar / `/sessions` command for ordering and click-to-resume.
+
+   **Auto-resume on launch is OFF by default** (`cfg.auto_resume_on_start = False`, set 2026-05-21). Every terminal / web / electron launch mints a fresh session id; the user explicitly chose "start clean each time, manual resume via sidebar" over "pick up where I left off." Flip to True in `symbion.json` if you want the old behaviour back. The `/api/sessions` response includes `auto_resume_on_start` so the web client respects the same flag.
+
+2. **Session list endpoints.** `GET /api/sessions` returns newest-first sessions for the active user (id, title from first user message, last_activity, turn_count) plus the active pointer + the auto-resume flag. `GET /api/sessions/{id}/messages` returns up to 200 messages for sidebar hydration. Both require X-API-Key when configured.
+
 3. **Live multi-device broadcast.** SYMBION has a `_ws_clients` registry (per-session set of WebSockets). When user A on device 1 sends a message, the WS handler broadcasts `remote_user` immediately (before respond) and `remote_assistant` after respond completes, to all OTHER peer sockets on the same session. The receiving client renders both with a "synced from another device" chip. Terminal mode uses a watermark instead (`get_max_message_id` + `get_messages_after`) — drains new peer messages above the next `you >` prompt.
 
 The sidebar in the web UI lists sessions newest-first, collapses to 5 by default with a "Show all (N)" expander, click-to-switch with REST hydration before WS reconnect.
@@ -402,7 +406,7 @@ Filtered subsets (gitignored) like `golden_restraint.jsonl`, `golden_tool_judgme
 - **Lifecycle**: spawns `../.python/python.exe -m symbion --web`, polls `/health` until 200, opens `BrowserWindow` at `localhost:8000`. On quit walks the Python process tree (`taskkill /T /F` on Windows).
 - **Attach-vs-spawn**: probes `/health` BEFORE spawning. If a Symbion is already serving, attaches to it instead of starting a duplicate (common case: user has `python -m symbion --web` running in a terminal).
 - **Single-instance lock** so double-click doesn't spawn a second backend that would fail to bind port 8000.
-- **Brand icon**: white Symbion mark baked into the EXE (taskbar, alt-tab) + the NSIS installer chrome (installer EXE icon, uninstaller icon, Start Menu shortcut icon). Assets in `electron/assets/`.
+- **Brand icon**: white split-S mark on a black disc with a white edge ring, baked into the EXE (taskbar, alt-tab) + the NSIS installer chrome (installer EXE icon, uninstaller icon, Start Menu shortcut icon). Assets in `electron/assets/`: `symbion.ico` (16/24/32/48/64/128/256), `symbion.icns` (16→1024), `symbion-512.png` (Linux), `symbion-mark.svg` (in-app branding). `scripts/_gen_icon_set.py` regenerates the full set from a single Pillow render at 2048 px — re-run if you tweak the design (mark scale, edge thickness, colors).
 - **Installer**: `npm run build:win` produces `dist/Symbion Setup *.exe` (NSIS, per-user install, ~87 MB). No code signing — first-launch SmartScreen warning is expected. Does NOT bundle Python or models; expects Symbion repo at `%USERPROFILE%\symbion`.
 
 ## Provider conventions

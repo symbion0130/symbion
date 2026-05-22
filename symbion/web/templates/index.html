@@ -1787,25 +1787,20 @@ if(!apiKey){
 // during expected/intentful states. The pill only appears after a real
 // mid-session drop -- see scheduleReconnect().
 
-// Initial connect: ask the server for its active_session pointer so the
-// browser resumes wherever the user was last active across terminal +
-// web. Falls back to localStorage's SESSION if the server is offline,
-// returns 401 (key modal will surface separately), or returns no
-// pointer. Always succeeds in selecting *some* session id before
-// opening the WS.
+// Initial connect: by default (cfg.auto_resume_on_start = false on the
+// server), every page load mints a fresh SESSION so each visit feels
+// like opening a clean chat. Past sessions stay accessible via the
+// sidebar. When the server sets auto_resume_on_start = true (config
+// override), we honor data.active and pick up where we left off.
 (async function initialConnect(){
   const data = await fetchSessions();   // sets cachedSessions on success
-  if(data){
-    if(data.active){
-      SESSION = data.active;
-      localStorage.setItem(SESSION_STORE, data.active);
-    } else if(!localStorage.getItem(SESSION_STORE) && cachedSessions.length){
-      // No server pointer and no localStorage record — pick the most
-      // recently touched session so a fresh browser doesn't strand the
-      // user on an empty unrelated id.
-      SESSION = cachedSessions[0].id;
-      localStorage.setItem(SESSION_STORE, SESSION);
-    }
+  if(data && data.auto_resume_on_start && data.active){
+    SESSION = data.active;
+    localStorage.setItem(SESSION_STORE, data.active);
+  } else {
+    // Fresh session per launch. Always mint a new id so a stale
+    // localStorage SESSION from a prior visit doesn't carry forward.
+    SESSION = newSessionId();
   }
   connect();
 })();

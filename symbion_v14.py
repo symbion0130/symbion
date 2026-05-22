@@ -248,6 +248,14 @@ class SymbionConfig:
     active_user: str = "aaron"
     known_users: List[str] = field(default_factory=lambda: ["aaron", "lala"])
 
+    # Auto-resume the user's last active session on launch (terminal /
+    # web / electron). When False (the default, set 2026-05-21), every
+    # launch starts on a fresh session id — manual resume still works
+    # via the sidebar / `/sessions` command, this just turns off the
+    # automatic "pick up where you left off" behaviour. Set True via
+    # symbion.json if you want the auto-resume back.
+    auto_resume_on_start: bool = False
+
     memory_summary_every: int = 16
     profile_update_every: int = 4
 
@@ -7056,7 +7064,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         u = (user or "").strip() or (symbion.cfg.active_user or "aaron")
         sessions = symbion.memory.list_sessions(u, limit=max(1, min(limit, 200)))
         active = symbion.memory.get_active_session(u, max_age_hours=24.0)
-        return JSONResponse({"sessions": sessions, "active": active, "user": u})
+        # `active` is still returned for clients that want to *show* the
+        # resume target (sidebar highlighting), but `auto_resume_on_start`
+        # tells the client whether to auto-resume on first load. When
+        # False, the client mints a fresh SESSION id even if active is set.
+        return JSONResponse({"sessions": sessions, "active": active, "user": u,
+                              "auto_resume_on_start": bool(symbion.cfg.auto_resume_on_start)})
 
     @app.get("/api/sessions/{session_id}/messages")
     async def api_session_messages(request: Request, session_id: str,
@@ -7772,12 +7785,14 @@ def _read_input_multiline(prompt_text: str, paste_window: float = 0.08) -> str:
 
 
 def run_terminal(symbion: "SYMBION"):
-    # Auto-resume the user's last active session if it was touched in
-    # the last 24h, so terminal + web converge on a single thread across
-    # launches. Otherwise mint a fresh session id. /new and /resume below
-    # let the user override this from inside the REPL.
+    # Auto-resume the user's last active session only when cfg.auto_resume_on_start
+    # is True. Default is False (2026-05-21) — every launch starts on a
+    # fresh session id; the sidebar / /sessions command still surface past
+    # threads for manual resume via /resume <n>.
     _default_user = symbion.cfg.active_user or "aaron"
-    resumed_session = symbion.memory.get_active_session(_default_user, max_age_hours=24.0)
+    resumed_session = None
+    if symbion.cfg.auto_resume_on_start:
+        resumed_session = symbion.memory.get_active_session(_default_user, max_age_hours=24.0)
     if resumed_session:
         session = resumed_session
         resumed = True
