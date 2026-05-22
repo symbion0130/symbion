@@ -111,6 +111,10 @@ scripts/
   smoke.py                  # instantiate + one respond() call; self-diagnoses
                             #   CPU-bound Ollama vs. real regression.
   bench_latency.py          # framework overhead measurement
+  stress_chat.py            # multi-session probe: 5 sessions x 3 turns.
+                            #   Classifies each request real/stub/fail. Used to
+                            #   verify the manual-fallback contract during 529
+                            #   bursts. Reads SYMBION_API_KEY from .env.
   migrate_v13_to_v14.py     # DB table migration
   verify_session_sync.py    # Playwright + headless Chromium harness. 34 steps:
                             #   session sync, sidebar collapse, attachments, scroll
@@ -471,6 +475,7 @@ Safety is layered. Each layer was added because the layers above it failed in a 
 - **Concurrent same-session writes via WS broadcast** are best-effort. Two devices on the same session see each other's `remote_*` frames in real time, but mid-turn token streaming is NOT mirrored to peers (they get the final block via `remote_assistant`). Multi-client token streaming is bigger protocol work.
 - **`get_user_recent_activity` self-query check uses `cfg.active_user`**, not the per-session `_session_user` override. For a session where Lala is active in a fresh browser but cfg.active_user is still "aaron", the self-check on a Lala-querying-Lala call would not block. Approximate but adequate for the common case.
 - **Electron installer doesn't bundle Python or models.** Targets users who've already run `install.ps1`. Fully self-contained installer (~5 GB) would require a much bigger packaging job.
+- **Self-eval shares the Anthropic breaker.** Self-eval runs fire-and-forget on the same provider as the responder; during 529 bursts both the responder and the post-gen quality-review pass are dark on the same window. Revision (`quality_score < 0.40`) cannot fire while the breaker is open. Not catastrophic — the design is fire-and-forget — but worth knowing that during sustained 529s the post-gen safety net is silently absent. Confirmed empirically in `scripts/stress_chat.py` runs on 2026-05-22 during an Anthropic incident.
 
 ## Working style
 
