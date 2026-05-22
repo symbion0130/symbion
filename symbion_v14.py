@@ -228,15 +228,24 @@ class SymbionConfig:
     # a kimi-k2.* responder (e.g. moonshot-v1-* judge calls already pass
     # their own small explicit max_tokens via chat_json/chat_text).
     kimi_max_tokens:   int = 2048
-    # Outbound concurrency cap for Moonshot. Empirically Moonshot's K2.6
-    # scheduler queues parallel requests aggressively — under 5 simultaneous
-    # turns, individual ttft can balloon from ~2s to 20s+. Throttling at the
-    # client level (asyncio.Semaphore in KimiClient) trades a tiny amount of
-    # average latency for a much tighter p95 by NOT letting Symbion pile
-    # bursts of requests into Moonshot's queue. 2 is conservative; raise
-    # if you've negotiated more throughput with Moonshot, lower if you're
-    # seeing consistent ttft spikes. Set to 0 to disable the cap entirely.
-    kimi_max_concurrent: int = 2
+    # Outbound concurrency cap for Moonshot. When > 0, `KimiClient._slot()`
+    # gates all outbound calls (chat_json, chat_text, stream) through an
+    # asyncio.Semaphore so at most N are in flight at once. The goal is
+    # to keep Symbion from piling bursts of requests into Moonshot's
+    # queue — preferring to wait locally where it's cheap.
+    #
+    # **Default is 0 (DISABLED).** Empirical testing on the 2026-05-22
+    # stress workload (5 sessions × 3 turns) showed that low caps (e.g.
+    # 2) cause severe local serialization because each Symbion turn fires
+    # ~2 outbound calls (judge + responder), so cap=2 means only one turn
+    # can be in flight across the whole process. p50 went from 12s to
+    # 40s with cap=2. The throttle CAN help on workloads where:
+    #   - bursts are short-lived and Moonshot's queue is the actual
+    #     bottleneck (not the case for typical chat usage), OR
+    #   - you've measured ttft spikes correlating with parallel sends.
+    # Set this to a value HIGHER than 2× your expected concurrent turn
+    # count (e.g. cap=6 to comfortably allow 3 concurrent users).
+    kimi_max_concurrent: int = 0
     kimi_base_url:     str = "https://api.moonshot.ai/v1"
     use_kimi_responder: bool = False
 
