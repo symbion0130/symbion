@@ -338,6 +338,14 @@ class SymbionConfig:
     # self-eval alive through bursts. Must be a provider with a
     # configured API key (or local Ollama).
     self_eval_provider:  str   = ""
+    # Seconds between proactive queue drains pushed to each open WS.
+    # 0 (default) keeps the legacy connect/turn-only drain behavior —
+    # messages only land when the user reconnects or types. Set > 0
+    # (e.g. 30) to drain on a timer per active socket so unprompted
+    # messages reach idle clients without needing user input first.
+    # Each socket runs its own asyncio loop; cancelled cleanly on
+    # disconnect.
+    proactive_web_push_seconds: int = 0
 
     voice_loosen_enabled:      bool = True
 
@@ -7286,6 +7294,14 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                                 "emotion":"","tasks":symbion.tasks.get_active(session_id),
                                 "integrity":_health_dict(),"status":{}})
 
+        # Optional timer-driven push: drains the proactive queue on a
+        # cadence so idle WS clients see unprompted messages without
+        # waiting for a user turn or reconnect. Disabled when
+        # cfg.proactive_web_push_seconds <= 0. Created inside the try
+        # below so unregister_ws_client always runs even if task setup
+        # fails; cancelled in finally.
+        proactive_push_task: Optional[asyncio.Task] = None
+
         try:
             # Replay session history first so the chat scroll backfills
             # before the status pills + input unlock. Capped at 30 messages
@@ -7324,6 +7340,20 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                                   "sym":f"{m.symbiosis_score:+.2f}","dist":f"{m.distress_level:.2f}",
                                   "welfare":str(m.welfare_concern())}})
             await _push_proactive()
+
+            push_interval_s = max(0, int(symbion.cfg.proactive_web_push_seconds or 0))
+            if push_interval_s > 0:
+                async def _proactive_push_loop():
+                    try:
+                        while True:
+                            await asyncio.sleep(push_interval_s)
+                            try:
+                                await _push_proactive()
+                            except Exception as ex:
+                                logger.warning(f"proactive push loop tick: {ex}")
+                    except asyncio.CancelledError:
+                        pass
+                proactive_push_task = asyncio.create_task(_proactive_push_loop())
 
             while True:
                 data    = await websocket.receive_text()
@@ -7715,6 +7745,15 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         except Exception as ex:
             logger.error(f"WS handler error: {ex}", exc_info=True)
         finally:
+            # Stop the proactive push loop (if it was started) before we
+            # tear down the socket registry — the loop closes over `send`
+            # and would raise on next tick otherwise.
+            if proactive_push_task is not None:
+                proactive_push_task.cancel()
+                try:
+                    await proactive_push_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             # Always pull this socket out of the peer registry — a
             # disconnected client must not stay in the broadcast fan-out
             # or the next remote_* send for this session will raise.
