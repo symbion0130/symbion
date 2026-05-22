@@ -4,12 +4,29 @@ Sends 15 chat requests at /api/chat, scoring each for: HTTP status, latency,
 whether the body looks like the heuristic stub (LLM unavailable) or a real
 response, and any error text. Reports a summary table + per-session timeline.
 
+Session IDs are per-RUN unique (timestamped at script start), so multiple
+stress runs never share session state. Use --cleanup to also delete the
+just-created session rows from symbion.db after the test summary prints —
+useful for quick debug iteration when you don't want test data in retrieval.
+Without --cleanup, sessions are left in the DB and remain inert (they're
+named `stress_<timestamp>_s<n>` so they're easy to grep for and bulk-delete
+later if you want).
+
 Reads SYMBION_API_KEY from .env. Targets http://localhost:8000.
+
+Args:
+  --cleanup    After the run, open symbion.db directly and delete rows
+               whose `session` column starts with this run's RUN_ID prefix.
+               Touches messages, summaries, interactions, user_positions,
+               knowledge_gaps. Leaves symbion_events.jsonl alone (append-only
+               by design — entries for this run stay logged).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -19,9 +36,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO / ".env"
+DB_PATH = REPO / "symbion.db"
 URL = "http://localhost:8000/api/chat"
 N_SESSIONS = 5
 TURNS_PER_SESSION = 3
+
+# Stamped at script start. Every session this run creates carries this in
+# its id so re-running the harness can't collide with prior runs' DB state.
+RUN_ID = time.strftime("%Y%m%d_%H%M%S")
+SESSION_PREFIX = f"stress_{RUN_ID}"
 
 # Varied, short prompts. Each session gets a thread of TURNS_PER_SESSION
 # distinct messages so we exercise the session-sync + summarise paths.
@@ -84,7 +107,7 @@ def chat_once(api_key: str, session_id: str, message: str) -> dict:
 
 
 def run_session(api_key: str, sid_num: int, prompts: list[str]) -> list[dict]:
-    session_id = f"stress_2026_05_22_s{sid_num}"
+    session_id = f"{SESSION_PREFIX}_s{sid_num}"
     results = []
     for turn_idx, msg in enumerate(prompts, start=1):
         wall = time.strftime("%H:%M:%S")
@@ -103,9 +126,40 @@ def run_session(api_key: str, sid_num: int, prompts: list[str]) -> list[dict]:
     return results
 
 
+def cleanup_run_sessions() -> dict:
+    """Delete every row whose session matches this run's prefix. Returns
+    {table: deleted_count}. Quiet on success; warns once if the DB file
+    is missing (e.g. running the harness against a remote Symbion)."""
+    if not DB_PATH.exists():
+        print(f"  (cleanup skipped — {DB_PATH} not found; remote Symbion?)")
+        return {}
+    deleted: dict = {}
+    with sqlite3.connect(str(DB_PATH)) as db:
+        db.execute("BEGIN")
+        for table in ("messages", "summaries", "interactions",
+                       "user_positions", "knowledge_gaps"):
+            try:
+                cur = db.execute(
+                    f"DELETE FROM {table} WHERE session LIKE ?",
+                    (SESSION_PREFIX + "%",))
+                deleted[table] = cur.rowcount
+            except sqlite3.OperationalError:
+                # Table doesn't exist on this schema version — skip.
+                pass
+        db.execute("COMMIT")
+    return deleted
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--cleanup", action="store_true",
+                     help="Delete this run's session rows from symbion.db after the summary.")
+    args = ap.parse_args()
+
     api_key = read_api_key()
-    print(f"=== stress: {N_SESSIONS} sessions x {TURNS_PER_SESSION} turns = {N_SESSIONS*TURNS_PER_SESSION} requests ===", flush=True)
+    print(f"=== stress: {N_SESSIONS} sessions x {TURNS_PER_SESSION} turns = {N_SESSIONS*TURNS_PER_SESSION} requests "
+          f"(run_id={RUN_ID}) ===", flush=True)
     t_start = time.perf_counter()
     all_results: list[dict] = []
     with ThreadPoolExecutor(max_workers=N_SESSIONS) as ex:
@@ -147,6 +201,22 @@ def main() -> int:
         else:
             extra = f"  err={r.get('err','')[:80]}"
         print(f"  s{s} t{t}  {tag}  {e:5.1f}s  status={r.get('status')}{extra}")
+
+    if args.cleanup:
+        print()
+        print("=== cleanup ===")
+        deleted = cleanup_run_sessions()
+        if deleted:
+            total = sum(deleted.values())
+            print(f"  deleted {total} rows across {len(deleted)} tables (session prefix: {SESSION_PREFIX})")
+            for tbl, n in deleted.items():
+                if n:
+                    print(f"    {tbl}: {n}")
+        else:
+            print("  (no rows deleted)")
+    else:
+        print()
+        print(f"(session prefix: {SESSION_PREFIX} — pass --cleanup to remove these rows from symbion.db)")
     return 0 if fail == 0 else 2
 
 
