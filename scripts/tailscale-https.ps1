@@ -90,13 +90,34 @@ Write-Host "Pointing Tailscale $mode at http://localhost:$Port ..." -ForegroundC
 
 # `tailscale serve` / `tailscale funnel` are idempotent -- re-running with
 # a different config just replaces. --bg detaches so the script can exit.
-$args = @($mode, "--bg", "--https=443", "http://localhost:$Port")
-& $ts @args 2>&1 | Out-Host
+# Capture the combined output so we can match against Tailscale's known
+# "needs to be enabled" message (it returns exit code 0 in that case,
+# so $LASTEXITCODE alone won't catch it).
+$args   = @($mode, "--bg", "--https=443", "http://localhost:$Port")
+$output = & $ts @args 2>&1 | Out-String
+Write-Host $output
+
+$needsEnable = $output -match "is not enabled on your tailnet" -or
+               $output -match "Use of Funnel requires"
+
+if ($needsEnable) {
+    Write-Host ""
+    Write-Host "Tailscale $mode is not yet enabled for your tailnet." -ForegroundColor Yellow
+    Write-Host "This is a one-time admin opt-in -- click through the URL above"
+    Write-Host "(or this one) to enable it, then re-run this script:"
+    Write-Host ""
+    if ($Funnel) {
+        Write-Host "  https://login.tailscale.com/admin/settings/funnel" -ForegroundColor Cyan
+    } else {
+        Write-Host "  https://login.tailscale.com/admin/settings/serve" -ForegroundColor Cyan
+    }
+    exit 1
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "Tailscale $mode failed (exit $LASTEXITCODE)." -ForegroundColor Red
     if ($Funnel) {
-        Write-Host "Funnel must be enabled for this node in the admin console:"
+        Write-Host "Funnel must also be enabled per-node:"
         Write-Host "  https://login.tailscale.com/admin/machines"
         Write-Host "Pick this device, click '...', enable 'Allow funnel'."
     }

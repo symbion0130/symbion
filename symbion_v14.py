@@ -4346,7 +4346,18 @@ class SymbionMemory:
             # get_weather without needing a separate lookup step. Kept
             # to 4 decimal places so the prompt doesn't bloat.
             coord_hint = f" [coords: lat={loc['lat']:.4f}, lon={loc['lon']:.4f}]"
-            parts.append(f"User's current location: {place}{tz_note}{stale}{coord_hint} (use for context only; do not bring up unprompted unless directly relevant)")
+            # AMBIENT ONLY. The model defaults to demonstrating awareness
+            # of context it has — naming the city, opening with "hope
+            # you're enjoying Texas weather", etc. That reads as
+            # surveillance, not service. Use only when the user asks a
+            # location-anchored question (weather, local time, where to
+            # go); otherwise the location stays out of the response.
+            parts.append(
+                f"User's current location (ambient context, DO NOT mention "
+                f"unless they ask a location-anchored question like weather, "
+                f"local time, or nearby places — no 'hope you're enjoying X', "
+                f"no 'as a fellow Texan', no name-dropping the city to seem "
+                f"attentive): {place}{tz_note}{stale}{coord_hint}")
 
         if profile:
             # current_situation is the load-bearing life-events field. Surface
