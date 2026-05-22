@@ -2673,7 +2673,8 @@ class SymbionTools:
         return now.strftime("%A, %B %d %Y, %I:%M %p %Z").lstrip("0")
 
     def get_user_recent_activity(self, target_user: str, cfg: "SymbionConfig",
-                                  hours: float = 24.0) -> str:
+                                  hours: float = 24.0,
+                                  active_user: str = "") -> str:
         """Cross-user retrieval (Phase 2). When ONE household member asks
         Symbion about another ('what was lala working on', 'is lala
         still up?'), this tool returns a formatted snapshot of the
@@ -2693,10 +2694,10 @@ class SymbionTools:
         # Refuse self-queries: the active user's own recent history is
         # already in the build_context recent + summary blocks. The tool
         # exists specifically to fetch OTHER household users' activity.
-        # Approximated against cfg.active_user — for per-session user
-        # overrides this can't catch every case, but it does catch the
-        # common case + the eval harness's default user.
-        active = (cfg.active_user or "").strip().lower()
+        # Prefer the caller-supplied active_user (resolved per-session via
+        # SYMBION._active_user(session)), fall back to cfg.active_user
+        # for older callers / evals that don't thread session through.
+        active = ((active_user or cfg.active_user or "").strip().lower())
         if active and target == active:
             return (f"Error: get_user_recent_activity is for OTHER household "
                     f"members. '{target}' is the active user — their recent "
@@ -2866,7 +2867,8 @@ class SymbionTools:
         return True, "", out
 
     async def dispatch(self, tool: str, args: Dict, cfg: SymbionConfig,
-                       responder=None, responder_model: str = "") -> str:
+                       responder=None, responder_model: str = "",
+                       active_user: str = "") -> str:
         ok, reason, a = self._validate_args(tool, args)
         if not ok:
             logger.warning(f"Tool arg validation failed: {tool} — {reason}")
@@ -2884,7 +2886,8 @@ class SymbionTools:
         if tool=="get_weather":     return await self.get_weather(a["lat"], a["lon"])
         if tool=="get_local_time":  return self.get_local_time(a["timezone"])
         if tool=="get_user_recent_activity":
-            return self.get_user_recent_activity(a["user"], cfg, a.get("hours", 24.0))
+            return self.get_user_recent_activity(a["user"], cfg, a.get("hours", 24.0),
+                                                  active_user=active_user)
         return f"Unknown tool: {tool}"
 
 
@@ -5217,11 +5220,15 @@ class SYMBION:
         return list(TOOL_SCHEMAS) + self.mcp.tool_schemas()
 
     async def _dispatch_tool(self, name: str, args: Dict,
-                              responder=None, responder_model: str = "") -> str:
+                              responder=None, responder_model: str = "",
+                              active_user: str = "") -> str:
         """Route a tool call to the MCP manager when prefixed with `mcp__`,
         otherwise fall through to the built-in SymbionTools dispatcher.
         Also records per-tool reliability stats (calls, errors, latency,
-        output size, last error) into self.tool_stats for /tool-stats."""
+        output size, last error) into self.tool_stats for /tool-stats.
+
+        active_user is the per-session-resolved user (via _active_user)
+        that get_user_recent_activity uses for its self-query refusal."""
         stats = self.tool_stats.setdefault(name, {
             "calls": 0, "errors": 0, "total_chars": 0,
             "latency_ms_total": 0.0, "last_error": "",
@@ -5234,7 +5241,8 @@ class SYMBION:
             else:
                 result = await self.tools.dispatch(name, args, self.cfg,
                                                    responder=responder,
-                                                   responder_model=responder_model)
+                                                   responder_model=responder_model,
+                                                   active_user=active_user)
         except Exception as ex:
             stats["errors"] += 1
             stats["last_error"] = f"{type(ex).__name__}: {ex}"[:200]
@@ -5674,7 +5682,7 @@ class SYMBION:
         except Exception:
             return path
 
-    async def _maybe_tool(self, query: str):
+    async def _maybe_tool(self, query: str, active_user: str = ""):
         if not self.cfg.tools_enabled: return None
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub): return None
@@ -5752,7 +5760,8 @@ class SYMBION:
                 responder = self._responder_client()
                 result = await self.tools.dispatch(
                     tool, args, self.cfg,
-                    responder=responder, responder_model=self._rmodel())
+                    responder=responder, responder_model=self._rmodel(),
+                    active_user=active_user)
                 logger.warning(f"Tool result: {result[:120]!r}")
                 return result
         except Exception as ex: logger.error(f"Tool: {ex}", exc_info=True)
@@ -6096,7 +6105,7 @@ class SYMBION:
                     tool_context = None
                 else:
                     tool_context, query_embedding = await asyncio.gather(
-                        self._maybe_tool(text),
+                        self._maybe_tool(text, active_user=active_user),
                         self.embeddings.embed(text),
                     )
                 evaluation = {"should_assist": True, "human_benefit_score": 0.5,
@@ -6116,7 +6125,7 @@ class SYMBION:
             else:
                 pre_pair, tool_context, query_embedding = await asyncio.gather(
                     self._pre_gen_analysis(text),
-                    self._maybe_tool(text),
+                    self._maybe_tool(text, active_user=active_user),
                     self.embeddings.embed(text),
                 )
                 evaluation, emotional_state = pre_pair
@@ -6312,7 +6321,8 @@ class SYMBION:
                         return await self._dispatch_tool(
                             name, args,
                             responder=resp_client,
-                            responder_model=resp_model)
+                            responder_model=resp_model,
+                            active_user=active_user)
                     except Exception as ex:
                         logger.error(f"[req={request_id}] Agent tool dispatch '{name}': {ex}", exc_info=True)
                         return f"Tool dispatch error: {type(ex).__name__}: {ex}"
