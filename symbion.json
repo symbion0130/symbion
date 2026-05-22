@@ -28,11 +28,7 @@
   "proactive_interval_minutes": 0,
   "db_path": "symbion.db",
   "log_path": "symbion_transparency.log",
-  "fallback_chain": [
-    "anthropic",
-    "openai",
-    "ollama"
-  ],
+  "fallback_chain": [],
   "mcp_enabled": true,
   "mcp_servers": [
     {

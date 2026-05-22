@@ -8687,14 +8687,8 @@ Examples:
     if args.proactive:       cfg.proactive_interval_minutes = args.proactive
     if args.use_kimi_responder: cfg.use_kimi_responder = True
     if args.kimi_thinking:       cfg.kimi_thinking_enabled          = True
-    if not hasattr(cfg,'fallback_chain') or not cfg.fallback_chain:
-        cfg.fallback_chain=[p for p in ["anthropic","openai","ollama"] if p!=cfg.llm_provider]
-    # Always ensure Ollama is in the chain as the local-only safety net.
-    # When Anthropic capacity 529s and OpenAI is unconfigured (or also
-    # down), the breaker still has somewhere to route to. Skipped only
-    # when Ollama IS the primary provider (no point being its own fallback).
-    if cfg.llm_provider != "ollama" and "ollama" not in cfg.fallback_chain:
-        cfg.fallback_chain.append("ollama")
+    if not hasattr(cfg,'fallback_chain'):
+        cfg.fallback_chain=[]
 
     if args.save_config:
         cfg.save(); print(green(f"OK Saved to {CONFIG_FILE}")); sys.exit(0)
