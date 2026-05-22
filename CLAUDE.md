@@ -154,6 +154,7 @@ Kimi and DeepSeek were deliberately removed from Worker injection on 2026-05-19 
 | `scripts/refresh-here.cmd` | Runs the *local* `install.ps1` (in-repo mode via `$PSScriptRoot`) — no Worker round-trip. Use to refresh the clone in place. |
 | `scripts/verify-worker.ps1` | 11-check smoke test of the Worker (gate behaviour + placeholder substitution + key presence). Run after any Worker change. Never echoes secrets. |
 | `scripts/push-env.ps1` | Push local `.env` → `%OneDrive%\Symbion\sync\.env` so future installs on other machines pull it. `-Pull` reverses direction. |
+| `scripts/tailscale-https.ps1` | Wrap `tailscale serve` / `tailscale funnel` to expose Symbion at `https://<host>.<tailnet>.ts.net`. Needed for browser geolocation (secure-context API) on phones / non-localhost devices. `-Funnel` opens it publicly (must enable per-node in admin console); default is tailnet-only. `-Off` tears down. |
 
 **Edit constraints when touching install/deploy:**
 

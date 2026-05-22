@@ -945,7 +945,7 @@ function _requestGeoOnce(force){
   // the prompt never appears AND no error fires in some builds — so
   // diagnose up front rather than leaving the user wondering.
   if(window.isSecureContext === false){
-    _toastLocation('Location needs HTTPS. This server is being served over plain HTTP from a non-localhost origin — browsers refuse geolocation here. Reach Symbion via localhost, https://, or Tailscale funnel to enable.');
+    _toastLocation('Location needs HTTPS. Browsers refuse the geolocation API on plain HTTP from non-localhost origins. To fix: run `scripts\\tailscale-https.ps1` on the Symbion host — that exposes the server at https://<machine>.<tailnet>.ts.net (tailnet-only by default), which browsers trust automatically. Then reach Symbion via that URL and tap Share location again.');
     return;
   }
   if(!force && localStorage.getItem(LOCATION_OPT_IN) === 'denied'){
