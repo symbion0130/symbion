@@ -330,6 +330,14 @@ class SymbionConfig:
 
     self_eval_enabled:   bool  = True
     self_eval_threshold: float = 0.40
+    # Optional: route self-eval through a dedicated provider so the
+    # post-gen quality review doesn't go dark when the responder's
+    # provider breaker is open (e.g. Anthropic 529 burst). Empty
+    # ("") = use _judge_active() like before (shares responder
+    # breaker; current default). Set to "openai" or "ollama" to keep
+    # self-eval alive through bursts. Must be a provider with a
+    # configured API key (or local Ollama).
+    self_eval_provider:  str   = ""
 
     voice_loosen_enabled:      bool = True
 
@@ -981,6 +989,12 @@ class HealthMetrics:
     # JSON `confidence` field each turn the self-eval runs. Used for
     # calibration tracking; does not affect any decision path.
     last_self_eval_confidence: float = 0.0
+    # Counter for self-eval runs that bailed because the chosen client
+    # is unusable (OfflineJudgeStub fallback, or its breaker is open).
+    # Surfaces the "post-gen safety net is dark" condition that was
+    # silent before. See cfg.self_eval_provider for the way to keep
+    # self-eval alive during responder-provider outages.
+    self_eval_skipped: int = 0
     # Mood state (kept from SurvivalMetrics — used by persona prompt)
     symbiosis_score:      float = 0.0
     distress_level:       float = 0.0
@@ -5116,6 +5130,18 @@ class SYMBION:
         for p in order:
             c = self._make_client(p)
             if c: self._providers.append(c)
+        # Dedicated self-eval client (optional). When cfg.self_eval_provider
+        # is set, build a separate client for self-eval so the quality
+        # review survives a responder-provider outage. None means use
+        # _judge_active() which shares the responder breaker.
+        self._self_eval_client = None
+        sep = (self.cfg.self_eval_provider or "").strip().lower()
+        if sep and sep != self.cfg.llm_provider:
+            self._self_eval_client = self._make_client(sep)
+            if self._self_eval_client is None:
+                logger.warning(f"self_eval_provider={sep!r} requested but client "
+                               f"could not be built (missing key or unavailable). "
+                               f"Falling back to shared responder breaker.")
 
     def _make_client(self, provider: str):
         if provider == "kimi" and self.cfg.kimi_api_key:
@@ -5774,8 +5800,17 @@ class SYMBION:
         if not self.cfg.self_eval_enabled: return 1.0, False, "", False, False, None
         # Short-circuit: very short responses don't need quality grading
         if len(draft) < skip_short: return 0.8, False, "", False, False, None
-        client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return 1.0, False, "", False, False, None
+        # Prefer the dedicated self-eval client (cfg.self_eval_provider) so
+        # the post-gen quality review survives a responder-provider outage.
+        # Falls back to _judge_active() when no dedicated client is set
+        # (current default — shares responder breaker).
+        client = self._self_eval_client or self._judge_active()
+        unusable = isinstance(client, OfflineJudgeStub) or (
+            hasattr(client, 'cb') and client.cb and not client.cb.allow()
+        )
+        if unusable:
+            self.health.self_eval_skipped += 1
+            return 1.0, False, "", False, False, None
         try:
             raw = await client.chat_json(self._jmodel(), SELF_EVAL_SYSTEM,
                                          f"Query:\n{query}\n\nDraft:\n{draft}", 0.1, 220)
