@@ -83,6 +83,7 @@ param(
     [switch]$SkipSetup,
     [switch]$SkipLaunch,
     [switch]$SkipOllama,
+    [switch]$WithOllama,
     [switch]$SkipElectronApp
 )
 
@@ -329,22 +330,34 @@ try {
 }
 
 # ------------------------------------------------------------------------
-# Phase 2.5: Ollama + local models
-#   Symbion's default config (symbion.json) names mistral / llama3.2 /
-#   mxbai-embed-large. They're optional — a user running with
-#   --provider anthropic doesn't need any of this — but a fresh-machine
-#   install that mirrors the development setup wants them. The helper
-#   skips Ollama install when ollama is already on PATH, and skips
-#   each individual model pull when it's already in `ollama list`, so
-#   re-running is cheap. Failures don't abort the install — the user
-#   can still run Symbion with --provider anthropic if Ollama setup
-#   fails. Skipped entirely when -SkipOllama is passed, or when env
-#   var SYMBION_SKIP_OLLAMA is set to anything truthy (lets the iex
-#   pipeline override without param syntax).
+# Phase 2.5: Ollama + local models  (OPT-IN as of 2026-05-23)
+#   Symbion's default symbion.json names mistral / llama3.2 / mxbai-
+#   embed-large for the Ollama provider + semantic embeddings. The Ollama
+#   pair is unworkable interactive on consumer hardware (p50 ~132s for
+#   qwen2.5:14b; embedding pulls add ~670MB), so most fresh-machine
+#   installs don't want it. Cloud providers (Anthropic, Groq, Moonshot)
+#   need nothing from this phase.
+#
+#   SKIPPED BY DEFAULT. Opt in with -WithOllama or SYMBION_WITH_OLLAMA=1.
+#   Legacy -SkipOllama / SYMBION_SKIP_OLLAMA still accepted (no-op now —
+#   they don't conflict with the new default but stay for any scripts
+#   that pass them explicitly).
 # ------------------------------------------------------------------------
-$skipOllamaFlag = $SkipOllama -or ($env:SYMBION_SKIP_OLLAMA -and $env:SYMBION_SKIP_OLLAMA -ne '0')
-if ($skipOllamaFlag) {
-    Write-Section "Skipping Ollama setup (-SkipOllama or SYMBION_SKIP_OLLAMA set)"
+$withOllamaFlag = $WithOllama -or ($env:SYMBION_WITH_OLLAMA -and $env:SYMBION_WITH_OLLAMA -ne '0')
+if (-not $withOllamaFlag) {
+    Write-Section "Skipping Ollama (opt-in only — pass -WithOllama if you want local LLM)"
+    Write-Host ""
+    Write-Host "Symbion runs fine on cloud providers (Anthropic / Groq / Moonshot) with no Ollama setup." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "To enable local LLM + semantic memory later, run ONE of:" -ForegroundColor Cyan
+    Write-Host "  powershell -ExecutionPolicy Bypass -File $RepoDir\scripts\install-ollama.ps1" -ForegroundColor White
+    Write-Host "  # ...or re-run this installer with -WithOllama" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "That pulls:" -ForegroundColor DarkGray
+    Write-Host "  - Ollama runtime (winget; ~200MB)" -ForegroundColor DarkGray
+    Write-Host "  - mistral + llama3.2  (responder/judge for --provider ollama)" -ForegroundColor DarkGray
+    Write-Host "  - mxbai-embed-large   (~670MB; semantic memory; falls back to BM25 if absent)" -ForegroundColor DarkGray
+    Write-Host ""
 } else {
     Write-Section "Ollama + local models (idempotent; skips already-installed pieces)"
     $ollamaScript = Join-Path $RepoDir 'scripts\install-ollama.ps1'
@@ -354,11 +367,11 @@ if ($skipOllamaFlag) {
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[warn] Ollama setup exited with code $LASTEXITCODE -- continuing." -ForegroundColor Yellow
                 Write-Host "       You can re-run later: powershell -ExecutionPolicy Bypass -File $ollamaScript"
-                Write-Host "       Or use --provider anthropic to skip Ollama entirely."
+                Write-Host "       Or use --provider anthropic / groq to skip Ollama entirely."
             }
         } catch {
             Write-Host "[warn] Ollama setup threw: $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "       Symbion still works with --provider anthropic. Re-run scripts\install-ollama.ps1 manually to retry."
+            Write-Host "       Symbion still works with --provider anthropic / groq. Re-run scripts\install-ollama.ps1 manually to retry."
         }
     } else {
         Write-Host "[note] $ollamaScript not present in this checkout; skipping. (Pull main if you want it.)"
