@@ -459,6 +459,23 @@ Symmetric — any household user can query any other.
 
 Filtered subsets (gitignored) like `golden_restraint.jsonl`, `golden_tool_judgment.jsonl` are written by ad-hoc filter scripts and used via `--golden`.
 
+## Analytics subsystem (2026-05-23)
+
+`scripts/analytics.py` reads `symbion_events.jsonl` + `symbion.db` and emits a markdown report of structural metrics. Read-only — never mutates state, no LLM grading (uses the `self_eval` / `judge` / tool fields already on each turn entry, consistent with the rule-based philosophy from `evals/run.py` and the public `llm-evals` repo).
+
+**Sections in the report (in order):** Overview · Latency (p50/p95/p99 by phase, TTFT broken down by provider) · Judge calibration (over_cautious / refusal / pregen-skip rates) · Self-eval (split into Infrastructure subsection — "did it run?" — and Quality subsection — "what did it find?") · Tools (per-tool call/error counts) · Techniques (pool size by source, promotion rate) · Memory (DB size, row counts, pending embeds) · Provider resilience (primary vs non-primary p95 latency, with caveat that the log can't distinguish `--provider X` overrides from real fallback-chain firings) · Cost shape (rough token estimate + monthly projection).
+
+**Suggestions are opt-in via `--suggest`.** Each section may fire one or more suggestions when a metric crosses a threshold. Defaults in `scripts/analytics.py:DEFAULT_THRESHOLDS` are initial guesses — **not empirically calibrated**. The report appends a footer reminding the reader to wait ~30 days before tuning, and to set `cfg.notification_thresholds` per-key in `symbion.json` (no code deploy needed). The smart triggers stack conditions (e.g. non-primary p95 latency only fires when it exceeds the absolute threshold AND is 2× slower than the primary's p95) to suppress false positives.
+
+**Three notification paths**, all opt-in:
+- **`--notify` cron flag.** `python scripts/analytics.py --notify` runs the suggestions and posts triggered ones to a Slack incoming webhook (`cfg.slack_webhook_url` or `$SYMBION_SLACK_WEBHOOK`). Run on whatever schedule via Task Scheduler / cron.
+- **In-process Slack watcher.** `cfg.notification_watcher_enabled=True` wires an `on_trip` callback to every `CircuitBreaker` (provider clients + `_self_eval_breaker`). When any breaker tips closed→open via `.trip()` (hard 529/503/gateway-timeout path), a debounced (5-min) Slack message fires. **Threshold-based `record_failure` accumulation does NOT fire on_trip** — reserved for hard transient signals. `_post_to_slack_webhook` lives inline in `symbion_v14.py` so the single-file invariant holds; same payload shape as `scripts/analytics.py`'s `post_to_slack`.
+- **Electron tray widget.** Native OS notification on `consecutive_failures` transitioning from 0 to >0, with the same 5-min debounce. Local-OS counterpart for when you're not watching Slack. Opt-out via `cfg.electron_tray_enabled=false`.
+
+**Web route `/analytics`.** Query params: `since=7d/24h/30m`, `suggest=1`, `session=PREFIX`, `format=json`. Renders `build_report()` output via `analytics.render_html()` — minimal stdlib-only markdown→HTML covering only the patterns the report emits (no `markdown` library dependency). All content HTML-escaped before substitution. Same X-API-Key gate as `/api/chat`. Returns 503 with a clear message if the analytics module fails to import (so a broken script doesn't take down the rest of the web UI).
+
+**Electron tray widget.** System tray icon (menu bar on macOS) added in `electron/main.js`. Polls `/health` every 30s; updates the tooltip with `mood | turns | failures`; right-click menu offers "Open Symbion / Open analytics / Quit". Fires a native `Notification` on the 0→>0 failure transition, debounced. `tray.destroy()` in `before-quit` so no phantom icon survives app shutdown. Reuses `electron/assets/symbion.ico` / `.icns` / `.png` — no new asset.
+
 ## Verification harnesses
 
 Four levels of "does it work?" check, in increasing cost. Use the cheapest one that covers what you're testing.
@@ -584,6 +601,7 @@ Five focused libraries extracted from `symbion_v14.py` for portfolio + general r
 When a closed gap's wiring is non-obvious, look in the architecture section that owns the subsystem — that's the authoritative spot, not a separate change log.
 
 - **2026-05-23** — technique pool landed (see Technique pool + Memory layers). `SUMMARISE_SYSTEM` rewritten to capture the move, not just the topic (commit `5b1bcbf`). `techniques` table + `/promote` + `/techniques` + retrieval (commit `5060a38`). `shared_learnings.md` cross-instance sync via OneDrive (commit `a95e7fe`). `/forget-technique <id>` with user-scoped delete (commit `3efef4a`). `promote_technique` agent-loop tool — model-judged sibling to `/promote`, fires mid-turn when the model decides a move is worth preserving (commit `9438471`). Originated from a Symbion self-identified request ("the lesson dies at the session boundary").
+- **2026-05-23 (later)** — analytics subsystem landed (see Analytics subsystem). `scripts/analytics.py` core report builder (commit `bb4107c`), revised after Symbion's review of the spec (commit `fa28bab` — labelled thresholds as initial, split self-eval into infra+quality, dropped misleading "fallback" framing, added stacked smart triggers). In-process Slack watcher on circuit breaker trips (commit `0fc4d55`). Web `/analytics` route with HTML rendering (commit `9d105b8`). Electron tray widget + native notifications (commit `37519c4`).
 - **2026-05-22** — Moonshot K2.6 work: temperature clamp for K2.* (`752030f`), Moonshot pair `--provider kimi` (`c74a358`), per-phase latency telemetry (`fa34cd5`), pre-gen-skip widening to 400 chars on Kimi (`64ab858`), `kimi_max_concurrent` semaphore primitive (default disabled, `54ca71b`/`43c551e`), stress harness fixes (`b5e6e84`/`058cc5e`). Earlier in same day: gaps #1, #3, #4, #5, #6 closed (`8cce939`, `be7fe82`) — per-role model selection, self-eval breaker, `get_user_recent_activity` fail-closed, Electron Python bundling, peer token streaming, write_file widened to machine-wide.
 - **2026-05-21** — cross-interface session sync, location services, cross-user retrieval, fresh-session-per-launch, web push timer landed (see those sections).
 - **2026-04-25** — read tools opted in to machine-wide paths (invariant #7).
