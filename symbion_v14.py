@@ -72,6 +72,37 @@ def _anchor(path) -> Path:
     return p if p.is_absolute() else _REPO_ROOT / p
 
 
+_BUILD_HASH_CACHE: Optional[str] = None
+def _resolve_build_hash() -> str:
+    """Return the short git commit hash for the current checkout. Cached
+    after the first call -- git only runs once per process lifetime so
+    repeated /health probes don't shell out. Falls back to 'unknown'
+    when git isn't on PATH, the repo isn't a git checkout (e.g. portable
+    drive install without .git), or the subprocess errors.
+
+    Used to give Symbion's version string a meaningful "build identifier"
+    behind the 14.0 schema version, so users can tell at a glance whether
+    they're running the post-update code or still on the previous bundle.
+    Exposed via /health JSON as "version": "14.0+<hash>" and surfaced in
+    the Electron tray tooltip."""
+    global _BUILD_HASH_CACHE
+    if _BUILD_HASH_CACHE is not None:
+        return _BUILD_HASH_CACHE
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=str(_REPO_ROOT),
+            capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            _BUILD_HASH_CACHE = r.stdout.strip()
+        else:
+            _BUILD_HASH_CACHE = "unknown"
+    except Exception:
+        _BUILD_HASH_CACHE = "unknown"
+    return _BUILD_HASH_CACHE
+
+
 def _load_dotenv_safe():
     env_path = _anchor(".env")
     if not env_path.exists(): return
@@ -8272,7 +8303,8 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
     @app.get("/health")
     async def health():
         return JSONResponse({
-            "status":"ok","version":"14.0",
+            "status":"ok",
+            "version":f"14.0+{_resolve_build_hash()}",
             "uptime_seconds":(datetime.now()-symbion.born).total_seconds(),
             "provider":symbion.cfg.llm_provider,
             "interactions":symbion.health.total_interactions,

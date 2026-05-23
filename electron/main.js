@@ -539,6 +539,174 @@ async function switchProvider(newProvider) {
   }
 }
 
+// ---- Update checker ------------------------------------------------------
+// "Check for updates..." menu entry. Wraps the git fetch/pull flow + the
+// install-electron-app.ps1 rebuild (when needed) in dialogs aimed at
+// non-technical users. Designed to be safe: every step is a no-op when
+// the relevant precondition isn't met (no repo, git not on PATH, no
+// network), with clear error surfaces.
+
+function runGit(args, cwd) {
+  // Promisify execFile around git. 30s timeout per invocation -- fetch
+  // over a slow connection can take a moment but we don't want to hang
+  // the UI forever if the network is dead.
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd, timeout: 30000, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          err.stderr = stderr;
+          return reject(err);
+        }
+        resolve(stdout.toString().trim());
+      });
+  });
+}
+
+async function checkForUpdates() {
+  if (!REPO_ROOT) {
+    dialog.showErrorBox('Cannot check for updates',
+      'No Symbion repo found on this machine. Run install.ps1 to set up a repo first.');
+    return;
+  }
+
+  // Fetch + count behind. The fetch is the part that needs network;
+  // everything else is local-only and fast.
+  let behind = 0;
+  try {
+    await runGit(['fetch', 'origin', 'main'], REPO_ROOT);
+    const behindStr = await runGit(['rev-list', 'HEAD..origin/main', '--count'], REPO_ROOT);
+    behind = parseInt(behindStr, 10) || 0;
+  } catch (e) {
+    dialog.showErrorBox('Update check failed',
+      `git failed: ${e.message}\n\nLikely causes: no network, git not on PATH, ` +
+      `or the repo has uncommitted changes that block fetch.\n\n` +
+      `Try manually:\n  cd ${REPO_ROOT}\n  git fetch origin main\n  git status`);
+    return;
+  }
+
+  if (behind === 0) {
+    await dialog.showMessageBox(mainWindow || null, {
+      type: 'info',
+      title: 'Symbion is up to date',
+      message: "You're on the latest version.",
+      buttons: ['OK'],
+    });
+    return;
+  }
+
+  // Available updates -- ask user before pulling.
+  const confirm = await dialog.showMessageBox(mainWindow || null, {
+    type: 'question',
+    title: 'Updates available',
+    message: `${behind} commit${behind === 1 ? '' : 's'} available since your version.`,
+    detail: 'Apply now? Symbion will pull from GitHub and restart the backend ' +
+            'so the new code takes effect. Most updates apply in 5-10 seconds. ' +
+            'If the update includes desktop app changes, a rebuild is needed ' +
+            "(~3 min); we'll prompt before doing that.",
+    buttons: ['Apply update', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (confirm.response !== 0) return;
+
+  // Capture old + new HEAD to know what changed.
+  let oldHead, newHead, changedFiles;
+  try {
+    oldHead = await runGit(['rev-parse', 'HEAD'], REPO_ROOT);
+    await runGit(['pull', '--ff-only', 'origin', 'main'], REPO_ROOT);
+    newHead = await runGit(['rev-parse', 'HEAD'], REPO_ROOT);
+    changedFiles = await runGit(['diff', '--name-only', `${oldHead}..${newHead}`], REPO_ROOT);
+  } catch (e) {
+    dialog.showErrorBox('Update failed during pull',
+      `git pull failed: ${e.message}\n\n` +
+      `This usually means local changes conflict with incoming changes.\n\n` +
+      `Manual recovery:\n  cd ${REPO_ROOT}\n  git status\n  git stash\n  git pull origin main`);
+    return;
+  }
+
+  // Decide what to do based on what changed. Electron source = need rebuild.
+  // Everything else (Python, scripts, docs) = restart backend is enough.
+  const changed = (changedFiles || '').split('\n').filter(Boolean);
+  const electronChanged = changed.some((f) =>
+    /^electron\/(main\.js|preload\.js|package\.json|package-lock\.json|assets\/)/.test(f));
+
+  if (electronChanged) {
+    const rebuildConfirm = await dialog.showMessageBox(mainWindow || null, {
+      type: 'question',
+      title: 'Desktop app rebuild needed',
+      message: 'This update changes the Symbion desktop app itself.',
+      detail: 'The Python backend is already up to date. To pick up the desktop changes, ' +
+              "Symbion needs to quit, rebuild (~3 min), reinstall, and you'll relaunch from " +
+              'Start menu when it finishes.\n\n' +
+              'Rebuild now?',
+      buttons: ['Rebuild + reinstall', 'Skip (apply later via -Force install)'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (rebuildConfirm.response === 0) {
+      // Spawn install-electron-app.ps1 -Force DETACHED so it survives the
+      // about-to-fire Symbion quit. The PowerShell child runs its own
+      // Stop-Process on Symbion as part of Phase D, then rebuilds + the
+      // NSIS install lays down the new bundle.
+      const script = path.join(REPO_ROOT, 'scripts', 'install-electron-app.ps1');
+      try {
+        const child = spawn('powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Force'],
+          { detached: true, stdio: 'ignore' });
+        child.unref();
+        dialog.showMessageBox(mainWindow || null, {
+          type: 'info',
+          title: 'Rebuild started',
+          message: 'Symbion is closing to let the rebuild complete.',
+          detail: 'A PowerShell window may briefly appear. When it finishes (~3 min), ' +
+                  'relaunch Symbion from your Start menu. The new desktop app version ' +
+                  'will show in the tray tooltip as v14.0+<new-hash>.',
+          buttons: ['OK'],
+        });
+        app.isQuitting = true;
+        app.quit();
+        return;
+      } catch (e) {
+        dialog.showErrorBox('Failed to start rebuild',
+          `Could not spawn ${script}:\n${e.message}\n\n` +
+          `Run manually:\n  cd ${REPO_ROOT}\n  .\\scripts\\install-electron-app.ps1 -Force`);
+        return;
+      }
+    }
+    // User skipped rebuild -- fall through to backend restart so the Python
+    // code at least gets updated.
+  }
+
+  // Python / scripts / docs update -- restart backend and reload the window.
+  if (!backend) {
+    // Attach mode: we don't own the Python process, can't restart it.
+    dialog.showMessageBox(mainWindow || null, {
+      type: 'info',
+      title: 'Update applied',
+      message: `Pulled ${behind} commit${behind === 1 ? '' : 's'}. Manually restart the Symbion backend to apply.`,
+      detail: "Symbion's Python process was launched outside this app, so the desktop " +
+              "shell can't restart it. Stop the running backend (e.g. Ctrl+C in its terminal) " +
+              'and relaunch for the changes to take effect.',
+      buttons: ['OK'],
+    });
+    return;
+  }
+  await restartBackend();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.reload();
+  }
+  // Tray menu rebuild picks up the new version on the next /health poll
+  // (30s cycle) -- nothing else needed here.
+  dialog.showMessageBox(mainWindow || null, {
+    type: 'info',
+    title: 'Update applied',
+    message: `Symbion is now on the latest version.`,
+    detail: `Pulled ${behind} commit${behind === 1 ? '' : 's'} and restarted the backend. ` +
+            `The tray tooltip will show the new build hash within 30 seconds (next /health poll).`,
+    buttons: ['OK'],
+  });
+}
+
 function buildTrayMenu(health) {
   // Right-click menu. Status item is disabled (display-only); the action
   // items open the main window, the analytics page, or quit the app.
@@ -553,6 +721,8 @@ function buildTrayMenu(health) {
     { type: 'separator' },
     { label: 'LLM provider', submenu: buildProviderSubmenu() },
     { type: 'separator' },
+    { label: 'Check for updates...', click: () => { checkForUpdates(); } },
+    { type: 'separator' },
     { label: 'Quit Symbion',  click: () => { app.isQuitting = true; app.quit(); } },
   ]);
 }
@@ -560,14 +730,19 @@ function buildTrayMenu(health) {
 function updateTrayFromHealth(health) {
   if (!tray) return;
   if (!health) {
-    tray.setToolTip('Symbion — backend unreachable');
+    tray.setToolTip('Symbion v? - backend unreachable');
     tray.setContextMenu(buildTrayMenu(null));
     return;
   }
   const mood = health.mood || '?';
   const turns = health.interactions ?? 0;
   const fails = health.consecutive_failures ?? 0;
-  tray.setToolTip(`Symbion — ${mood} | ${turns} turns | ${fails} failures`);
+  // Version string from /health is "14.0+<short-hash>"; surfaces in the
+  // tray tooltip so the user can tell at a glance whether they're running
+  // a freshly-updated build vs. the previous bundle. Falls back to "?"
+  // when /health predates the build-hash addition.
+  const version = health.version || '?';
+  tray.setToolTip(`Symbion v${version} | ${mood} | ${turns} turns | ${fails} failures`);
   tray.setContextMenu(buildTrayMenu(health));
 
   // Notify on transition into failing state. Debounced — a sustained
@@ -684,7 +859,7 @@ function startTray() {
     // platform-specific resampling.
     const icon = nativeImage.createFromPath(iconPath);
     tray = new Tray(icon);
-    tray.setToolTip('Symbion — connecting…');
+    tray.setToolTip('Symbion - connecting...');
     tray.setContextMenu(buildTrayMenu(null));
 
     // Initial fetch + recurring poll. Fail silently — tray going stale
