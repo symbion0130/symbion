@@ -181,8 +181,21 @@ CONFIG_FILE = _anchor("symbion.json")
 class SymbionConfig:
     llm_provider:    str = "ollama"
     ollama_host:     str = "http://localhost:11434"
+    # Legacy Ollama defaults (mistral + llama3.2). Kept for backward
+    # compatibility with older symbion.json files; new installs and the
+    # `--provider ollama` pair should use ollama_responder_model and
+    # ollama_judge_model below (Qwen 2.5 family, sibling to the
+    # Anthropic and Moonshot pairs).
     judge_model:     str = "llama3.2"
     responder_model: str = "mistral"
+    # Ollama responder/judge pair (Qwen 2.5 family — third sibling to
+    # the Anthropic and Moonshot pairs). Same family at two sizes for
+    # tonal coherence + shared tokenizer; 14B is the consumer-GPU sweet
+    # spot, 3B is reliably structured-JSON capable for the judge role.
+    # Empty default falls back to responder_model / judge_model above,
+    # preserving legacy behavior for existing installs.
+    ollama_responder_model: str = "qwen2.5:14b"
+    ollama_judge_model:     str = "qwen2.5:3b"
 
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY",""))
     openai_api_key:    str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY",""))
@@ -1539,7 +1552,15 @@ class OllamaClient(BaseClient):
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
 
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(timeout=180) as c:
+        # Timeout bumped from 180s → 600s for Ollama specifically.
+        # Local inference on consumer hardware can take minutes for a
+        # dense Symbion-persona-prompt turn on a 14B model; the old 180s
+        # floor was masking real generation behind ReadTimeout errors
+        # (observed during the Qwen pair benchmark, 2026-05-23). The
+        # timeout is a max, not a target — fast responses still return
+        # in seconds. Cloud providers (Anthropic / Moonshot) still use
+        # their own per-client timeouts; this only applies to Ollama.
+        async with httpx.AsyncClient(timeout=600) as c:
             async with c.stream("POST", self._chat, json={
                 "model":model,"stream":True,
                 "options":{"temperature":cfg.temperature,"num_predict":cfg.max_tokens,
@@ -6180,6 +6201,15 @@ class SYMBION:
                 override = getattr(self.cfg, f"kimi_{role}_model", "") or ""
                 if override: return override
             return self.cfg.kimi_judge_model
+        if p == "ollama":
+            # Ollama pair (third sibling): Qwen 2.5 14b responder + 3b
+            # judge by default. Per-role overrides via cfg.ollama_<role>_model
+            # honored if set. Falls back to legacy cfg.judge_model when
+            # ollama_judge_model is empty (preserves old symbion.json).
+            if role:
+                override = getattr(self.cfg, f"ollama_{role}_model", "") or ""
+                if override: return override
+            return self.cfg.ollama_judge_model or self.cfg.judge_model
         if p == "openai":              return self.cfg.openai_model
         if p == "hf_router":           return self.cfg.hf_router_model
         if p == "deepseek":            return self.cfg.deepseek_model
@@ -6189,6 +6219,8 @@ class SYMBION:
         if self.cfg.use_kimi_responder and self.cfg.kimi_api_key: return self.cfg.kimi_model
         if self.cfg.llm_provider == "anthropic": return self.cfg.anthropic_model
         if self.cfg.llm_provider == "kimi":      return self.cfg.kimi_model
+        if self.cfg.llm_provider == "ollama":
+            return self.cfg.ollama_responder_model or self.cfg.responder_model
         if self.cfg.llm_provider == "openai":    return self.cfg.openai_model
         if self.cfg.llm_provider == "hf_router": return self.cfg.hf_router_model
         if self.cfg.llm_provider == "deepseek":  return self.cfg.deepseek_model
