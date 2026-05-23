@@ -4,7 +4,7 @@ import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, u
 import logging, argparse
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional, AsyncIterator
+from typing import List, Dict, Tuple, Optional, AsyncIterator, Callable
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field, asdict
 
@@ -405,6 +405,19 @@ class SymbionConfig:
     # the extra per-token broadcast is wasted work for solo use; flip
     # to True when you regularly watch the same session across devices.
     peer_token_streaming: bool = False
+
+    # Notification hooks (analytics rollout 2026-05-23). When the
+    # background watcher is enabled and a webhook is set, circuit-breaker
+    # trips fire a Slack notification immediately (with 5-min debounce per
+    # breaker name to avoid spam during a sustained outage). Cron-style
+    # analytics suggestions (`scripts/analytics.py --notify`) use the same
+    # webhook. Both paths are OFF by default — explicit config, no
+    # auto-firing to external services.
+    slack_webhook_url: str = field(default_factory=lambda: os.getenv("SYMBION_SLACK_WEBHOOK",""))
+    notification_watcher_enabled: bool = False
+    # Per-key overrides for thresholds defined in scripts/analytics.py's
+    # DEFAULT_THRESHOLDS. Empty default means analytics uses the defaults.
+    notification_thresholds: Dict = field(default_factory=dict)
 
     voice_loosen_enabled:      bool = True
 
@@ -1333,8 +1346,32 @@ def init_db(db_path: str):
 #  CIRCUIT BREAKER + RATE LIMITER
 # ==============================================================================
 
+def _post_to_slack_webhook(url: str, text: str, timeout: float = 5.0) -> bool:
+    """Inline Slack-incoming-webhook poster used by the breaker-trip
+    watcher. Kept inline (not imported from scripts/analytics.py) so
+    symbion_v14.py stays self-contained — same payload shape as the
+    analytics CLI's `post_to_slack`, just without the (ok, msg) tuple
+    contract since callers here only care about fire-and-forget. Empty
+    URL is a no-op so the watcher can be unconditionally wired with no
+    side effect when notifications are off."""
+    if not url:
+        return False
+    try:
+        import urllib.request
+        payload = json.dumps({"text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except Exception as ex:
+        logger.warning(f"slack post failed: {type(ex).__name__}: {ex}")
+        return False
+
+
 class CircuitBreaker:
-    def __init__(self, name: str, open_after: int = 4, reset_after: float = 60.0):
+    def __init__(self, name: str, open_after: int = 4, reset_after: float = 60.0,
+                  on_trip: Optional[Callable[[str, str], None]] = None):
         self.name = name
         self._open_after  = open_after
         self._reset_after = reset_after
@@ -1342,6 +1379,12 @@ class CircuitBreaker:
         self._opened_at   = 0.0
         self.is_open      = False
         self.last_error: str = ""
+        # Optional callback fired the moment trip() opens the breaker.
+        # Signature: on_trip(breaker_name, error_message). Failures inside
+        # the callback are swallowed — notification path must never break
+        # the breaker. SYMBION wires this to a debounced Slack post when
+        # cfg.notification_watcher_enabled is True.
+        self._on_trip = on_trip
 
     def record_failure(self, err: str = ""):
         self._failures += 1
@@ -1359,10 +1402,18 @@ class CircuitBreaker:
         latency but the issue should clear within the reset window. The
         circuit auto-resets after `_reset_after` seconds, so a 529 burst
         doesn't permanently sideline the provider."""
+        was_already_open = self.is_open
         self._failures = self._open_after
         self.is_open = True
         self._opened_at = time.time()
         if err: self.last_error = err
+        # Notify on the closed→open transition only — re-tripping an
+        # already-open breaker is the same event, not a new one.
+        if not was_already_open and self._on_trip is not None:
+            try:
+                self._on_trip(self.name, err)
+            except Exception:
+                pass  # notification must not break the breaker
 
     def allow(self) -> bool:
         if not self.is_open: return True
@@ -5724,6 +5775,48 @@ class SYMBION:
                                        f"techniques from {path}")
             except Exception as ex:
                 logger.warning(f"Shared learnings auto-import failed: {ex}")
+
+        # Notification watcher: attach an `on_trip` callback to every
+        # circuit breaker so a closed→open transition fires a Slack post.
+        # Off by default — explicit config, no surprise external traffic.
+        if (self.cfg.notification_watcher_enabled
+                and self.cfg.slack_webhook_url):
+            self._wire_breaker_notifications()
+
+    def _wire_breaker_notifications(self) -> None:
+        """Install a debounced `on_trip` callback on every CircuitBreaker
+        in this SYMBION (each provider's `cb` + `_self_eval_breaker`).
+        Same breaker tripping twice within `NOTIFY_DEBOUNCE_S` only fires
+        Slack once — avoids spam during a sustained outage."""
+        NOTIFY_DEBOUNCE_S = 300  # 5 min
+        self._last_trip_notify: Dict[str, float] = {}
+        webhook = self.cfg.slack_webhook_url
+
+        def on_trip(breaker_name: str, err_msg: str) -> None:
+            now = time.time()
+            last = self._last_trip_notify.get(breaker_name, 0)
+            if now - last < NOTIFY_DEBOUNCE_S:
+                return
+            self._last_trip_notify[breaker_name] = now
+            text = (f":warning: *Symbion circuit breaker tripped*\n"
+                    f"breaker: `{breaker_name}`\n"
+                    f"error: `{(err_msg or '(no detail)')[:300]}`\n"
+                    f"auto-resets after {breaker_name}'s reset window.")
+            ok = _post_to_slack_webhook(webhook, text)
+            if ok:
+                logger.warning(f"Notified Slack: {breaker_name} breaker tripped")
+
+        attached = 0
+        for c in self._providers:
+            if hasattr(c, "cb") and c.cb is not None:
+                c.cb._on_trip = on_trip
+                attached += 1
+        if hasattr(self, "_self_eval_breaker") and self._self_eval_breaker is not None:
+            self._self_eval_breaker._on_trip = on_trip
+            attached += 1
+        if attached:
+            logger.warning(f"Notification watcher attached to {attached} circuit breakers "
+                           f"(debounce {NOTIFY_DEBOUNCE_S}s)")
 
     def _build_providers(self):
         order = [self.cfg.llm_provider] + [p for p in self.cfg.fallback_chain
