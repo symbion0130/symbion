@@ -116,20 +116,30 @@ def _percentile(vals: List[float], p: float) -> float:
 # Notification thresholds (shared with the in-process watcher in symbion_v14.py)
 # ============================================================================
 
-# Defaults tuned to today's observed numbers; users can override per-key
-# via cfg.notification_thresholds in symbion.json.
+# INITIAL DEFAULTS — these are educated guesses without empirical baseline.
+# After ~30 days of routine analytics runs, retune these to whatever
+# actually matters for your workload. Override per-key via
+# cfg.notification_thresholds in symbion.json (no code deploy needed):
+#   "notification_thresholds": {
+#     "p95_ttft_ms": 25000,
+#     "over_cautious_rate": 0.20,
+#     ...
+#   }
 DEFAULT_THRESHOLDS: Dict[str, float] = {
     # Latency
     "p95_ttft_ms":          20_000,
     "p95_pre_gen_ms":        5_000,
     "p95_total_ms":         30_000,
+    "p95_fallback_total_ms":40_000,   # only fires when fallback chain is non-empty
     # Judge
     "over_cautious_rate":    0.15,   # 15% over_cautious turns over the window
     "refusal_rate":          0.20,
-    # Self-eval
-    "would_revise_rate":     0.05,   # turns where score < 0.40
-    # Tools
+    # Self-eval — split into infra (running?) vs quality (good?)
+    "self_eval_coverage_min": 0.80,  # < 80% turns scored = infra problem
+    "would_revise_rate":     0.05,   # turns where score < 0.40 = quality problem
+    # Tools — only fires when error rate AND call count both meet the bar
     "tool_error_rate":       0.20,
+    "tool_min_calls_for_error_trigger": 3,
     # Techniques
     "technique_surface_rate_min": 0.01,   # techniques retrieved < 1% of turns
     "promotion_rate_max":         0.05,   # promoted > 5% of turns = over-firing
@@ -138,6 +148,8 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
     "pending_embeds":       100,
     # Provider
     "breaker_trips_per_day": 3,
+    # Cost — projected monthly tokens (input + output combined, rough estimate)
+    "projected_monthly_tokens": 50_000_000,
 }
 
 
@@ -317,42 +329,72 @@ def section_judge(events: List[Dict], suggest: bool,
 
 def section_self_eval(events: List[Dict], suggest: bool,
                        thresholds: Dict[str, float]) -> Tuple[str, List[str]]:
+    """Two distinct failure modes get separate visibility:
+      - Infrastructure: did self-eval run at all? (low coverage = breaker
+        open, OfflineJudgeStub active, network problem)
+      - Quality: when it ran, what did it find? (low scores = responses
+        are bad)
+    Conflating them makes diagnosis harder when something breaks.
+    """
     lines = ["## Self-eval", ""]
     scores: List[float] = []
     revised = 0
     would_revise = 0
-    skipped = 0
+    null_payload = 0   # self_eval block missing or non-dict (didn't run)
+    null_score = 0     # block present but score field missing/null
     for e in events:
-        se = e.get("self_eval") or {}
+        se = e.get("self_eval")
         if not isinstance(se, dict):
-            skipped += 1
+            null_payload += 1
             continue
         s = se.get("score")
         if isinstance(s, (int, float)):
             scores.append(float(s))
             if s < 0.40:
                 would_revise += 1
+        else:
+            null_score += 1
         if se.get("revised"):
             revised += 1
-    if not scores:
-        lines.append("_No self_eval scores in window._")
-        return "\n".join(lines) + "\n", []
+    n = len(events)
+    coverage = len(scores) / n if n else 0
 
-    lines.append(f"- Turns scored: {len(scores)} / {len(events)}")
-    lines.append(f"- Mean quality_score: {statistics.mean(scores):.2f}")
-    lines.append(f"- Median: {statistics.median(scores):.2f}")
-    lines.append(f"- Score < 0.40 (would-revise): {would_revise} ({would_revise/len(events):.1%})")
-    lines.append(f"- Actually revised (legacy path): {revised}")
+    lines.append("### Infrastructure (did it run?)")
+    lines.append(f"- Coverage: {len(scores)} / {n} turns scored ({coverage:.1%})")
+    lines.append(f"- Missing self_eval payload: {null_payload} turns")
+    lines.append(f"- Payload present but no score: {null_score} turns")
+    lines.append("")
+
+    lines.append("### Quality (when it ran, what did it find?)")
+    if not scores:
+        lines.append("_No scores in window._")
+    else:
+        lines.append(f"- Mean quality_score: {statistics.mean(scores):.2f}")
+        lines.append(f"- Median:             {statistics.median(scores):.2f}")
+        lines.append(f"- p10 (worst tail):   {_percentile(scores, 0.10):.2f}")
+        lines.append(f"- Score < 0.40 (would-revise): {would_revise} ({would_revise/n:.1%} of turns)")
+        lines.append(f"- Actually revised (legacy synchronous path): {revised}")
+    lines.append("")
+
     triggers: List[str] = []
     if suggest:
-        if would_revise / len(events) > thresholds["would_revise_rate"]:
+        # Infrastructure trigger
+        if n >= 10 and coverage < thresholds["self_eval_coverage_min"]:
             triggers.append(
-                f"Would-have-revised rate = {would_revise/len(events):.1%} exceeds "
-                f"threshold {thresholds['would_revise_rate']:.0%}. Self-eval is flagging "
-                f"more turns than the fire-and-forget path catches. Consider "
-                f"reintroducing the streaming [SYMBION_REVISE] sentinel for "
-                f"sub-threshold quality scores.")
-    lines.append("")
+                f"Self-eval coverage = {coverage:.1%} of turns (over {n} total) is below "
+                f"threshold {thresholds['self_eval_coverage_min']:.0%}. INFRASTRUCTURE "
+                f"problem — self-eval isn't running on enough turns. Check "
+                f"`_self_eval_breaker.is_open`, OfflineJudgeStub activation, "
+                f"and the embedding / judge client connectivity.")
+        # Quality trigger
+        if scores and would_revise / n > thresholds["would_revise_rate"]:
+            triggers.append(
+                f"Would-have-revised rate = {would_revise/n:.1%} exceeds threshold "
+                f"{thresholds['would_revise_rate']:.0%}. QUALITY problem — self-eval "
+                f"is running fine but it's flagging too many responses as poor. "
+                f"Consider reintroducing the streaming [SYMBION_REVISE] sentinel "
+                f"for sub-threshold scores, or investigating which buckets score "
+                f"worst (use --session filter to drill in).")
     return "\n".join(lines) + "\n", triggers
 
 
@@ -378,15 +420,19 @@ def section_tools(events: List[Dict], suggest: bool,
     lines.append("| Tool | Calls | Errors | Error rate |")
     lines.append("|---|---|---|---|")
     triggers: List[str] = []
+    min_calls = int(thresholds.get("tool_min_calls_for_error_trigger", 3))
     for name, calls in tool_calls.most_common():
         errs = tool_errors.get(name, 0)
         rate = (errs / calls) if calls else 0
         lines.append(f"| `{name}` | {calls} | {errs} | {rate:.1%} |")
-        if suggest and rate > thresholds["tool_error_rate"] and calls >= 3:
+        # Trigger requires BOTH high error rate AND enough calls to be
+        # statistically meaningful. A tool that fires once a month and
+        # has 1 failure isn't a removal candidate.
+        if suggest and rate > thresholds["tool_error_rate"] and calls >= min_calls:
             triggers.append(
                 f"Tool `{name}` has error rate {rate:.1%} over {calls} calls "
-                f"(threshold {thresholds['tool_error_rate']:.0%}). Investigate "
-                f"the failure path or input validation.")
+                f"(threshold {thresholds['tool_error_rate']:.0%}, min calls "
+                f"{min_calls}). Investigate the failure path or input validation.")
     lines.append("")
     return "\n".join(lines) + "\n", triggers
 
@@ -470,51 +516,139 @@ def section_memory(db: sqlite3.Connection, suggest: bool,
 
 def section_provider(events: List[Dict], suggest: bool,
                       thresholds: Dict[str, float]) -> Tuple[str, List[str]]:
-    """Circuit breaker trips and stub fallbacks aren't in the turn-event
-    schema directly; infer from response text starting with '(LLM unavailable'."""
+    """Provider distribution + non-primary latency cost.
+
+    Naming: 'non-primary' rather than 'fallback' because the event log
+    can't distinguish a true fallback-chain firing (breaker tripped on
+    primary, traffic routed to the chain) from a user-initiated
+    `--provider X` override or a `cfg.llm_provider` swap. Both look
+    identical here. The latency comparison is still useful regardless —
+    it tells you what the non-primary path costs vs the primary path,
+    whichever triggered it.
+
+    Live circuit breaker trip telemetry comes from the in-process
+    watcher (commit 2 of the analytics rollout) — this section only
+    sees post-hoc evidence in the event log."""
     lines = ["## Provider resilience", ""]
-    stub_turns = 0
-    # We don't have direct breaker trip count in events; flag turns where
-    # the response prefix matches the heuristic-stub pattern by counting
-    # interactions whose response_len is very short AND tool_used is None
-    # — imperfect proxy but useful for spotting outages.
-    # We rely on revision_cause / evaluation flags only here.
-    for e in events:
-        if (e.get("revision_cause") == "stale_refresh"):
-            continue  # not a stub
-        # No direct field; skip detailed inference.
+    if not events:
+        lines.append("_No data._")
+        return "\n".join(lines) + "\n", []
 
-    # Simple breakdown by provider success / model swap
-    by_prov: Counter = Counter()
+    # Read the CURRENT cfg.llm_provider as the authoritative primary;
+    # otherwise we'd silently call a temporary --provider override the
+    # primary just because it dominated the window.
+    primary = "?"
+    cfg_path = REPO / "symbion.json"
+    if cfg_path.exists():
+        try:
+            primary = (json.loads(cfg_path.read_text(encoding="utf-8"))
+                          .get("llm_provider") or "?")
+        except Exception:
+            pass
+    if primary == "?":
+        # Fall back to modal observation when symbion.json isn't readable.
+        by_prov = Counter(e.get("provider", "?") for e in events)
+        primary = by_prov.most_common(1)[0][0] if by_prov else "?"
+
+    by_prov: Counter = Counter(e.get("provider", "?") for e in events)
+    lines.append("- Turns by provider: " +
+                  ", ".join(f"`{p}`={n}" for p, n in by_prov.most_common()))
+    lines.append(f"- Configured primary: `{primary}` (from `cfg.llm_provider`)")
+
+    primary_lats: List[float] = []
+    nonprimary_lats: List[float] = []
     for e in events:
-        by_prov[e.get("provider", "?")] += 1
-    lines.append("- Turns by provider: " + ", ".join(f"{p}={n}" for p, n in by_prov.items()))
-    # Note: real breaker trip count requires the watcher daemon (commit 2)
-    lines.append("- _Circuit breaker trip count requires the background watcher (see notification setup)._")
+        v = (e.get("latency_ms") or {}).get("total")
+        if not isinstance(v, (int, float)) or v < 0:
+            continue
+        if e.get("provider", "?") == primary:
+            primary_lats.append(float(v))
+        else:
+            nonprimary_lats.append(float(v))
+
+    if primary_lats:
+        lines.append(f"- Primary latency: p50 {_percentile(primary_lats, 0.5)/1000:.2f}s, "
+                      f"p95 {_percentile(primary_lats, 0.95)/1000:.2f}s "
+                      f"(n={len(primary_lats)})")
+    if nonprimary_lats:
+        lines.append(f"- **Non-primary** latency: p50 {_percentile(nonprimary_lats, 0.5)/1000:.2f}s, "
+                      f"p95 {_percentile(nonprimary_lats, 0.95)/1000:.2f}s, "
+                      f"max {max(nonprimary_lats)/1000:.2f}s "
+                      f"(n={len(nonprimary_lats)})")
+        lines.append("  _Non-primary turns could be `--provider X` overrides OR fallback-chain "
+                      "firings — the log doesn't distinguish them. Look at `cfg.fallback_chain` "
+                      "to see which interpretation matches your setup._")
+    else:
+        lines.append("- Non-primary turns: 0 in window")
+
+    lines.append("- _Live circuit breaker trip count requires the background "
+                  "watcher (see notification setup); this section only sees "
+                  "post-hoc evidence from the event log._")
+
+    triggers: List[str] = []
+    if suggest and nonprimary_lats and primary_lats:
+        np_p95 = _percentile(nonprimary_lats, 0.95)
+        p_p95  = _percentile(primary_lats, 0.95)
+        # Only fire when the non-primary path is BOTH absolutely slow AND
+        # meaningfully slower than the primary. A non-primary path that's
+        # 100ms slower isn't a problem; one that's 3x slower is.
+        if (np_p95 > thresholds.get("p95_fallback_total_ms", 40_000)
+                and np_p95 > p_p95 * 2):
+            triggers.append(
+                f"Non-primary provider p95 = {np_p95/1000:.1f}s exceeds threshold "
+                f"{thresholds['p95_fallback_total_ms']/1000:.0f}s AND is "
+                f"{np_p95/p_p95:.1f}× slower than the primary (`{primary}` p95 = "
+                f"{p_p95/1000:.1f}s). If these are fallback-chain firings, "
+                f"reorder `cfg.fallback_chain` or shrink dependency on the slow "
+                f"provider. If they're intentional `--provider X` overrides, "
+                f"this is just visibility — no action needed.")
     lines.append("")
-    return "\n".join(lines) + "\n", []
+    return "\n".join(lines) + "\n", triggers
 
 
-def section_cost(events: List[Dict]) -> str:
-    """Rough cost estimate using response_len as a token proxy."""
+def section_cost(events: List[Dict], suggest: bool, since: datetime,
+                  thresholds: Dict[str, float]) -> Tuple[str, List[str]]:
+    """Rough cost estimate using response_len as a token proxy +
+    projected monthly trajectory. The projection lets the suggestion
+    layer flag runaway cost before the bill arrives."""
     lines = ["## Cost shape (rough)", ""]
     if not events:
         lines.append("_No data._")
-        return "\n".join(lines) + "\n"
+        return "\n".join(lines) + "\n", []
     # Assume ~4 chars/token for output, ~2x input/output ratio in chat.
     out_chars = sum(int(e.get("response_len") or 0) for e in events)
     out_tokens = out_chars / 4
     in_tokens  = out_tokens * 2  # heuristic
     total_tokens = out_tokens + in_tokens
-    # Per-turn average
     per_turn = total_tokens / len(events) if events else 0
-    lines.append(f"- Estimated tokens (input + output): ~{int(total_tokens):,}")
-    lines.append(f"- Turns: {len(events)}")
-    lines.append(f"- ~{per_turn:.0f} tokens / turn (rough)")
-    lines.append("- _Estimate uses response_len ÷ 4 + ×2 input ratio. Not precise; "
-                  "consider it order-of-magnitude only._")
+
+    # Project monthly: scale tokens-in-window to a 30-day window.
+    window_days = max(
+        (datetime.now() - since).total_seconds() / 86400.0, 1/24)  # ≥1 hour
+    monthly_projection = total_tokens * (30.0 / window_days)
+
+    lines.append(f"- Estimated tokens in window (input + output): ~{int(total_tokens):,}")
+    lines.append(f"- Turns: {len(events)} over {window_days:.1f} days")
+    lines.append(f"- Per-turn average: ~{per_turn:.0f} tokens")
+    lines.append(f"- **Projected monthly:** ~{int(monthly_projection):,} tokens "
+                  f"(scaled from current rate)")
+    lines.append("- _Estimate uses response_len ÷ 4 + ×2 input ratio. Order-of-"
+                  "magnitude only; check provider dashboards for real spend._")
     lines.append("")
-    return "\n".join(lines) + "\n"
+
+    triggers: List[str] = []
+    if suggest:
+        ceiling = thresholds.get("projected_monthly_tokens", 50_000_000)
+        if monthly_projection > ceiling:
+            triggers.append(
+                f"Projected monthly tokens = {int(monthly_projection):,} exceeds "
+                f"threshold {int(ceiling):,}. Consider: widening "
+                f"`_should_skip_pregen` thresholds (skip more judge calls), "
+                f"lowering `kimi_max_tokens` / `max_tokens` caps, switching to "
+                f"`--provider kimi` for lower per-token cost, or raising the "
+                f"threshold in `cfg.notification_thresholds.projected_monthly_tokens` "
+                f"if the current rate is acceptable for your budget.")
+    return "\n".join(lines) + "\n", triggers
 
 
 # ============================================================================
@@ -545,15 +679,23 @@ def build_report(events: List[Dict], db: sqlite3.Connection,
     md, trig = section_provider(events, suggest, thresholds)
     parts.append(md); all_triggers.extend(trig)
 
-    parts.append(section_cost(events))
+    md, trig = section_cost(events, suggest, since, thresholds)
+    parts.append(md); all_triggers.extend(trig)
 
     if suggest:
-        parts.append("## Suggestions\n")
+        parts.append("## Suggestions\n\n")
         if not all_triggers:
-            parts.append("_No thresholds exceeded — system is within configured limits._\n")
+            parts.append("_No thresholds exceeded — system is within configured limits._\n\n")
         else:
             for i, t in enumerate(all_triggers, 1):
-                parts.append(f"{i}. {t}\n")
+                parts.append(f"{i}. {t}\n\n")
+        parts.append(
+            "> **Note on thresholds:** the defaults are initial guesses, "
+            "not empirically calibrated. After ~30 days of routine analytics "
+            "runs you'll have a baseline; retune by setting "
+            "`cfg.notification_thresholds` in `symbion.json` (no code deploy). "
+            "Don't act on a suggestion the first time a threshold fires — "
+            "wait until you can see whether it's an outlier or a trend.\n")
 
     return "".join(parts), all_triggers
 
