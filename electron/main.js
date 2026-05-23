@@ -150,10 +150,10 @@ function startBackend() {
     console.log(`[symbion] backend exited code=${code} signal=${signal}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       // Surface unexpected exits to the user so they know what happened.
-      // Suppress when we triggered the kill ourselves (app quit) — that
-      // path sets `backend = null` BEFORE this handler can fire because
-      // we kill synchronously.
-      if (!app.isQuitting) {
+      // Suppress when we triggered the kill ourselves (app quit or
+      // tray-driven provider switch) — those set the matching flag before
+      // killing so this handler knows the exit was intentional.
+      if (!app.isQuitting && !app.isRestartingBackend) {
         dialog.showErrorBox(
           'Symbion backend stopped',
           `The Symbion Python process exited (code ${code}).\n\n` +
@@ -161,6 +161,52 @@ function startBackend() {
       }
     }
   });
+}
+
+// Kill the spawned backend and wait for the OS to fully reap it before
+// resolving. Used by the tray-driven provider switcher so the replacement
+// spawn doesn't race the old child for port 8000. Resolves immediately if
+// nothing to kill; resolves after an 8s hard timeout if 'exit' never fires
+// (rare Windows case where detached grandchildren keep the group alive).
+function killBackendTree() {
+  return new Promise((resolve) => {
+    if (!backend || backend.killed) return resolve();
+    const child = backend;
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    child.once('exit', finish);
+    if (process.platform === 'win32') {
+      try {
+        execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => {});
+      } catch (e) { finish(); }
+    } else {
+      try { child.kill('SIGTERM'); } catch (e) { finish(); }
+    }
+    setTimeout(finish, 8000);
+  });
+}
+
+// Restart sequence used by the provider switcher. Marks the restart so
+// the exit handler doesn't fire its error dialog, kills the old child,
+// resets state, spawns a fresh one, and waits for /health.
+async function restartBackend() {
+  app.isRestartingBackend = true;
+  try {
+    await killBackendTree();
+    backend = null;
+    backendDied = false;
+    startBackend();
+    const ready = await waitForBackend();
+    if (!ready.ok) {
+      dialog.showErrorBox(
+        'Backend restart failed',
+        `Couldn't reach ${HEALTH_URL} after restart (${ready.reason}).\n\n` +
+        `The provider change was written to symbion.json. Check the console for the cause.`);
+    }
+    return ready.ok;
+  } finally {
+    app.isRestartingBackend = false;
+  }
 }
 
 // Poll /health until the backend responds, then resolve. Times out after
@@ -329,6 +375,157 @@ function trayIconPath() {
                                     'symbion-512.png');
 }
 
+// Provider switcher (tray submenu). Each entry rewrites cfg.llm_provider
+// in symbion.json and restarts the Python backend in place. The four
+// supported providers correspond to the four responder/judge pairings
+// documented in CLAUDE.md ("Provider conventions").
+const SUPPORTED_PROVIDERS = [
+  { id: 'anthropic', label: 'Anthropic — Sonnet 4.6 + Haiku 4.5' },
+  { id: 'groq',      label: 'Groq — Llama 3.3 70b + 3.1 8b' },
+  { id: 'kimi',      label: 'Moonshot — K2.6 + v1-8k' },
+  { id: 'ollama',    label: 'Ollama — Qwen 2.5 14b + 3b (local)' },
+];
+
+function readActiveProvider() {
+  // Re-read symbion.json each call so external edits (or our own write
+  // from switchProvider) are reflected without restarting Electron.
+  try {
+    const fresh = loadConfig();
+    return String(fresh.llm_provider || 'anthropic').toLowerCase();
+  } catch (e) {
+    return 'anthropic';
+  }
+}
+
+function buildProviderSubmenu() {
+  const active = readActiveProvider();
+  return SUPPORTED_PROVIDERS.map((p) => ({
+    label:   p.label,
+    type:    'radio',
+    checked: p.id === active,
+    click:   () => { switchProvider(p.id); },
+  }));
+}
+
+async function switchProvider(newProvider) {
+  const current = readActiveProvider();
+  if (newProvider === current) return;
+  if (!REPO_ROOT) {
+    dialog.showErrorBox('Cannot switch provider',
+      'No Symbion repo found — symbion.json location is unknown.');
+    return;
+  }
+
+  // Confirm the switch — restart drops any in-flight turn and the new
+  // provider may need an API key the user hasn't set in .env yet.
+  const confirm = await dialog.showMessageBox(mainWindow || null, {
+    type: 'question',
+    title: 'Switch LLM provider',
+    message: `Switch from "${current}" to "${newProvider}"?`,
+    detail:
+      `Symbion will set llm_provider="${newProvider}" in symbion.json and ` +
+      `restart the Python backend (~5s). Any in-flight turn will be dropped.\n\n` +
+      `If the new provider needs an API key, make sure it's set in .env first.`,
+    buttons: ['Switch + restart', 'Cancel'],
+    defaultId: 0,
+    cancelId:  1,
+  });
+  if (confirm.response !== 0) {
+    // User backed out — refresh the menu so the radio dot snaps back to
+    // the still-current provider (Electron's radio menus check eagerly).
+    if (tray) tray.setContextMenu(buildTrayMenu(null));
+    return;
+  }
+
+  // Rewrite symbion.json. Preserve every other key (we just patch the
+  // single field) and pretty-print so the file stays human-editable.
+  const cfgPath = path.join(REPO_ROOT, 'symbion.json');
+  let obj;
+  try {
+    const raw = fs.readFileSync(cfgPath, 'utf8');
+    obj = JSON.parse(raw);
+    obj.llm_provider = newProvider;
+    fs.writeFileSync(cfgPath, JSON.stringify(obj, null, 2) + '\n');
+  } catch (e) {
+    dialog.showErrorBox('Failed to write symbion.json', String(e && e.message || e));
+    return;
+  }
+
+  // Fallback chain prompt. When the user changes primary, the existing
+  // fallback_chain may no longer make sense — e.g. switching FROM anthropic
+  // TO groq with chain=["anthropic"] is fine, but chain=["groq"] when groq
+  // is the primary is nonsensical (would try to fall back to itself). Offer
+  // three resolutions; default is "fall back to previous provider" since
+  // that's the most common intent ("I want to try X, but if it dies, give
+  // me back the old one").
+  const existingChain = Array.isArray(obj.fallback_chain) ? obj.fallback_chain : [];
+  const chainLabel = existingChain.length ? existingChain.join(' → ') : '(empty — no fallback)';
+  const fb = await dialog.showMessageBox(mainWindow || null, {
+    type: 'question',
+    title: 'Update fallback chain?',
+    message: `Primary is now "${newProvider}". Update fallback_chain?`,
+    detail:
+      `Current chain: ${chainLabel}\n\n` +
+      `When the primary trips its circuit breaker (529 / timeout), Symbion ` +
+      `walks fallback_chain looking for a healthy provider. Empty chain = ` +
+      `return the heuristic stub on failure (no auto-failover).`,
+    buttons: [
+      `Fall back to "${current}"`,
+      'Leave chain unchanged',
+      'Clear chain (no fallback)',
+    ],
+    defaultId: 0,
+    cancelId:  1,
+  });
+  try {
+    if (fb.response === 0) {
+      obj.fallback_chain = [current];
+      fs.writeFileSync(cfgPath, JSON.stringify(obj, null, 2) + '\n');
+    } else if (fb.response === 2) {
+      obj.fallback_chain = [];
+      fs.writeFileSync(cfgPath, JSON.stringify(obj, null, 2) + '\n');
+    }
+    // response === 1 leaves the chain as it was; no rewrite needed.
+  } catch (e) {
+    // Chain update failed but the primary switch already landed on disk.
+    // Surface the error but don't abort the restart — the primary change
+    // is still valid even if the chain stayed stale.
+    dialog.showErrorBox('Failed to update fallback_chain',
+      `Primary set to "${newProvider}" but fallback_chain update failed:\n${String(e && e.message || e)}\n\n` +
+      `Edit symbion.json by hand if needed.`);
+  }
+
+  // Keep the module-level cfg snapshot in sync so analytics window key
+  // resolution and similar reads see the new value without re-launching.
+  Object.assign(cfg, loadConfig());
+
+  // Attach mode (existing backend detected at startup) — we don't own the
+  // Python process, so we can't restart it. The file write succeeded;
+  // tell the user to bounce it manually.
+  if (!backend) {
+    if (tray) tray.setContextMenu(buildTrayMenu(null));
+    dialog.showMessageBox(mainWindow || null, {
+      type: 'info',
+      title: 'Provider written',
+      message: `llm_provider set to "${newProvider}".`,
+      detail:
+        `Symbion's backend was launched outside this app (attach mode), ` +
+        `so Electron can't restart it. Stop the running backend manually ` +
+        `and relaunch for the change to take effect.`,
+    });
+    return;
+  }
+
+  const ok = await restartBackend();
+  if (tray) tray.setContextMenu(buildTrayMenu(null));
+  if (ok && mainWindow && !mainWindow.isDestroyed()) {
+    // Reload the chat window so the WebSocket reconnects to the new
+    // backend — stale sockets from the old process would otherwise sit
+    // disconnected until the user manually refreshes.
+    mainWindow.webContents.reload();
+  }
+}
+
 function buildTrayMenu(health) {
   // Right-click menu. Status item is disabled (display-only); the action
   // items open the main window, the analytics page, or quit the app.
@@ -340,6 +537,8 @@ function buildTrayMenu(health) {
     { type: 'separator' },
     { label: 'Open Symbion',  click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else { createWindow(); } } },
     { label: 'Open analytics', click: () => openAnalyticsWindow() },
+    { type: 'separator' },
+    { label: 'LLM provider', submenu: buildProviderSubmenu() },
     { type: 'separator' },
     { label: 'Quit Symbion',  click: () => { app.isQuitting = true; app.quit(); } },
   ]);
