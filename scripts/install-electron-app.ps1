@@ -220,14 +220,60 @@ if ((Test-Path $installedExe) -and -not $Force) {
 
 if ($needInstall) {
     Write-Section "Running NSIS installer silently"
-    # Close any running instance so file replacement works
+    # Close any running instance so file replacement works.
     Get-Process -Name "Symbion" -ErrorAction SilentlyContinue |
       Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
+
+    # Strip the Mark of the Web (Zone.Identifier alternate data stream)
+    # from the installer before running. Files copied to a new machine
+    # via robocopy / git / D:\ portable drive can inherit a MOTW that
+    # tells SmartScreen "this came from another zone, treat as untrusted".
+    # On unsigned NSIS installers (which this is -- no code signing cert),
+    # SmartScreen responds by silently aborting the install while letting
+    # the installer process return exit 0. Unblock-File removes the ADS
+    # so SmartScreen treats it as trusted-local. No admin required; works
+    # on a file the current user owns.
+    try {
+        Unblock-File -LiteralPath $installer -ErrorAction Stop
+    } catch {
+        # Non-fatal -- the file may not have had a MOTW in the first place,
+        # or Unblock-File isn't available (PowerShell <3, rare). Continue
+        # to the install attempt; the post-install verify will catch
+        # silent failures regardless.
+        Write-Host "  (Unblock-File on installer: $($_.Exception.Message) -- continuing)" -ForegroundColor DarkGray
+    }
+
     $proc = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
         Write-Host "Installer exit $($proc.ExitCode). Check $installer manually." -ForegroundColor Red
         exit 1
+    }
+
+    # Verify the install actually landed. NSIS returns exit 0 when the
+    # installer process launches and exits cleanly, but SmartScreen / AV
+    # can silently consume the install BEFORE files get written, with no
+    # error surfacing through the exit code. Without this verify step
+    # the script claims success and you discover hours later that
+    # Symbion.exe isn't actually installed (real failure mode observed
+    # 2026-05-23 on a fresh-machine deploy).
+    if (-not (Test-Path $installedExe)) {
+        Write-Host "[warn] NSIS reported success but $installedExe is missing." -ForegroundColor Yellow
+        Write-Host "       Likely SmartScreen or AV blocked the silent install." -ForegroundColor Yellow
+        Write-Host "       Retrying interactively -- click 'More info' -> 'Run anyway' if SmartScreen appears." -ForegroundColor Yellow
+
+        # Interactive fallback: run the installer WITHOUT /S so the user
+        # can click through the wizard manually. SmartScreen / UAC prompts
+        # appear here and the user can approve them.
+        $proc2 = Start-Process -FilePath $installer -Wait -PassThru
+        if (-not (Test-Path $installedExe)) {
+            Write-Host "Install still failed after interactive retry (exit $($proc2.ExitCode))." -ForegroundColor Red
+            Write-Host "Try: 1) right-click $installer -> Properties -> Unblock checkbox -> Apply" -ForegroundColor Red
+            Write-Host "     2) Add an antivirus exclusion for $installRoot then re-run with -Force" -ForegroundColor Red
+            Write-Host "     3) Run the installer manually: & '$installer'" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "Interactive install succeeded." -ForegroundColor Green
     }
 }
 
