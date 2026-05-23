@@ -95,8 +95,11 @@ try {
 }
 
 # --- 2. Wrong token -> 403 ----------------------------------------------
+# Token is sent via the `?t=<token>` query param — the same path
+# install.ps1's `irm` one-liner uses. The Worker doesn't accept the
+# Authorization header; that was a verify-script-only convention.
 try {
-    $code = Get-StatusCode -Url $WorkerUrl -Headers @{ Authorization = 'Bearer definitely-not-the-real-token' }
+    $code = Get-StatusCode -Url ("$WorkerUrl" + "?t=definitely-not-the-real-token")
     Add-Result 'wrong-token-403' ($code -eq 403) "status=$code (expected 403)"
 } catch {
     Add-Result 'wrong-token-403' $false "network/exception: $($_.Exception.Message)"
@@ -104,8 +107,7 @@ try {
 
 # --- 3. Correct token -> 200, plus served-script content checks ---------
 try {
-    $resp = Invoke-WebRequest -Uri $WorkerUrl `
-        -Headers @{ Authorization = "Bearer $Token" } `
+    $resp = Invoke-WebRequest -Uri ("$WorkerUrl" + "?t=$Token") `
         -UseBasicParsing -Method GET -ErrorAction Stop
     $status = [int]$resp.StatusCode
     $body   = $resp.Content
