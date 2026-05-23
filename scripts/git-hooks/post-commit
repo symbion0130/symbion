@@ -1,0 +1,59 @@
+#!/bin/sh
+# Symbion git post-commit hook: auto-mirror to portable D:\symbion after each
+# commit so the soul stays current with what just landed in local + GitHub.
+#
+# Installed by scripts/install-git-hooks.ps1 to .git/hooks/post-commit.
+# This file is the source-of-truth; the .git/hooks/ copy is a deployment.
+#
+# Failure modes (all non-fatal — the commit itself already succeeded):
+#   - D:\symbion not mounted: log and skip
+#   - sync-to-portable.ps1 errors: log the error, don't unwind the commit
+#   - PowerShell unavailable: log and skip
+#
+# Output suppressed by default to keep `git commit` quiet. Pass
+# SYMBION_HOOK_VERBOSE=1 to see the full sync log.
+
+# Resolve the repo root from the hook's location: .git/hooks/post-commit
+# is two levels deep from the working tree root.
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SYNC_SCRIPT="$REPO_ROOT/scripts/sync-to-portable.ps1"
+
+# Skip silently if D:\symbion isn't mounted. Sync can be re-run manually
+# later when the drive is plugged in.
+if [ ! -d "/d/symbion" ] && [ ! -d "D:/symbion" ] && [ ! -d "D:\\symbion" ]; then
+    if [ -n "$SYMBION_HOOK_VERBOSE" ]; then
+        echo "[symbion-hook] D:\\symbion not mounted - skipping portable sync." >&2
+    fi
+    exit 0
+fi
+
+# Skip if the sync script is missing (e.g. partial checkout).
+if [ ! -f "$SYNC_SCRIPT" ]; then
+    if [ -n "$SYMBION_HOOK_VERBOSE" ]; then
+        echo "[symbion-hook] $SYNC_SCRIPT not found - skipping." >&2
+    fi
+    exit 0
+fi
+
+# Run the sync. PowerShell available on Windows by default; we shell out
+# to it from git's POSIX shell wrapper. Capture output; show it only on
+# verbose mode or on failure.
+if [ -n "$SYMBION_HOOK_VERBOSE" ]; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SYNC_SCRIPT"
+    rc=$?
+else
+    output=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SYNC_SCRIPT" 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "[symbion-hook] sync-to-portable.ps1 failed (exit $rc):" >&2
+        echo "$output" >&2
+        echo "[symbion-hook] Commit succeeded; sync did not. Re-run manually:" >&2
+        echo "[symbion-hook]   .\\scripts\\sync-to-portable.ps1" >&2
+    else
+        # Brief one-liner confirmation on success so you know D:\ is current.
+        echo "[symbion-hook] D:\\symbion synced." >&2
+    fi
+fi
+
+# Always exit 0: a failed sync should never block a successful commit.
+exit 0

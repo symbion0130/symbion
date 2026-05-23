@@ -203,11 +203,25 @@ Groq was added to Worker injection on 2026-05-23 to make the auto-fallback (`cfg
 | `scripts/install-ollama.ps1` | Install Ollama + pull `mistral`, `llama3.2`, `mxbai-embed-large`. `-SkipModels`, `-Models "a,b,c"`. |
 | `scripts/install-electron-app.ps1` | Winget-install Node.js LTS, `npm install` in `electron/`, `npm run build:win`, silent NSIS install. Idempotent across each phase. `-Force` rebuilds + reinstalls. Called by `install.ps1` Phase 2.6 unless `-SkipElectronApp` / `$env:SYMBION_SKIP_ELECTRON_APP`. |
 | `scripts/tailscale-https.ps1` | Tailscale serve/funnel wrapper for HTTPS on `*.ts.net`. Required for browser geolocation on non-localhost devices. |
-| `scripts/sync-to-portable.ps1` | Mirror the live repo to a portable destination (default `D:\symbion`). Loaded mode (default) includes portable Python + pre-built Symbion Setup .exe so the destination is plug-and-play on another Windows machine; `-Lean` strips both for a ~25 MB source-only mirror. `.env` included by default; pass `-ExcludeEnv` to strip keys. Uses `robocopy /MIR` so destination becomes an exact mirror of source minus exclusions (regeneratable: `node_modules`, `win-unpacked`, `__pycache__`; machine-specific: `_pastes`, `verify_artifacts`; personal: resume files; never: `ollama-models` which lives outside the repo). |
+| `scripts/sync-to-portable.ps1` | Mirror the live repo to a portable destination (default `D:\symbion`). Loaded mode (default) includes portable Python + pre-built Symbion Setup .exe so the destination is plug-and-play on another Windows machine; `-Lean` strips both for a ~25 MB source-only mirror. `.env` included by default; pass `-ExcludeEnv` to strip keys. Uses `robocopy /MIR` so destination becomes an exact mirror of source minus exclusions (regeneratable: `node_modules`, `win-unpacked`, `__pycache__`; machine-specific: `_pastes`, `verify_artifacts`; personal: resume files; never: `ollama-models` which lives outside the repo). Auto-fired by the `post-commit` git hook after every commit. |
+| `scripts/sync-from-portable.ps1` | Reverse direction: pull `D:\symbion` → `%USERPROFILE%\symbion`. Start-of-session command on whatever machine you're sitting at. Refuses to run when local has uncommitted changes unless `-Force` is passed (prevents silent overwrite). Same exclusion set as the forward direction, plus `.git` (local git history must not be overwritten from D:\ which doesn't carry git metadata). |
+| `scripts/install-git-hooks.ps1` | Copies `scripts/git-hooks/*` → `.git/hooks/` so the hooks actually fire. `.git/hooks/` is local-only (not git-tracked), so this script is the deployment step. Idempotent; re-run after pulls that update the hooks. `-Verify` reports drift without copying. |
+| `scripts/git-hooks/post-commit` | Source-of-truth for the post-commit hook. After every `git commit`, runs `sync-to-portable.ps1` so `D:\symbion` stays current with what just landed locally. Skips silently when D:\ isn't mounted. Always exits 0 — sync failure never blocks a successful commit. `SYMBION_HOOK_VERBOSE=1` in the shell shows full sync output instead of the one-line confirmation. |
 
-**Two-path install model.** Symbion can reach a new machine via either route — both are supported and produce a usable install:
+**Storage architecture: D:\ is the soul, machines are bodies.** The portable `D:\symbion` drive carries Symbion's identity (code, `symbion.db`, logs, `.env`, conversation history). Local `%USERPROFILE%\symbion` on any specific machine is just a fast NTFS workspace mirroring D:\ for the duration of a work session. The Yoga, the Surface, any future machine: interchangeable hardware whose role is to provide compute. Plug in D:\, sync local from it, work, and the post-commit hook keeps D:\ updated as you commit.
+
+**Two-path install model.** Symbion reaches a new machine via either route — both are supported and produce a usable install:
 1. **Worker one-liner** (`irm <worker-url>?t=<token> \| iex`) → fetches `install.ps1` from GitHub → clones repo → bootstraps Python + Electron. Always pulls the latest committed code; needs no physical media; used for net-new machines. The 7 Cloudflare Secrets gate this path.
-2. **Portable D:\ drive** → plug in, run `D:\symbion\install.ps1` or `D:\symbion\electron\dist\Symbion Setup 0.1.0.exe` directly. No internet required for the install itself (keys + DB + logs travel with the drive). Used when you want offline transfer or to seed a machine with existing conversation history. **`scripts/sync-to-portable.ps1` is what keeps the D:\ mirror current** — run it before each transfer. D:\ is exFAT, so no symlink option exists; the script is the only sync mechanism.
+2. **Portable D:\ drive** → plug in, run `D:\symbion\install.ps1` or `D:\symbion\electron\dist\Symbion Setup 0.1.0.exe` directly. No internet required for the install itself (keys + DB + logs travel with the drive). Used when you want offline transfer or to seed a machine with existing conversation history. **`scripts/sync-to-portable.ps1` is what keeps the D:\ mirror current** — auto-fired by the post-commit hook on every commit; run manually if D:\ wasn't mounted at commit time. D:\ is exFAT, so no symlink option exists; the scripts are the only sync mechanism.
+
+**Session workflow when working at any machine:**
+1. Plug in D:\
+2. `cd %USERPROFILE%\symbion; .\scripts\sync-from-portable.ps1` — refresh local from D:\
+3. Edit, test, commit on local (post-commit hook auto-syncs to D:\)
+4. `git push origin main` — push to GitHub when ready
+5. Unplug D:\, take it to the next machine
+
+Run `scripts/install-git-hooks.ps1` once per machine after a fresh checkout (the hook isn't git-tracked, so a clone doesn't bring it).
 
 **Edit constraints when touching install/deploy:**
 
