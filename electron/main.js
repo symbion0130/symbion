@@ -11,7 +11,7 @@
 // No IPC bridge yet — the renderer just loads the existing web UI as-is.
 // preload.js exposes app version / platform for future use.
 
-const { app, BrowserWindow, shell, Menu, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, dialog, Tray, Notification, nativeImage } = require('electron');
 const { spawn, execFile } = require('child_process');
 const fs   = require('fs');
 const http = require('http');
@@ -274,6 +274,130 @@ function probeHealth(timeoutMs = 1500) {
   });
 }
 
+// Fetch the full /health JSON for the tray widget. Same shape as
+// probeHealth but returns the parsed payload. null on any failure.
+function fetchHealthJson(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const req = http.get(HEALTH_URL, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(buf)); } catch (e) { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
+  });
+}
+
+// ---- Tray widget (analytics rollout 2026-05-23) ----
+// System tray icon with tooltip-style health summary, right-click menu
+// for quick navigation, and native OS notification when Symbion's health
+// crosses into 'something's wrong' territory (consecutive_failures > 0).
+// Polls /health every TRAY_POLL_MS; debounces failure notifications so a
+// sustained outage doesn't spam the OS notification center.
+let tray = null;
+let lastTrayFailures = 0;   // for change-detection on consecutive_failures
+let lastNotifyAt    = 0;    // debounce timestamp
+const TRAY_POLL_MS  = 30_000;
+const NOTIFY_DEBOUNCE_MS = 5 * 60 * 1000;
+
+function trayIconPath() {
+  // Reuse the existing assets baked for the BrowserWindow icon. On
+  // Windows the .ico is multi-resolution so it scales to tray size.
+  // On macOS the .icns includes all the sizes the menu bar wants.
+  return path.join(__dirname, 'assets',
+    process.platform === 'win32'  ? 'symbion.ico' :
+    process.platform === 'darwin' ? 'symbion.icns' :
+                                    'symbion-512.png');
+}
+
+function buildTrayMenu(health) {
+  // Right-click menu. Status item is disabled (display-only); the action
+  // items open the main window, the analytics page, or quit the app.
+  const status = health
+    ? `Mood: ${health.mood || '?'} | turns: ${health.interactions ?? '?'} | fails: ${health.consecutive_failures ?? '?'}`
+    : 'Backend unreachable';
+  return Menu.buildFromTemplate([
+    { label: status, enabled: false },
+    { type: 'separator' },
+    { label: 'Open Symbion',  click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else { createWindow(); } } },
+    { label: 'Open analytics', click: () => shell.openExternal(`${UI_URL}analytics?suggest=1`) },
+    { type: 'separator' },
+    { label: 'Quit Symbion',  click: () => { app.isQuitting = true; app.quit(); } },
+  ]);
+}
+
+function updateTrayFromHealth(health) {
+  if (!tray) return;
+  if (!health) {
+    tray.setToolTip('Symbion — backend unreachable');
+    tray.setContextMenu(buildTrayMenu(null));
+    return;
+  }
+  const mood = health.mood || '?';
+  const turns = health.interactions ?? 0;
+  const fails = health.consecutive_failures ?? 0;
+  tray.setToolTip(`Symbion — ${mood} | ${turns} turns | ${fails} failures`);
+  tray.setContextMenu(buildTrayMenu(health));
+
+  // Notify on transition into failing state. Debounced — a sustained
+  // outage shouldn't fire repeatedly. The in-process Slack watcher
+  // already handles breaker-trip notifications; this is the local-OS
+  // counterpart for when you're not watching Slack.
+  const now = Date.now();
+  if (fails > 0 && lastTrayFailures === 0 && (now - lastNotifyAt) > NOTIFY_DEBOUNCE_MS) {
+    try {
+      new Notification({
+        title: 'Symbion — failures detected',
+        body: `${fails} consecutive failure${fails === 1 ? '' : 's'}. Last error visible in the analytics view.`,
+        urgency: 'normal',
+      }).show();
+      lastNotifyAt = now;
+    } catch (e) {
+      console.warn('[symbion] tray notification failed:', e);
+    }
+  }
+  lastTrayFailures = fails;
+}
+
+function startTray() {
+  if (process.platform === 'linux' && !process.env.DISPLAY) {
+    console.log('[symbion] no DISPLAY — skipping tray');
+    return;
+  }
+  try {
+    const iconPath = trayIconPath();
+    // On Windows .ico already scales for tray. nativeImage handles
+    // platform-specific resampling.
+    const icon = nativeImage.createFromPath(iconPath);
+    tray = new Tray(icon);
+    tray.setToolTip('Symbion — connecting…');
+    tray.setContextMenu(buildTrayMenu(null));
+
+    // Initial fetch + recurring poll. Fail silently — tray going stale
+    // is better than the app crashing on a transient network error.
+    const poll = async () => {
+      try { updateTrayFromHealth(await fetchHealthJson()); }
+      catch (e) { console.warn('[symbion] tray poll error:', e); }
+    };
+    poll();
+    setInterval(poll, TRAY_POLL_MS);
+
+    // Left-click on the tray icon focuses (or opens) the main window —
+    // standard macOS behavior; harmless on Windows where right-click is
+    // the menu and left-click triggers this.
+    tray.on('click', () => {
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+      else { createWindow(); }
+    });
+  } catch (e) {
+    console.warn('[symbion] tray setup failed:', e);
+  }
+}
+
 // Probe Ollama's /api/tags to see (a) whether Ollama is running, (b) which
 // models are pulled. Resolves to { ok, models[] } or { ok: false }. Short
 // timeout because this is a non-blocking startup check; if Ollama is slow
@@ -428,6 +552,7 @@ app.whenReady().then(async () => {
   if (existing) {
     console.log('[symbion] existing backend detected — attaching');
     createWindow();
+    if (cfg.electron_tray_enabled !== false) startTray();
     maybeShowOllamaDialog(mainWindow).catch((e) => {
       console.warn('[symbion] Ollama check failed:', e);
     });
@@ -453,6 +578,12 @@ app.whenReady().then(async () => {
   startBackend();
   const ready = await waitForBackend();
   createWindow();
+  // Tray widget — opt-out via cfg.electron_tray_enabled=false in
+  // symbion.json. Default-on because the Electron app itself is opt-in;
+  // anyone running the desktop shell probably wants the menu bar widget.
+  if (cfg.electron_tray_enabled !== false) {
+    startTray();
+  }
   if (!ready.ok) {
     // Window opens to localhost:8000 anyway; on connection-refused the
     // user sees Chromium's error page. Surface the actual cause in a
@@ -489,6 +620,12 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true;
+  // Tear down the tray icon so it doesn't leave a phantom in the menu
+  // bar after quit. Tray.destroy() is the canonical Electron disposal.
+  if (tray) {
+    try { tray.destroy(); } catch (e) {}
+    tray = null;
+  }
   if (!backend || backend.killed) return;
   console.log('[symbion] terminating backend...');
   if (process.platform === 'win32') {
