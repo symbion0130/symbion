@@ -348,6 +348,43 @@ Entry point              main()
 - (f) `uvicorn.run` is called with `ws_max_size=80MB` (bumped from 32MB on 2026-05-21 to fit a 50MB file attachment + overhead in one frame; lower would protocol-reject large frames before our handler caps fire)
 - (g) Web body is `position:fixed; top:0; left:0; right:0; height: var(--viewport-height, 100dvh)` so iOS Safari can't scroll the page when the keyboard opens (fixes the "composer flies to top + blank space at bottom" bug, 2026-05-21)
 
+## Memory layers
+
+Symbion has five distinct memory stores, each answering a different question. All live in `symbion.db`; the table-per-store layout is set up by `init_db()` and the `SymbionMemory` class owns reads/writes.
+
+| Layer | Question it answers | Write trigger | Read by |
+|---|---|---|---|
+| `messages` | What was literally said? | Every turn (user + assistant rows) | `build_context` for the current session's recent N; cross-session retrieval for "verbatim quotes relevant to query" |
+| `summaries` | What happened in past sessions? | `_force_summarize_session` (every `memory_summary_every` turns + on `/quit` flush) using `SUMMARISE_SYSTEM` | `get_relevant_summaries_hybrid` (BM25 + cosine + multiplicative recency) → injected into system prompt |
+| `user_profile` | What do we know about this user durably? | `_background_tasks` every `profile_update_every` turns via `PROFILE_SYSTEM` | `build_context` profile injection (user-scoped) |
+| Identity moments (`self_model`) | What formative events shaped Symbion's persona? | `LongitudinalIdentity.record_moment` when self-eval flags a high-strength moment | `identity.get_identity_summary()` → small block in every system prompt |
+| `techniques` | What MOVES have worked, worth replicating? | `/promote` (user-marked) → `MOVE_EXTRACT_SYSTEM` extracts the one-sentence move | `get_relevant_techniques` (BM25 + cosine, no recency decay) → "Techniques worth replicating" block in system prompt |
+
+The first four are lossy/compressing; the fifth (techniques) is the verbatim layer for things worth preserving exactly. Symmetric design: `summaries` answer "what was discussed", `techniques` answer "what specifically worked." Added 2026-05-23 in response to Symbion's own self-identified feature request ("the lesson dies at the session boundary"). See next section for the techniques layer specifically.
+
+User-scoping (added 2026-05-19): cross-session reads from `summaries` / `messages` / `user_profile` / `techniques` are scoped to the active user. Same-session reads stay shared so two users on one chat can collaborate. `_active_user(session)` resolves the per-session user (terminal `/user`, web composer's set_user frame), falling back to `cfg.active_user`.
+
+## Technique pool (high-fidelity reasoning persistence, 2026-05-23)
+
+Verbatim retention for the move/reframe/pivot that turned an exchange. Schema: `techniques (id, timestamp, session, user, query, move, evidence, embedding, source, shared_at)`. The `source` field is `'local'` (promoted on this machine) or `'shared'` (imported from `shared_learnings.md`); both participate equally in retrieval — the field is only used for sync bookkeeping.
+
+**Promotion path.** `/promote [optional text]` on the active session:
+1. `SYMBION.promote_last_turn(session, user_text)` finds the most recent (user-msg, assistant-msg) pair.
+2. If the user passed text after the command, that's the move verbatim. Otherwise the judge model is asked via `MOVE_EXTRACT_SYSTEM` for one sentence, or returns `move=""` if there's nothing replicable.
+3. Embeds `query + "\n" + move` via `EmbeddingClient` (None when Ollama is down — BM25-only retrieval still works).
+4. Saves with `source='local'`. Returns `{ok, id, move, reason}` to the dispatcher.
+
+**Retrieval path.** `build_context` calls `get_relevant_techniques(query, embedding, k=2, user)`:
+- BM25 over `query + "\n" + move` haystacks, cosine over embeddings, 0.4/0.6 blend when an embedding is supplied; BM25-only otherwise. NO recency decay — a good move stays valuable indefinitely.
+- Top-K surfaced as `"Techniques worth replicating (from past turns):\n- [local] <move>"`. The model sees these alongside the rest of the system prompt.
+- Capped at 200 candidate rows for in-memory scoring; beyond that you'd want a vec0 index parallel to summaries, but the volume should stay low (techniques are curated, not auto-promoted).
+
+**Cross-instance sync** via `shared_learnings.md`. Resolution: `cfg.shared_learnings_path` if set, else derived from `%OneDrive%\Symbion\sync\shared_learnings.md` (parallel to where `.env` syncs via `push-env.ps1`). Format: markdown, one `## TS · user · hash:XXXX` block per technique. Hash is `sha256(user+query+move)[:12]` — stable across machines so the same technique exported from two machines dedupes cleanly. `SymbionMemory._parse_shared_learnings_file` strips trailing `---\n` so re-export → re-import is hash-stable (verified idempotent).
+
+- **Auto-import on startup** when `cfg.shared_learnings_auto_import=True` (default). One file read per launch.
+- **`/save-learnings`** (terminal + web): bidirectional. Imports new entries, exports new local-source ones.
+- **`/forget-technique <id>`**: user-scoped delete. Refuses cross-user deletion (one user can't drop another's moves). Programmatic callers can bypass with `user=None`. **Does not** strip the matching block from `shared_learnings.md` — re-syncing would re-import it as `source='shared'`. If a deletion needs to truly stick across instances, also remove the `## hash:XXXX` block by hand.
+
 ## Cross-interface session sync (2026-05-21)
 
 The same conversation can be picked up across terminal and web. Three pieces:
@@ -459,6 +496,21 @@ All LLM clients inherit `BaseClient` and expose `stream()`, `chat_json()`, `chat
 
 `KimiClient` holds a persistent `httpx.AsyncClient` across turns (one TLS session, HTTP/2 connection reused) — saves ~200-400ms per call on the China-to-elsewhere route. `aclose()` releases the pool on shutdown.
 
+**Kimi / Moonshot specifics.** Several non-obvious constraints that aren't worth re-discovering:
+- **Temperature is fixed at 1.0 for `kimi-k2.*` models** (k2.5, k2.6, future k2.x). Moonshot returns 400 "invalid temperature" on any other value. `KimiClient._eff_temp(model, requested)` clamps automatically: returns 1.0 when the resolved model name starts with `kimi-k2`, passes through otherwise. Older `moonshot-v1-*` models accept the full range.
+- **Per-model max_tokens via `_eff_max_tokens`.** Kimi K2.6 is meaningfully slower per-token than Sonnet, and Symbion's persona is terse — allocating `cfg.max_tokens=16384` headroom wastes Moonshot's scheduler budget. `KimiClient` uses `cfg.kimi_max_tokens` (default 2048) when the responder is a kimi-k2.* model, falls back to `cfg.max_tokens` for moonshot-v1-* judge calls (which pass their own small explicit max_tokens anyway).
+- **`cfg.kimi_max_concurrent` defaults to 0 (DISABLED).** The semaphore primitive in `KimiClient._slot()` exists but was tested with default=2 and caused a 3× p50 regression on the 5-session stress workload — Symbion fires ~2 outbound calls per turn (judge + responder), so cap=2 means one turn in flight globally. Opt in via symbion.json with a value scaled to ~2× expected concurrent users (e.g. 6 for ~3 simultaneous users). Don't reintroduce a non-zero default without measuring on the target workload first.
+- **Where the latency goes on Moonshot.** Stress data (2026-05-22): K2.6 ttft is the dominant cost (~7.6s p50, up to 30s p95 under parallel load). Once streaming starts, generation rate is comparable to Sonnet. The latency gap vs Anthropic is ~2-3s on p50 and is almost entirely TTFT, not throughput. Lever 2 (widened pre-gen skip cap to 400 chars when `llm_provider=kimi`) shaves the cheap-classifier call on short benign queries; see `_should_skip_pregen`.
+
+**Per-phase latency in the event log.** Every turn in `symbion_events.jsonl` carries `latency_ms = {total, pre_gen, ctx, gen, ttft}`. Wiring:
+- `pre_gen`: judge call (PRE_GEN_SYSTEM). 0 when the heuristic fast path skipped via `_should_skip_pregen`.
+- `ctx`: `build_context` + retrieval + system prompt assembly. Reliably ~30ms regardless of query; almost never the bottleneck.
+- `gen`: full responder stream window from request to last byte.
+- `ttft`: time to first emitted token within `gen`. -1 when no token ever emits (refusal, stub, exception).
+- `total`: full `respond()` pipeline.
+
+Diagnostic shape: if `total ≈ ttft + small`, the provider was queueing (Moonshot's failure mode). If `total ≈ gen >> ttft`, the model is generating long. If `pre_gen` is the bulk, the judge is slow (Moonshot v1-8k cold-start, or Haiku under load). Use this to attribute p95 outliers before guessing.
+
 **Responder output cap.** `cfg.max_tokens` defaults to **16384**. Anthropic Sonnet 4.6 accepts up to 64K output; OpenAI accepts much higher; Ollama is bottlenecked by the local model's context window (typically 4–8K usable), so on Ollama drop this to ~4000–8000 in `symbion.json` or at config load.
 
 **Embedding stack.** Default model is `mxbai-embed-large` (1024 dims) via Ollama. `EmbeddingClient.is_available()` does a one-time probe and caches the result. If absent, `embed()` returns None and `build_context` falls back to BM25-only retrieval — no crash, no error to the user, just a silent capability downgrade visible in startup logs. **Model-change handling:** `SymbionMemory.reset_embeddings_for_model_change()` nulls all stored embeddings on model change and `_backfill_embeddings` repopulates with the new model. Mixing dimensions silently breaks cosine retrieval.
@@ -525,7 +577,8 @@ Five focused libraries extracted from `symbion_v14.py` for portfolio + general r
 
 When a closed gap's wiring is non-obvious, look in the architecture section that owns the subsystem — that's the authoritative spot, not a separate change log.
 
-- **2026-05-22** — gaps #1, #3, #4, #5, #6 closed in one session (commits `8cce939`, `be7fe82`). Per-role model selection (Provider conventions), self-eval breaker (Provider conventions), `get_user_recent_activity` fail-closed (Cross-user retrieval), Electron Python bundling + Ollama dialog (Electron desktop shell), peer token streaming (Cross-interface session sync), and write_file widened to machine-wide (invariant #7).
+- **2026-05-23** — technique pool landed (see Technique pool + Memory layers). `SUMMARISE_SYSTEM` rewritten to capture the move, not just the topic (commit `5b1bcbf`). `techniques` table + `/promote` + `/techniques` + retrieval (commit `5060a38`). `shared_learnings.md` cross-instance sync via OneDrive (commit `a95e7fe`). `/forget-technique <id>` with user-scoped delete (commit `3efef4a`). Originated from a Symbion self-identified request ("the lesson dies at the session boundary").
+- **2026-05-22** — Moonshot K2.6 work: temperature clamp for K2.* (`752030f`), Moonshot pair `--provider kimi` (`c74a358`), per-phase latency telemetry (`fa34cd5`), pre-gen-skip widening to 400 chars on Kimi (`64ab858`), `kimi_max_concurrent` semaphore primitive (default disabled, `54ca71b`/`43c551e`), stress harness fixes (`b5e6e84`/`058cc5e`). Earlier in same day: gaps #1, #3, #4, #5, #6 closed (`8cce939`, `be7fe82`) — per-role model selection, self-eval breaker, `get_user_recent_activity` fail-closed, Electron Python bundling, peer token streaming, write_file widened to machine-wide.
 - **2026-05-21** — cross-interface session sync, location services, cross-user retrieval, fresh-session-per-launch, web push timer landed (see those sections).
 - **2026-04-25** — read tools opted in to machine-wide paths (invariant #7).
 
