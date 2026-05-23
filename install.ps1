@@ -187,6 +187,11 @@ $SymbionApiKey = Resolve-InjectedKey -Placeholder '__SYMBION_API_KEY_INJECTED__'
 # install token's blast radius. Acceptable because Groq's free tier gives
 # strong rate limits and per-org budget caps.
 $GroqKey       = Resolve-InjectedKey -Placeholder '__SYMBION_GROQ_KEY_INJECTED__'      -EnvVarName 'GROQ_API_KEY'
+# Kimi/Moonshot re-added to Worker injection 2026-05-23 (paired user
+# request). Was removed 2026-05-19 to shrink token blast radius; reversal
+# is intentional and recorded in commit message. Moonshot's per-org rate
+# limits keep abuse-risk manageable if the install token ever leaks.
+$KimiKey       = Resolve-InjectedKey -Placeholder '__SYMBION_KIMI_KEY_INJECTED__'      -EnvVarName 'KIMI_API_KEY'
 
 # ------------------------------------------------------------------------
 # Phase 1: Locate or fetch the repo
@@ -448,6 +453,7 @@ if (Test-Path -LiteralPath $envDest) {
         BRAVE_API_KEY     = $BraveKey
         SYMBION_API_KEY   = $SymbionApiKey
         GROQ_API_KEY      = $GroqKey
+        KIMI_API_KEY      = $KimiKey
     }
     $injectedPresent = @($injected.GetEnumerator() | Where-Object { $_.Value })
 

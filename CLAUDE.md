@@ -170,7 +170,7 @@ powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbi
 %USERPROFILE%\symbion\scripts\install-web.cmd
 ```
 
-The Worker performs string-replace on five placeholders before serving:
+The Worker performs string-replace on six placeholders before serving:
 
 | Placeholder in `install.ps1` | Worker Secret | Used by `install.ps1` for |
 |---|---|---|
@@ -179,8 +179,9 @@ The Worker performs string-replace on five placeholders before serving:
 | `__SYMBION_BRAVE_KEY_INJECTED__` | `BRAVE_API_KEY` | seed `.env` |
 | `__SYMBION_API_KEY_INJECTED__` | `SYMBION_API_KEY` | seed `.env` |
 | `__SYMBION_GROQ_KEY_INJECTED__` | `GROQ_API_KEY` | seed `.env` (paired with `fallback_chain=["groq"]`) |
+| `__SYMBION_KIMI_KEY_INJECTED__` | `KIMI_API_KEY` | seed `.env` (Moonshot K2.6 / v1-8k pair via `--provider kimi`) |
 
-Groq was added to Worker injection on 2026-05-23 to make the auto-fallback (`cfg.fallback_chain=["groq"]`) work out of the box on fresh installs. Kimi and DeepSeek remain explicitly excluded (removed 2026-05-19) — those keys ride the OneDrive seed path or manual `--setup` when needed. *Don't re-add Kimi or DeepSeek to the Worker without a paired decision in commit message.* Each additional Worker-injected key widens the install token's blast radius if it leaks, so the bar to add is: "the key is needed for the default-installed flow to work."
+Groq was added to Worker injection on 2026-05-23 to make the auto-fallback (`cfg.fallback_chain=["groq"]`) work out of the box on fresh installs. Kimi (Moonshot) was re-added on 2026-05-23 under paired user request — it had been deliberately removed on 2026-05-19 to shrink blast radius; the reversal is intentional. DeepSeek remains excluded — those keys ride the OneDrive seed path or manual `--setup` when needed. Each additional Worker-injected key widens the install token's blast radius if it leaks, so the bar to add is: "the key is needed for the default-installed flow to work."
 
 **install.ps1 phases** (in order):
 
