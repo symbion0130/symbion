@@ -334,7 +334,7 @@ Entry point              main()
 6. **DB migrations are additive only.** Never drop columns. `init_db()` uses `CREATE TABLE IF NOT EXISTS` plus idempotent `ALTER TABLE ADD COLUMN` for legacy DB upgrades. Readers tolerate NULL.
 7. **No eval() on untrusted input.** AST-validated calculator, SSRF check on URLs. **Both reads and writes are machine-wide** (`_resolve_in_workspace(..., machine_wide=True)` everywhere) — reads opted in 2026-04-25, writes joined 2026-05-22. Safety on writes is enforced by the judge + persona layers, not a path sandbox. The sandbox primitive (`machine_wide=False`) remains in `_resolve_in_workspace` if writes ever need re-narrowing via a cfg toggle; don't narrow the default without explicit user direction.
 8. **No bare `except:`.** Use `except ImportError:` for import guards, `except Exception:` everywhere else.
-9. **Tool registry sync.** Adding a tool requires changes in FOUR places: `SymbionTools._ALLOWED_TOOLS`, `SymbionTools._validate_args`, `SymbionTools.dispatch`, and `TOOL_SCHEMAS`. Plus a CAPABILITIES_BASE line so the model knows it exists.
+9. **Tool registry sync.** Adding a tool requires changes in FOUR places: `SymbionTools._ALLOWED_TOOLS`, `SymbionTools._validate_args`, `SymbionTools.dispatch`, and `TOOL_SCHEMAS`. Plus a CAPABILITIES_BASE line so the model knows it exists. **Session-aware tools** (those that need to attribute back to the conversation, e.g. `promote_technique`) require additionally threading `session: str = ""` through `SymbionTools.dispatch`, `SYMBION._dispatch_tool`, `_maybe_tool`, and the agent-loop `_exec_tool` wrapper inside `respond()` — see `9438471` for the canonical wiring.
 
 ## Web layer security
 
@@ -368,11 +368,17 @@ User-scoping (added 2026-05-19): cross-session reads from `summaries` / `message
 
 Verbatim retention for the move/reframe/pivot that turned an exchange. Schema: `techniques (id, timestamp, session, user, query, move, evidence, embedding, source, shared_at)`. The `source` field is `'local'` (promoted on this machine) or `'shared'` (imported from `shared_learnings.md`); both participate equally in retrieval — the field is only used for sync bookkeeping.
 
-**Promotion path.** `/promote [optional text]` on the active session:
+**Two promotion paths** — user-explicit and model-judged. Both land in the same `techniques` table with `source='local'`; both surface through the same retrieval. They coexist because each catches what the other misses.
+
+*Path A — `/promote [optional text]` (user-explicit, 2026-05-23 in `5060a38`).* User-initiated from terminal or web composer:
 1. `SYMBION.promote_last_turn(session, user_text)` finds the most recent (user-msg, assistant-msg) pair.
 2. If the user passed text after the command, that's the move verbatim. Otherwise the judge model is asked via `MOVE_EXTRACT_SYSTEM` for one sentence, or returns `move=""` if there's nothing replicable.
 3. Embeds `query + "\n" + move` via `EmbeddingClient` (None when Ollama is down — BM25-only retrieval still works).
 4. Saves with `source='local'`. Returns `{ok, id, move, reason}` to the dispatcher.
+
+*Path B — `promote_technique` agent-loop tool (model-judged, 2026-05-23 in `9438471`).* The model fires this mid-turn when it decides a move is worth preserving. Args: `{move: str (5-500 chars), query: str}` — the model produces the move text directly (no judge call) and quotes the user's query from context. Tool description has three "must hold" criteria (non-obvious + would-help-fresh-instance + nameable-in-one-sentence) + explicit don't-fire carve-outs (chitchat, factual lookups, standard Q&A). The tool's return text reminds "USE SPARINGLY — one save per conversation is usually the max" so the agent loop sees the limit right after firing.
+
+**The model's bar is meaningfully higher than the tool description's** — observed during 2026-05-23 testing: even when given a substantive diagnostic turn and an explicit self-generated example, the model defaulted to NOT firing until the user explicitly pushed back. This means in practice `/promote` will still be the right command for moves the model under-rates. The conservatism is the safer error direction; if the technique pool turns out too sparse, the right lever is loosening the tool description (which the model actually reads) rather than auto-firing.
 
 **Retrieval path.** `build_context` calls `get_relevant_techniques(query, embedding, k=2, user)`:
 - BM25 over `query + "\n" + move` haystacks, cosine over embeddings, 0.4/0.6 blend when an embedding is supplied; BM25-only otherwise. NO recency decay — a good move stays valuable indefinitely.
@@ -577,7 +583,7 @@ Five focused libraries extracted from `symbion_v14.py` for portfolio + general r
 
 When a closed gap's wiring is non-obvious, look in the architecture section that owns the subsystem — that's the authoritative spot, not a separate change log.
 
-- **2026-05-23** — technique pool landed (see Technique pool + Memory layers). `SUMMARISE_SYSTEM` rewritten to capture the move, not just the topic (commit `5b1bcbf`). `techniques` table + `/promote` + `/techniques` + retrieval (commit `5060a38`). `shared_learnings.md` cross-instance sync via OneDrive (commit `a95e7fe`). `/forget-technique <id>` with user-scoped delete (commit `3efef4a`). Originated from a Symbion self-identified request ("the lesson dies at the session boundary").
+- **2026-05-23** — technique pool landed (see Technique pool + Memory layers). `SUMMARISE_SYSTEM` rewritten to capture the move, not just the topic (commit `5b1bcbf`). `techniques` table + `/promote` + `/techniques` + retrieval (commit `5060a38`). `shared_learnings.md` cross-instance sync via OneDrive (commit `a95e7fe`). `/forget-technique <id>` with user-scoped delete (commit `3efef4a`). `promote_technique` agent-loop tool — model-judged sibling to `/promote`, fires mid-turn when the model decides a move is worth preserving (commit `9438471`). Originated from a Symbion self-identified request ("the lesson dies at the session boundary").
 - **2026-05-22** — Moonshot K2.6 work: temperature clamp for K2.* (`752030f`), Moonshot pair `--provider kimi` (`c74a358`), per-phase latency telemetry (`fa34cd5`), pre-gen-skip widening to 400 chars on Kimi (`64ab858`), `kimi_max_concurrent` semaphore primitive (default disabled, `54ca71b`/`43c551e`), stress harness fixes (`b5e6e84`/`058cc5e`). Earlier in same day: gaps #1, #3, #4, #5, #6 closed (`8cce939`, `be7fe82`) — per-role model selection, self-eval breaker, `get_user_recent_activity` fail-closed, Electron Python bundling, peer token streaming, write_file widened to machine-wide.
 - **2026-05-21** — cross-interface session sync, location services, cross-user retrieval, fresh-session-per-launch, web push timer landed (see those sections).
 - **2026-04-25** — read tools opted in to machine-wide paths (invariant #7).
