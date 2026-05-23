@@ -104,10 +104,20 @@ if (!gotLock) {
   // delete %APPDATA%\symbion-app\lockfile to recover.
   app.quit();
 } else {
+  // Second-instance handler: another Symbion.exe / electron . launch
+  // hit the singleton lock and bounced. Surface the main window.
+  // When mainWindow is null (e.g. the user closed the chat window while
+  // the tray kept the app alive), create a fresh window — same fallback
+  // pattern the tray menu's 'Open Symbion' uses. Without this, clicking
+  // a pinned taskbar / Start menu shortcut after closing the window
+  // does nothing visible.
   app.on('second-instance', () => {
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
       mainWindow.focus();
+    } else {
+      createWindow();
     }
   });
 }
