@@ -606,8 +606,22 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  // Symbion is a single-window app; closing the last window quits.
-  // The 'before-quit' handler below kills the backend.
+  // When the tray widget is active, the app outlives the main window —
+  // user can close the chat window but keep the tray's "Open Symbion"
+  // shortcut, the health tooltip, and the failure-transition
+  // notifications. That's the whole point of a tray app. The user
+  // quits explicitly via the tray menu's Quit item.
+  //
+  // When the tray is disabled (cfg.electron_tray_enabled === false),
+  // fall back to the original behavior: closing the only window quits
+  // the app (otherwise the Electron process would leak with no way for
+  // the user to bring it back).
+  //
+  // macOS convention is also to keep the app alive after window close;
+  // honored here regardless of the tray flag.
+  if (tray || process.platform === 'darwin') {
+    return;
+  }
   app.quit();
 });
 
