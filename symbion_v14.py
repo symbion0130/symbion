@@ -4970,6 +4970,28 @@ class SymbionMemory:
             c.commit()
             return cur.lastrowid or 0
 
+    def delete_technique(self, tid: int,
+                          user: Optional[str] = None) -> Dict:
+        """Delete one technique by id. When `user` is provided, only
+        deletes if the row's user matches — prevents one household user
+        from removing another's promoted moves. Returns a result dict
+        with ok/found/deleted_move so callers can confirm the right row
+        was removed."""
+        with sqlite3.connect(self.db) as c:
+            row = c.execute(
+                "SELECT user, move FROM techniques WHERE id=?",
+                (tid,)).fetchone()
+            if not row:
+                return {"ok": False, "found": False, "deleted_move": "",
+                         "reason": f"technique #{tid} not found"}
+            row_user, move = row
+            if user is not None and row_user != user:
+                return {"ok": False, "found": True, "deleted_move": "",
+                         "reason": f"technique #{tid} belongs to {row_user!r}, not {user!r}"}
+            c.execute("DELETE FROM techniques WHERE id=?", (tid,))
+            c.commit()
+        return {"ok": True, "found": True, "deleted_move": move, "reason": ""}
+
     def list_techniques(self, user: Optional[str] = None,
                          source: Optional[str] = None,
                          limit: int = 50) -> List[Dict]:
@@ -7432,6 +7454,19 @@ class SYMBION:
                 lines.append(f"  [{t['id']}] {ts} ({src}) {t['move'][:120]}")
             return lines
 
+        if c_low.startswith("/forget-technique"):
+            parts = c.split()
+            if len(parts) < 2:
+                return ["Usage: /forget-technique <id>   (see /techniques for ids)"]
+            try:
+                tid = int(parts[1])
+            except ValueError:
+                return [f"Invalid id: {parts[1]!r}. Must be an integer."]
+            res = self.memory.delete_technique(tid, user=user)
+            if res["ok"]:
+                return [f"OK Forgot technique #{tid}:", f"  {res['deleted_move'][:120]}"]
+            return [res["reason"]]
+
         if c_low == "/save-learnings":
             res = self.sync_shared_learnings()
             if not res["path"]:
@@ -9070,6 +9105,23 @@ def run_terminal(symbion: "SYMBION"):
                     ts  = (t["ts"] or "")[:10]
                     print(f"  [{t['id']}] {dim(ts)} {dim('('+src+')'):<10} {cyan(t['move'][:100])}")
                 print()
+        elif raw.startswith("/forget-technique"):
+            parts = raw.split()
+            if len(parts) < 2:
+                print(yellow("  Usage: /forget-technique <id>   (see /techniques for ids)"))
+            else:
+                try:
+                    tid = int(parts[1])
+                except ValueError:
+                    print(yellow(f"  Invalid id: {parts[1]!r}. Must be an integer (see /techniques)."))
+                else:
+                    user = symbion._active_user(session)
+                    res = symbion.memory.delete_technique(tid, user=user)
+                    if res["ok"]:
+                        print(green(f"  OK Forgot technique #{tid}:"))
+                        print(f"     {dim(res['deleted_move'][:120])}")
+                    else:
+                        print(yellow(f"  {res['reason']}"))
         elif raw=="/save-learnings":
             res = symbion.sync_shared_learnings()
             if not res["path"]:
