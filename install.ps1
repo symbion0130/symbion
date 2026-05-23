@@ -349,13 +349,13 @@ try {
 #   need nothing from this phase.
 #
 #   SKIPPED BY DEFAULT. Opt in with -WithOllama or SYMBION_WITH_OLLAMA=1.
-#   Legacy -SkipOllama / SYMBION_SKIP_OLLAMA still accepted (no-op now —
+#   Legacy -SkipOllama / SYMBION_SKIP_OLLAMA still accepted (no-op now,
 #   they don't conflict with the new default but stay for any scripts
 #   that pass them explicitly).
 # ------------------------------------------------------------------------
 $withOllamaFlag = $WithOllama -or ($env:SYMBION_WITH_OLLAMA -and $env:SYMBION_WITH_OLLAMA -ne '0')
 if (-not $withOllamaFlag) {
-    Write-Section "Skipping Ollama (opt-in only — pass -WithOllama if you want local LLM)"
+    Write-Section "Skipping Ollama (opt-in only - pass -WithOllama if you want local LLM)"
     Write-Host ""
     Write-Host "Symbion runs fine on cloud providers (Anthropic / Groq / Moonshot) with no Ollama setup." -ForegroundColor DarkGray
     Write-Host ""

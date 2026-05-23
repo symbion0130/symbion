@@ -120,7 +120,7 @@ if ($needInstall) {
     Write-Section "npm install in electron/"
     Push-Location $electronDir
     # PowerShell 5.1 wraps native-executable stderr as NativeCommandError
-    # records when $ErrorActionPreference='Stop' is in scope — and that
+    # records when $ErrorActionPreference='Stop' is in scope -- and that
     # preference propagates INTO npm.ps1 (the shim), where its own internal
     # `& node.exe ...` invocation then terminates on the first deprecation
     # warning npm emits. Lowering preference to 'Continue' for just the

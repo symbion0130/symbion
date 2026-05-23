@@ -102,7 +102,7 @@ $api = Test-OllamaApi
 if (-not $api) {
     Write-Section "Starting Ollama daemon"
     Start-Process -WindowStyle Hidden -FilePath $ollama -ArgumentList "serve" | Out-Null
-    # Poll up to 15s for the API to come up — first start can be slow.
+    # Poll up to 15s for the API to come up -- first start can be slow.
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500

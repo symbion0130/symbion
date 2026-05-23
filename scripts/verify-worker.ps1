@@ -95,7 +95,7 @@ try {
 }
 
 # --- 2. Wrong token -> 403 ----------------------------------------------
-# Token is sent via the `?t=<token>` query param — the same path
+# Token is sent via the `?t=<token>` query param -- the same path
 # install.ps1's `irm` one-liner uses. The Worker doesn't accept the
 # Authorization header; that was a verify-script-only convention.
 try {
