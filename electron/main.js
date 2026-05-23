@@ -90,6 +90,11 @@ function resolvePython() {
 let backend     = null;   // child_process handle for `python -m symbion --web`
 let mainWindow  = null;
 let backendDied = false;  // gets set when the child exits unexpectedly
+let appReady    = false;  // true after app.whenReady() finishes its first
+                          // createWindow() call. Gates the second-instance
+                          // handler so double-clicks during the 30-100s
+                          // startup window don't create a premature blank
+                          // window at UI_URL before the backend is up.
 
 // ---- Single-instance lock ----
 // Without this, double-clicking the shortcut or relaunching from a
@@ -112,6 +117,14 @@ if (!gotLock) {
   // a pinned taskbar / Start menu shortcut after closing the window
   // does nothing visible.
   app.on('second-instance', () => {
+    // Suppress during startup. whenReady's createWindow() call is coming;
+    // we don't want to create a premature blank window at UI_URL before
+    // the backend is up. Without this, a double-click on the shortcut
+    // during the 30-100s startup spawns two windows: one blank black
+    // (this handler's premature createWindow) and one working Symbion
+    // (whenReady's createWindow once the backend is ready).
+    if (!appReady) return;
+
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
@@ -885,6 +898,7 @@ app.whenReady().then(async () => {
   if (existing) {
     console.log('[symbion] existing backend detected — attaching');
     createWindow();
+    appReady = true;
     if (cfg.electron_tray_enabled !== false) startTray();
     maybeShowOllamaDialog(mainWindow).catch((e) => {
       console.warn('[symbion] Ollama check failed:', e);
@@ -897,6 +911,7 @@ app.whenReady().then(async () => {
   // install.ps1 so there's no Symbion repo at %USERPROFILE%\symbion.
   if (!REPO_ROOT) {
     createWindow();
+    appReady = true;
     dialog.showErrorBox(
       'Symbion repo not found',
       'The Symbion desktop app needs the Symbion Python repo on the same machine to spawn its own backend.\n\n' +
@@ -911,6 +926,7 @@ app.whenReady().then(async () => {
   startBackend();
   const ready = await waitForBackend();
   createWindow();
+  appReady = true;
   // Tray widget — opt-out via cfg.electron_tray_enabled=false in
   // symbion.json. Default-on because the Electron app itself is opt-in;
   // anyone running the desktop shell probably wants the menu bar widget.
