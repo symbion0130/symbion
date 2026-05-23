@@ -34,6 +34,14 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# Windows stdout defaults to cp1252 which crashes when Symbion's response
+# contains non-ASCII characters (em-dashes, emoji, curly quotes). Reconfigure
+# to utf-8 with replace so the harness can always print its summary —
+# anything cp1252 can't render gets `?`'d in the console, not raised.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO / ".env"
 DB_PATH = REPO / "symbion.db"
