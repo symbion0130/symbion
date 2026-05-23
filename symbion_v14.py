@@ -1921,8 +1921,19 @@ class AnthropicClient(BaseClient):
                     output = f"Tool execution error: {type(ex).__name__}: {ex}"
                     is_error = True
                 output_str = output if isinstance(output, str) else str(output)
-                # Cap each tool's output to keep context manageable across many tool calls
-                if len(output_str) > max_tool_chars:
+                # Cap each tool's output to keep context manageable across many
+                # tool calls. EXEMPTIONS: file-read tools have their own
+                # internal max_chars limit (2M default for read_file) and the
+                # caller asked for what's in the file — applying an 80K agent-
+                # loop cap on top broke self-review on symbion_v14.py (553K
+                # file) by forcing the model into multi-chunk reads where it
+                # lost continuity across calls. Trust the tool's internal
+                # cap and let the file content through whole. The cap stays
+                # for chatty tools (web_search, fetch_url) where it's
+                # genuinely needed to prevent context flooding.
+                _file_read_tools = ("read_file", "read_file_chunk")
+                if (tu["name"] not in _file_read_tools
+                        and len(output_str) > max_tool_chars):
                     output_str = (output_str[:max_tool_chars]
                                   + f"\n[...truncated, total was {len(output)} chars]")
                 tool_calls_log.append({
@@ -7220,6 +7231,27 @@ class SYMBION:
         _pre_gen_ms = int((time.monotonic() - _pre_t0) * 1000)
         if pregen_skipped:
             logger.info(f"Pre-gen skipped (heuristic fast path): {_pre_gen_ms}ms total for embed+tool")
+
+        # Self-source pre-fetch (agent-loop mode only).
+        # Single-shot mode's _maybe_tool already handles this via the
+        # _SELF_SOURCE_RE hard-trigger — agent loop skips _maybe_tool,
+        # so without this branch a "review your own code" query would
+        # force the model into multi-chunk read_file_chunk reads against
+        # the 80K agent-loop cap (now relaxed for file-read tools above,
+        # but a single pre-fetch is still the cleaner shape: one TOOL_DATA
+        # injection, no chunk-stitching, no chance of the model giving
+        # up mid-review). The standard system-prompt TOOL_DATA path
+        # downstream picks up tool_context and wraps it accordingly.
+        if agent_loop_active and tool_context is None and _SELF_SOURCE_RE.search(text):
+            try:
+                src = self.tools.read_file("symbion_v14.py")
+                if src and not src.startswith("Error"):
+                    tool_context = src
+                    logger.warning(f"[req={request_id}] Self-source pre-fetch (agent loop): {len(src)} chars")
+                else:
+                    logger.warning(f"[req={request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}")
+            except Exception as ex:
+                logger.error(f"[req={request_id}] Self-source pre-fetch: {ex}")
         elif _pre_gen_ms > 2000:
             logger.warning(f"Pre-gen slow: {_pre_gen_ms}ms")
 
