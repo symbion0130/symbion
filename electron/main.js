@@ -530,6 +530,34 @@ function probeOllamaTags(host, timeoutMs = 1500) {
 // especially on metered connections. install-ollama.ps1 is the canonical
 // installer and already handles idempotent pulls — point users there
 // rather than duplicating its logic in Electron.
+// Persistence for the "Don't ask again" choice on the Ollama dialog.
+// A marker file in app.getPath('userData') suppresses re-prompting on
+// every launch. Two markers — one per dialog flavor — so dismissing
+// the 'model missing' nag doesn't also suppress the more meaningful
+// 'Ollama not detected' one (different situations, different decisions).
+// User can re-enable both prompts by deleting these files:
+//   %APPDATA%\symbion-app\ollama-model-missing-dismissed
+//   %APPDATA%\symbion-app\ollama-not-detected-dismissed
+function ollamaDismissedPath(kind) {
+  return path.join(app.getPath('userData'),
+                    `ollama-${kind}-dismissed`);
+}
+
+function isOllamaDismissed(kind) {
+  try { return fs.existsSync(ollamaDismissedPath(kind)); }
+  catch (e) { return false; }
+}
+
+function setOllamaDismissed(kind) {
+  try {
+    fs.writeFileSync(ollamaDismissedPath(kind),
+      `dismissed at ${new Date().toISOString()}\n` +
+      `delete this file to re-enable the prompt.\n`);
+  } catch (e) {
+    console.warn(`[symbion] failed to persist ollama dismissal: ${e}`);
+  }
+}
+
 async function maybeShowOllamaDialog(parentWindow) {
   // Honor user opt-out from symbion.json.
   if (cfg.embedding_enabled === false) return;
@@ -544,6 +572,7 @@ async function maybeShowOllamaDialog(parentWindow) {
     // semantics for "is this model pulled".
     const hasModel = probe.models.some((n) => n.startsWith(embedModel));
     if (hasModel) return;
+    if (isOllamaDismissed('model-missing')) return;
     const choice = await dialog.showMessageBox(parentWindow, {
       type: 'info',
       title: 'Symbion: embedding model missing',
@@ -557,11 +586,15 @@ async function maybeShowOllamaDialog(parentWindow) {
       buttons: ['OK', 'Open install script'],
       defaultId: 0,
       cancelId: 0,
+      checkboxLabel: "Don't ask again",
+      checkboxChecked: false,
     });
+    if (choice.checkboxChecked) setOllamaDismissed('model-missing');
     if (choice.response === 1) openInstallOllamaScript();
     return;
   }
   // Ollama not reachable.
+  if (isOllamaDismissed('not-detected')) return;
   const choice = await dialog.showMessageBox(parentWindow, {
     type: 'info',
     title: 'Symbion: Ollama not detected',
@@ -575,7 +608,10 @@ async function maybeShowOllamaDialog(parentWindow) {
     buttons: ['OK', 'Open install script'],
     defaultId: 0,
     cancelId: 0,
+    checkboxLabel: "Don't ask again",
+    checkboxChecked: false,
   });
+  if (choice.checkboxChecked) setOllamaDismissed('not-detected');
   if (choice.response === 1) openInstallOllamaScript();
 }
 
