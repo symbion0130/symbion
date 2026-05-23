@@ -537,6 +537,7 @@ CAPABILITIES_BASE = """Your tools:
 - get_weather(lat, lon) — current weather at coordinates via Open-Meteo (free, no key). Use for "is it raining?", "how hot?", etc. when the user has shared their location.
 - get_local_time(timezone) — current time in an IANA timezone (e.g. Europe/Madrid). Use when the user asks locally-anchored time questions; system-prompt "Current time" is server-local and may differ when the user is traveling.
 - get_user_recent_activity(user, hours) — cross-user retrieval. When the active user asks about ANOTHER household user by name ("what was lala working on?"), pulls that user's recent summaries + message snippets. Symmetric — any known user can query any other. Validated against cfg.known_users; unknown names rejected.
+- promote_technique(move, query) — save a non-obvious move worth replicating across sessions. Fire RARELY (most turns don't have a replicable move; one save per conversation is the max). Promoted techniques persist verbatim and surface in future system prompts under "Techniques worth replicating". DON'T fire for chitchat / factual lookups / standard Q&A — only when you'd want a future Symbion starting fresh on a similar problem to land on the same approach.
 
 Read AND write tools accept ANY path on the machine — absolute (e.g. `D:\\foo\\bar.txt`, `C:\\Users\\me\\Desktop\\img.png`) or relative to the workspace root. Relative paths resolve against the project dir (typically D:\\symbion).
 
@@ -1052,6 +1053,42 @@ TOOL_SCHEMAS = [
                 "hours": {"type": "number", "description": "Look-back window in hours (default 24, capped at 336 / 2 weeks)", "default": 24},
             },
             "required": ["user"],
+        },
+    },
+    {
+        "name": "promote_technique",
+        "description": (
+            "Save a move/technique worth replicating to long-term memory. "
+            "Promoted techniques persist verbatim across sessions and (when "
+            "shared_learnings sync is configured) across machines — they "
+            "surface in future system prompts under 'Techniques worth "
+            "replicating' so a future Symbion can replicate the move on a "
+            "similar problem.\n\n"
+            "USE SPARINGLY. Most turns DO NOT have a move worth promoting. "
+            "Promoting your own reasoning should be RARE — one save per "
+            "conversation is usually the maximum. If you're not sure, don't "
+            "fire this tool.\n\n"
+            "Fire ONLY when ALL of the following hold:\n"
+            "  - The move is non-obvious. A standard answer to a standard "
+            "    question doesn't qualify.\n"
+            "  - The move would help another Symbion starting fresh on a "
+            "    similar problem (would they NOT have arrived here on their "
+            "    own?).\n"
+            "  - You can name the move concretely in one sentence — 'reframed "
+            "    X as Y which surfaced Z' beats 'thought carefully about X'.\n\n"
+            "DON'T fire for: chitchat, factual lookups, simple math, "
+            "Q&A where the answer was just retrieval, anything where the "
+            "value of your response was in execution rather than approach. "
+            "If the user explicitly asks you to save a technique, treat that "
+            "as a hint but still apply judgment — they may be overestimating."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "move":  {"type": "string", "description": "The technique in ONE sentence. Specific and concrete. 5-500 chars."},
+                "query": {"type": "string", "description": "The user query this move responded to. Quote it directly from the most recent user message in this conversation."},
+            },
+            "required": ["move", "query"],
         },
     },
 ]
@@ -2959,6 +2996,7 @@ class SymbionTools:
         "write_file","web_search","fetch_url",
         "get_weather","get_local_time",
         "get_user_recent_activity",
+        "promote_technique",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -3089,12 +3127,45 @@ class SymbionTools:
                 out["hours"] = float(hrs)
             except (TypeError, ValueError):
                 out["hours"] = 24.0
+        elif tool == "promote_technique":
+            mv = _str("move", 500)
+            if mv is None or len(mv) < 5:
+                return False, "promote_technique requires a 'move' string (5-500 chars)", {}
+            out["move"] = mv
+            qv = _str("query", 1000, required=False)
+            out["query"] = qv or ""
 
         return True, "", out
 
+    def promote_technique(self, move: str, query: str,
+                            session: str = "",
+                            user: str = "aaron") -> str:
+        """Save a model-promoted technique to long-term memory. Called via
+        the agent loop when the model decides a move is worth replicating.
+        Unlike user-initiated /promote, this path doesn't ask the judge
+        for extraction — the model produces the move text directly. Both
+        paths land in the same techniques table (source='local')."""
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            tid = self._memory.save_technique(
+                query=query or "(model-promoted, query not captured)",
+                move=move,
+                evidence="",
+                session=session,
+                user=user or "aaron",
+                embedding=None,
+                source="local")
+        except Exception as ex:
+            return f"Error: technique save failed: {type(ex).__name__}: {ex}"
+        return (f"Technique #{tid} saved. Use this SPARINGLY — one save per "
+                f"conversation is usually the max; most turns don't have a "
+                f"move worth preserving.")
+
     async def dispatch(self, tool: str, args: Dict, cfg: SymbionConfig,
                        responder=None, responder_model: str = "",
-                       active_user: str = "") -> str:
+                       active_user: str = "",
+                       session: str = "") -> str:
         ok, reason, a = self._validate_args(tool, args)
         if not ok:
             logger.warning(f"Tool arg validation failed: {tool} — {reason}")
@@ -3114,6 +3185,9 @@ class SymbionTools:
         if tool=="get_user_recent_activity":
             return self.get_user_recent_activity(a["user"], cfg, a.get("hours", 24.0),
                                                   active_user=active_user)
+        if tool=="promote_technique":
+            return self.promote_technique(a["move"], a["query"],
+                                            session=session, user=active_user or "aaron")
         return f"Unknown tool: {tool}"
 
 
@@ -5774,14 +5848,18 @@ class SYMBION:
 
     async def _dispatch_tool(self, name: str, args: Dict,
                               responder=None, responder_model: str = "",
-                              active_user: str = "") -> str:
+                              active_user: str = "",
+                              session: str = "") -> str:
         """Route a tool call to the MCP manager when prefixed with `mcp__`,
         otherwise fall through to the built-in SymbionTools dispatcher.
         Also records per-tool reliability stats (calls, errors, latency,
         output size, last error) into self.tool_stats for /tool-stats.
 
         active_user is the per-session-resolved user (via _active_user)
-        that get_user_recent_activity uses for its self-query refusal."""
+        that get_user_recent_activity uses for its self-query refusal.
+        session is the per-session id used by promote_technique to
+        attribute model-promoted techniques to the conversation they
+        came from."""
         stats = self.tool_stats.setdefault(name, {
             "calls": 0, "errors": 0, "total_chars": 0,
             "latency_ms_total": 0.0, "last_error": "",
@@ -5795,7 +5873,8 @@ class SYMBION:
                 result = await self.tools.dispatch(name, args, self.cfg,
                                                    responder=responder,
                                                    responder_model=responder_model,
-                                                   active_user=active_user)
+                                                   active_user=active_user,
+                                                   session=session)
         except Exception as ex:
             stats["errors"] += 1
             stats["last_error"] = f"{type(ex).__name__}: {ex}"[:200]
@@ -6278,7 +6357,7 @@ class SYMBION:
         except Exception:
             return path
 
-    async def _maybe_tool(self, query: str, active_user: str = ""):
+    async def _maybe_tool(self, query: str, active_user: str = "", session: str = ""):
         if not self.cfg.tools_enabled: return None
         client = self._judge_active()
         if isinstance(client, OfflineJudgeStub): return None
@@ -6357,7 +6436,7 @@ class SYMBION:
                 result = await self.tools.dispatch(
                     tool, args, self.cfg,
                     responder=responder, responder_model=self._rmodel(),
-                    active_user=active_user)
+                    active_user=active_user, session=session)
                 logger.warning(f"Tool result: {result[:120]!r}")
                 return result
         except Exception as ex: logger.error(f"Tool: {ex}", exc_info=True)
@@ -6826,7 +6905,7 @@ class SYMBION:
                     tool_context = None
                 else:
                     tool_context, query_embedding = await asyncio.gather(
-                        self._maybe_tool(text, active_user=active_user),
+                        self._maybe_tool(text, active_user=active_user, session=session),
                         self.embeddings.embed(text),
                     )
                 evaluation = {"should_assist": True, "human_benefit_score": 0.5,
@@ -6846,7 +6925,7 @@ class SYMBION:
             else:
                 pre_pair, tool_context, query_embedding = await asyncio.gather(
                     self._pre_gen_analysis(text),
-                    self._maybe_tool(text, active_user=active_user),
+                    self._maybe_tool(text, active_user=active_user, session=session),
                     self.embeddings.embed(text),
                 )
                 evaluation, emotional_state = pre_pair
@@ -7053,7 +7132,8 @@ class SYMBION:
                             name, args,
                             responder=resp_client,
                             responder_model=resp_model,
-                            active_user=active_user)
+                            active_user=active_user,
+                            session=session)
                     except Exception as ex:
                         logger.error(f"[req={request_id}] Agent tool dispatch '{name}': {ex}", exc_info=True)
                         return f"Tool dispatch error: {type(ex).__name__}: {ex}"
