@@ -9331,6 +9331,14 @@ def run_terminal(symbion: "SYMBION"):
         # (2-space indent + 10 + 2). hint is grey, trailing, optional.
         print(f"  {amber(label.ljust(10))}  {value}" + (f"  {gray(hint)}" if hint else ""))
 
+    # Version banner row -- shows the current build hash so a terminal
+    # user can confirm at a glance whether they're running newly-updated
+    # code. Same identity surfaced by /health and the Electron tray
+    # tooltip (v14.0+<7-char-hash>). Falls back to "unknown" gracefully
+    # when git isn't available or this isn't a git checkout (portable
+    # drive case).
+    _row("Version",   warm_white(f"v14.0+{_resolve_build_hash()}"),
+         gray("git commit; shifts after each update"))
     if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
         prov  = symbion.cfg.llm_provider.upper()
         if symbion.cfg.use_kimi_responder and symbion.cfg.kimi_api_key:
