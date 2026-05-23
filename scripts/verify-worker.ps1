@@ -8,12 +8,13 @@
       1. No token            -> 403
       2. Wrong token         -> 403
       3. Correct token       -> 200
-      4. Served script has all four Worker-injected placeholders
+      4. Served script has all five Worker-injected placeholders
          substituted, and each substituted value is non-empty:
            - __SYMBION_PAT_INJECTED__              (+ github_pat_ prefix check)
            - __SYMBION_ANTHROPIC_KEY_INJECTED__    (+ sk-ant-api03- prefix check)
            - __SYMBION_BRAVE_KEY_INJECTED__
            - __SYMBION_API_KEY_INJECTED__
+           - __SYMBION_GROQ_KEY_INJECTED__
 
     Never prints the token, the served script body, or the substituted
     secrets. Probes are substring/regex matches that only emit booleans
@@ -143,6 +144,7 @@ try {
     $extraKeys = [ordered]@{
         'brave'   = @{ placeholder = '__SYMBION_BRAVE_KEY_INJECTED__'; envName = 'BRAVE_API_KEY'   }
         'symbion' = @{ placeholder = '__SYMBION_API_KEY_INJECTED__';   envName = 'SYMBION_API_KEY' }
+        'groq'    = @{ placeholder = '__SYMBION_GROQ_KEY_INJECTED__';  envName = 'GROQ_API_KEY'    }
     }
     foreach ($entry in $extraKeys.GetEnumerator()) {
         $shortname   = $entry.Key

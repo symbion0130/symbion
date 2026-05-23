@@ -182,6 +182,11 @@ function Resolve-InjectedKey {
 $AnthropicKey  = Resolve-InjectedKey -Placeholder '__SYMBION_ANTHROPIC_KEY_INJECTED__' -EnvVarName 'ANTHROPIC_API_KEY'
 $BraveKey      = Resolve-InjectedKey -Placeholder '__SYMBION_BRAVE_KEY_INJECTED__'     -EnvVarName 'BRAVE_API_KEY'
 $SymbionApiKey = Resolve-InjectedKey -Placeholder '__SYMBION_API_KEY_INJECTED__'       -EnvVarName 'SYMBION_API_KEY'
+# Groq added to Worker injection 2026-05-23 to make fallback_chain=["groq"]
+# work out of the box on fresh installs. Trade-off: another key in the
+# install token's blast radius. Acceptable because Groq's free tier gives
+# strong rate limits and per-org budget caps.
+$GroqKey       = Resolve-InjectedKey -Placeholder '__SYMBION_GROQ_KEY_INJECTED__'      -EnvVarName 'GROQ_API_KEY'
 
 # ------------------------------------------------------------------------
 # Phase 1: Locate or fetch the repo
@@ -442,6 +447,7 @@ if (Test-Path -LiteralPath $envDest) {
         ANTHROPIC_API_KEY = $AnthropicKey
         BRAVE_API_KEY     = $BraveKey
         SYMBION_API_KEY   = $SymbionApiKey
+        GROQ_API_KEY      = $GroqKey
     }
     $injectedPresent = @($injected.GetEnumerator() | Where-Object { $_.Value })
 
