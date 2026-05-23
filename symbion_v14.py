@@ -420,6 +420,22 @@ class SymbionConfig:
     kimi_thinking_enabled:            bool  = False
     kimi_model_variant:               str   = "instant"
 
+    # Cross-instance technique sync. When non-empty, `/save-learnings`
+    # writes local-source techniques to this file (bi-directionally
+    # readable from any other Symbion install that points at the same
+    # path). Empty default = derived at runtime from %OneDrive%\Symbion\
+    # sync\shared_learnings.md (parallel to where `.env` already syncs
+    # via push-env.ps1). Set explicitly in symbion.json to override —
+    # e.g. point at a git repo's notes/ dir if you'd rather version-
+    # control the technique pool.
+    shared_learnings_path:            str   = ""
+    # Auto-import on startup. When True, SYMBION reads the file (if it
+    # exists) at construction time and ingests any technique not already
+    # in the local techniques table. Default True — the cost is one
+    # small file read per launch and the value is real cross-instance
+    # memory. Set False to opt out (and use `/save-learnings` manually).
+    shared_learnings_auto_import:     bool  = True
+
     @classmethod
     def load(cls) -> "SymbionConfig":
         cfg = cls()
@@ -4976,6 +4992,158 @@ class SymbionMemory:
                   "query": r[4], "move": r[5], "evidence": r[6], "source": r[7]}
                 for r in rows]
 
+    # --- Shared-learnings sync (cross-instance) --------------------------
+    # Format on disk: a markdown file with one block per technique. Hash
+    # is sha256(user+query+move) hex[:12] — stable across instances, so
+    # the same technique exported from two machines dedupes cleanly.
+
+    @staticmethod
+    def _technique_hash(user: str, query: str, move: str) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        h.update((user or "").encode("utf-8"))
+        h.update(b"\x1f")
+        h.update((query or "").encode("utf-8"))
+        h.update(b"\x1f")
+        h.update((move or "").encode("utf-8"))
+        return h.hexdigest()[:12]
+
+    @staticmethod
+    def _format_technique_block(t: Dict) -> str:
+        """Render one technique as a markdown block. Headed by the hash
+        so re-imports can dedupe cleanly. Multi-line bodies are fine —
+        the parser splits on the `## ` header, not on internal blank lines."""
+        evidence = (t.get("evidence") or "").strip()
+        evidence_line = f"\n\n**evidence:** {evidence[:1500]}" if evidence else ""
+        return (
+            f"## {t['ts']} · {t.get('user','aaron')} · hash:{t['hash']}\n"
+            f"**query:** {(t.get('query') or '').strip()}\n\n"
+            f"**move:** {t['move'].strip()}"
+            f"{evidence_line}\n"
+        )
+
+    @staticmethod
+    def _parse_shared_learnings_file(path) -> List[Dict]:
+        """Parse the markdown file into a list of dicts. Tolerant of
+        manual edits — missing fields default to empty strings. Hash is
+        extracted from the `## ... hash:XXXX` header when present, or
+        re-derived from (user, query, move) when missing."""
+        import re as _re
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+        # Split on lines that start with '## ' (markdown H2).
+        blocks = _re.split(r"(?m)^## ", text)
+        out: List[Dict] = []
+        for block in blocks:
+            block = block.strip()
+            if not block: continue
+            # First line is the header: "TS · user · hash:XXXX"
+            lines = block.split("\n", 1)
+            header = lines[0]
+            body = lines[1] if len(lines) > 1 else ""
+            parts = [p.strip() for p in header.split("·")]
+            ts = parts[0] if parts else ""
+            user = parts[1] if len(parts) > 1 else "aaron"
+            hsh = ""
+            if len(parts) >= 3 and parts[2].startswith("hash:"):
+                hsh = parts[2][5:].strip()
+            # Body fields: **query:**, **move:**, **evidence:**
+            # Strip the block separator (--- on its own line) from the
+            # tail of the captured value so re-export → re-import is
+            # hash-stable. Without this, the `---` between blocks gets
+            # swallowed into the last field of the preceding block.
+            def grab(field: str) -> str:
+                m = _re.search(rf"\*\*{field}:\*\*\s*(.*?)(?=\n\*\*[a-z]+:\*\*|\Z)",
+                                 body, _re.S)
+                if not m:
+                    return ""
+                val = m.group(1).strip()
+                val = _re.sub(r"\n+---\s*$", "", val).strip()
+                return val
+            q = grab("query")
+            mv = grab("move")
+            ev = grab("evidence")
+            if not mv:
+                continue
+            if not hsh:
+                hsh = SymbionMemory._technique_hash(user, q, mv)
+            out.append({"ts": ts, "user": user, "hash": hsh,
+                         "query": q, "move": mv, "evidence": ev})
+        return out
+
+    def export_techniques_to_file(self, path,
+                                    user: Optional[str] = None) -> int:
+        """Append every local-source technique not already in the file
+        to `path`. Creates the file (and parent dirs) if missing.
+        Returns the count of new entries written."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Existing hashes in the file — dedup the export.
+        existing = {b["hash"] for b in self._parse_shared_learnings_file(path)}
+        # Gather local-source rows to export.
+        local = self.list_techniques(user=user, source="local", limit=10_000)
+        new_blocks = []
+        for t in local:
+            hsh = self._technique_hash(t["user"], t["query"], t["move"])
+            if hsh in existing:
+                continue
+            new_blocks.append(self._format_technique_block({**t, "hash": hsh}))
+        if not new_blocks:
+            return 0
+        # Write header if the file is new.
+        if not path.exists() or path.stat().st_size == 0:
+            path.write_text(
+                "# Symbion shared learnings\n\n"
+                "Append-only. Each block is one promoted technique synced "
+                "across Symbion instances via OneDrive (or whatever path "
+                "`cfg.shared_learnings_path` resolves to). The hash on "
+                "each header is sha256(user+query+move)[:12] — re-imports "
+                "and re-exports dedupe by that hash, so manual edits to "
+                "existing blocks will be silently overridden on next "
+                "sync. New manual `##`-headed blocks are fine.\n\n",
+                encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
+            for blk in new_blocks:
+                f.write("\n" + blk + "\n---\n")
+        return len(new_blocks)
+
+    def import_shared_techniques_from_file(self, path,
+                                              user_filter: Optional[str] = None
+                                              ) -> int:
+        """Read `path` and insert any technique whose hash isn't already
+        present in the local table. Source='shared' on each new row.
+        Returns count of techniques imported."""
+        entries = self._parse_shared_learnings_file(path)
+        if not entries:
+            return 0
+        # Build a set of existing local hashes from the techniques table
+        # so we can skip duplicates without an INSERT-and-rollback.
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT user, query, move FROM techniques").fetchall()
+        existing_hashes = {
+            self._technique_hash(r[0] or "", r[1] or "", r[2] or "")
+            for r in rows
+        }
+        imported = 0
+        for e in entries:
+            if user_filter and e["user"] != user_filter:
+                continue
+            if e["hash"] in existing_hashes:
+                continue
+            try:
+                self.save_technique(
+                    query=e["query"], move=e["move"], evidence=e.get("evidence",""),
+                    session="", user=e["user"], embedding=None,
+                    source="shared")
+                imported += 1
+                existing_hashes.add(e["hash"])
+            except Exception as ex:
+                logger.warning(f"shared-learning import skipped: {ex}")
+        return imported
+
     def get_relevant_techniques(self, query: str,
                                   query_embedding: Optional[List[float]] = None,
                                   k: int = 2,
@@ -5446,6 +5614,20 @@ class SYMBION:
         # which keeps the index in sync incrementally.
         if self.memory.vec_index.available():
             self.memory.sync_vec_index()
+
+        # Auto-import shared learnings on startup. Cheap (one file read),
+        # no-op when the file doesn't exist or no new entries are present.
+        # Toggle off via cfg.shared_learnings_auto_import in symbion.json.
+        if self.cfg.shared_learnings_auto_import:
+            try:
+                path = self._shared_learnings_path()
+                if path is not None and path.exists():
+                    n = self.memory.import_shared_techniques_from_file(path)
+                    if n:
+                        logger.warning(f"Shared learnings: imported {n} new "
+                                       f"techniques from {path}")
+            except Exception as ex:
+                logger.warning(f"Shared learnings auto-import failed: {ex}")
 
     def _build_providers(self):
         order = [self.cfg.llm_provider] + [p for p in self.cfg.fallback_chain
@@ -6223,6 +6405,43 @@ class SYMBION:
                 logger.warning(f"[req={request_id}] self-eval would-have-revised: score={score:.2f}")
         except Exception as ex:
             logger.error(f"[req={request_id}] self-eval bg: {ex}")
+
+    # -- Shared-learnings sync helpers ------------------------------------
+
+    def _shared_learnings_path(self) -> Optional[Path]:
+        """Resolve the file path for cross-instance technique sync.
+        Honors `cfg.shared_learnings_path` if set, else derives from the
+        OneDrive env var (Windows convention; matches push-env.ps1's
+        layout). Returns None when no usable path is available."""
+        explicit = (self.cfg.shared_learnings_path or "").strip()
+        if explicit:
+            return Path(explicit)
+        onedrive = os.environ.get("OneDrive") or os.environ.get("ONEDRIVE")
+        if onedrive:
+            return Path(onedrive) / "Symbion" / "sync" / "shared_learnings.md"
+        return None
+
+    def sync_shared_learnings(self) -> Dict[str, int]:
+        """Bidirectional sync against the resolved file: import any
+        entries not already in the local table (source='shared'), then
+        export any local-source entries not already in the file. Both
+        directions are no-ops when there's nothing new. Returns
+        {imported, exported, path}."""
+        path = self._shared_learnings_path()
+        if path is None:
+            return {"imported": 0, "exported": 0, "path": ""}
+        imported = 0
+        exported = 0
+        try:
+            if path.exists():
+                imported = self.memory.import_shared_techniques_from_file(path)
+        except Exception as ex:
+            logger.warning(f"shared-learnings import failed: {ex}")
+        try:
+            exported = self.memory.export_techniques_to_file(path)
+        except Exception as ex:
+            logger.warning(f"shared-learnings export failed: {ex}")
+        return {"imported": imported, "exported": exported, "path": str(path)}
 
     # -- Technique promotion (high-fidelity move retention) ---------------
 
@@ -7212,6 +7431,15 @@ class SYMBION:
                 ts  = (t["ts"] or "")[:10]
                 lines.append(f"  [{t['id']}] {ts} ({src}) {t['move'][:120]}")
             return lines
+
+        if c_low == "/save-learnings":
+            res = self.sync_shared_learnings()
+            if not res["path"]:
+                return ["No shared-learnings path resolved. Set cfg.shared_learnings_path "
+                         "in symbion.json or the %OneDrive% env var."]
+            return [f"Synced against {res['path']}:",
+                    f"  imported: {res['imported']} new technique(s) from file",
+                    f"  exported: {res['exported']} new technique(s) to file"]
 
         if c_low == "/gaps":
             gs = self.gaps.get_open(8)
@@ -8842,6 +9070,14 @@ def run_terminal(symbion: "SYMBION"):
                     ts  = (t["ts"] or "")[:10]
                     print(f"  [{t['id']}] {dim(ts)} {dim('('+src+')'):<10} {cyan(t['move'][:100])}")
                 print()
+        elif raw=="/save-learnings":
+            res = symbion.sync_shared_learnings()
+            if not res["path"]:
+                print(yellow("  No shared-learnings path resolved. Set cfg.shared_learnings_path "
+                              "in symbion.json or %OneDrive% env var."))
+            else:
+                print(green(f"  OK Sync against {res['path']}: "
+                             f"+{res['imported']} imported, +{res['exported']} exported"))
         elif raw=="/gaps":
             gaps=symbion.gaps.get_open()
             if not gaps: print(dim("  No open knowledge gaps."))
