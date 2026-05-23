@@ -29,7 +29,7 @@
   "peer_token_streaming": true,
   "db_path": "symbion.db",
   "log_path": "symbion_transparency.log",
-  "fallback_chain": [],
+  "fallback_chain": ["groq"],
   "mcp_enabled": true,
   "mcp_servers": [
     {

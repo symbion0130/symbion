@@ -6002,6 +6002,33 @@ class SYMBION:
             if not (hasattr(c,"cb") and c.cb and not c.cb.allow()): return c
         return self.heuristic
 
+    # Friendly provider labels used in the in-chat fallback notice. Keep
+    # short — they ride inline in the assistant's response.
+    _PROVIDER_LABELS = {
+        "anthropic": "Anthropic",
+        "groq":      "Groq",
+        "kimi":      "Moonshot",
+        "openai":    "OpenAI",
+        "ollama":    "Ollama (local)",
+        "deepseek":  "DeepSeek",
+        "hf_router": "HuggingFace router",
+    }
+
+    def _provider_name_for_client(self, c: BaseClient) -> str:
+        """Reverse-lookup the provider string for an active client. Returns
+        '' when c isn't one of the configured-provider classes (e.g. the
+        OfflineJudgeStub heuristic, an escalation client we'd already
+        labelled separately). Order matters: GroqClient / HFRouterClient
+        inherit OpenAIClient, so subclasses must be checked first."""
+        if isinstance(c, GroqClient):     return "groq"
+        if isinstance(c, HFRouterClient): return "hf_router"
+        if isinstance(c, DeepSeekClient): return "deepseek"
+        if isinstance(c, OpenAIClient):   return "openai"
+        if isinstance(c, AnthropicClient):return "anthropic"
+        if isinstance(c, KimiClient):     return "kimi"
+        if isinstance(c, OllamaClient):   return "ollama"
+        return ""
+
     def _judge_active(self) -> BaseClient:
         """Returns the best client for judge/probe calls -- prefers AnthropicClient."""
         for c in self._providers:
@@ -7364,6 +7391,34 @@ class SYMBION:
                 )
         if not escalated:
             evaluation["escalated"] = False
+
+        # Fallback notice (in-chat). When the configured primary provider's
+        # circuit breaker is open, _active() walks cfg.fallback_chain and
+        # returns the next healthy provider — but that switch is silent.
+        # Prepend a one-line notice so the user knows why the answer is
+        # coming through a different model than usual (relevant for cost,
+        # quality, and "wait, did the system just downgrade?" awareness).
+        # Skipped for: escalation (intentional, separately labelled),
+        # OfflineJudgeStub (no real response anyway), use_kimi_responder
+        # (intentional hybrid override, not a failover).
+        actual_provider = self._provider_name_for_client(resp_client)
+        primary_provider = (self.cfg.llm_provider or "").lower()
+        evaluation["actual_provider"] = actual_provider
+        if (not escalated
+                and not isinstance(resp_client, OfflineJudgeStub)
+                and not self.cfg.use_kimi_responder
+                and actual_provider
+                and actual_provider != primary_provider):
+            primary_label = self._PROVIDER_LABELS.get(primary_provider, primary_provider or "primary")
+            actual_label  = self._PROVIDER_LABELS.get(actual_provider,  actual_provider)
+            notice = (f"*{primary_label} is temporarily unavailable — "
+                      f"answering via {actual_label} for this turn.*\n\n")
+            draft += notice
+            if token_callback:
+                await token_callback(notice)
+            evaluation["fallback_used"] = actual_provider
+            logger.warning(f"[req={request_id}] primary={primary_provider!r} breaker open; "
+                           f"answering via {actual_provider!r}")
 
         # Context-build is done; generation begins. _ttft_ms captures the
         # first emitted token (network + queue latency to the model API);
