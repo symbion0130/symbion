@@ -752,6 +752,23 @@ Capture, in roughly this order of importance:
 If there was no move worth replicating — just normal Q&A or chat —
 say so plainly. Don't manufacture insight that wasn't there."""
 
+MOVE_EXTRACT_SYSTEM = """Look at this single turn (the user's query + Symbion's
+response) and extract THE MOVE that worked — the technique, reframe, pivot,
+or question that turned the exchange. One sentence, concrete and specific.
+
+Examples of good extractions:
+  - "Reframed the latency complaint as TTFT vs gen-rate, which split the
+    diagnosis cleanly."
+  - "Asked 'what's the test-harness setup' before diagnosing the prod
+    behavior — surfaced that the test was reusing session IDs."
+  - "Offered three concrete cost/effort tiers instead of a single
+    recommendation, so the user could pick the one matching their budget."
+
+If there's no real move (just normal Q&A, chitchat, a simple lookup),
+return move=''. Don't manufacture insight.
+
+Return ONLY JSON: {"move": "<one sentence>"}"""
+
 CONSOLIDATE_SYSTEM = """Merge these N summaries of past Symbion sessions into ONE consolidated
 summary. They were grouped because they're semantically similar — likely the same recurring
 topic or relationship arc revisited across multiple sessions.
@@ -1211,12 +1228,23 @@ def init_db(db_path: str):
                 scheduled_for TEXT);
             CREATE TABLE IF NOT EXISTS learning_metrics (
                 metric TEXT PRIMARY KEY, value REAL, updated_at TEXT);
+            CREATE TABLE IF NOT EXISTS techniques (
+                id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                session TEXT, user TEXT,
+                query TEXT NOT NULL,
+                move TEXT NOT NULL,
+                evidence TEXT,
+                embedding BLOB,
+                source TEXT DEFAULT 'local',
+                shared_at TEXT);
 
             CREATE INDEX IF NOT EXISTS idx_msg_session  ON messages(session);
             CREATE INDEX IF NOT EXISTS idx_sum_session  ON summaries(session);
             CREATE INDEX IF NOT EXISTS idx_int_session  ON interactions(session);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_pos_topic    ON user_positions(topic);
+            CREATE INDEX IF NOT EXISTS idx_tech_user    ON techniques(user);
+            CREATE INDEX IF NOT EXISTS idx_tech_source  ON techniques(source);
         """)
         # Additive migration: older DBs (created before semantic retrieval
         # landed) won't have summaries.embedding. ALTER ADD is a no-op on
@@ -4871,6 +4899,26 @@ class SymbionMemory:
         identity_ctx = identity.get_identity_summary()
         if identity_ctx: parts.append(identity_ctx)
 
+        # Relevant techniques: the "moves worth replicating" pool. Promoted
+        # turns (via /promote) get verbatim retention here; surfaced into
+        # the system prompt so the model can apply techniques that worked
+        # in past sessions to the current query. Cross-instance synced
+        # techniques (source='shared') participate in retrieval alongside
+        # locally-promoted ones — the source field is used only for sync
+        # bookkeeping, not retrieval scoping. Scoped to active user.
+        if query:
+            try:
+                techniques = self.get_relevant_techniques(
+                    query, query_embedding=query_embedding, k=2, user=user)
+                if techniques:
+                    lines = ["Techniques worth replicating (from past turns):"]
+                    for t in techniques:
+                        src = "shared" if t.get("source") == "shared" else "local"
+                        lines.append(f"- [{src}] {t['move']}")
+                    parts.append("\n".join(lines))
+            except Exception as ex:
+                logger.warning(f"technique retrieval skipped: {ex}")
+
         task_ctx = tasks.get_summary_for_context(session)
         if task_ctx: parts.append(task_ctx)
 
@@ -4878,6 +4926,100 @@ class SymbionMemory:
         if gap_ctx: parts.append(gap_ctx)
 
         return recent, "\n\n".join(parts)
+
+    # --- Techniques (high-fidelity reasoning preservation) ----------------
+    # The "move that worked" memory layer. Summaries compress what was
+    # discussed; techniques preserve verbatim the technique/reframe/pivot
+    # that turned the corner. Populated by /promote (user-marked) and read
+    # back into build_context so future turns can replicate what worked.
+
+    def save_technique(self, query: str, move: str,
+                       evidence: str = "",
+                       session: str = "",
+                       user: str = "aaron",
+                       embedding: Optional[List[float]] = None,
+                       source: str = "local") -> int:
+        """Persist one promoted technique. Returns the new row id."""
+        if not move or not move.strip():
+            raise ValueError("move text is required")
+        blob = _vec_to_blob(embedding) if embedding else None
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "INSERT INTO techniques "
+                "(timestamp,session,user,query,move,evidence,embedding,source) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(), session, user,
+                 query[:2000], move.strip()[:2000], (evidence or "")[:2000],
+                 blob, source))
+            c.commit()
+            return cur.lastrowid or 0
+
+    def list_techniques(self, user: Optional[str] = None,
+                         source: Optional[str] = None,
+                         limit: int = 50) -> List[Dict]:
+        """Recent techniques, newest first. Filter by user / source."""
+        where = []
+        params: List = []
+        if user:
+            where.append("user=?"); params.append(user)
+        if source:
+            where.append("source=?"); params.append(source)
+        sql = ("SELECT id, timestamp, session, user, query, move, evidence, "
+                "source FROM techniques")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(sql, params).fetchall()
+        return [{"id": r[0], "ts": r[1], "session": r[2], "user": r[3],
+                  "query": r[4], "move": r[5], "evidence": r[6], "source": r[7]}
+                for r in rows]
+
+    def get_relevant_techniques(self, query: str,
+                                  query_embedding: Optional[List[float]] = None,
+                                  k: int = 2,
+                                  user: Optional[str] = None) -> List[Dict]:
+        """Score techniques by relevance to `query`. Uses BM25 + cosine
+        when query_embedding is provided AND techniques have embeddings;
+        BM25-only otherwise. No recency decay — a good technique from
+        last month is just as valuable as one from yesterday."""
+        with sqlite3.connect(self.db) as c:
+            if user:
+                rows = c.execute(
+                    "SELECT id, query, move, evidence, embedding, source "
+                    "FROM techniques WHERE user=? ORDER BY id DESC LIMIT 200",
+                    (user,)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT id, query, move, evidence, embedding, source "
+                    "FROM techniques ORDER BY id DESC LIMIT 200").fetchall()
+        if not rows:
+            return []
+        # Build a searchable haystack per row: query + move (the technique
+        # description is the primary signal; the query is the cue.)
+        docs = [(r[0], f"{r[1]}\n{r[2]}", r[2], r[3], r[4], r[5]) for r in rows]
+        # BM25 over the haystacks
+        ranked_bm25 = _bm25_rank(query, [d[1] for d in docs], k=len(docs))
+        bm25_by_text = {doc: score for score, doc in ranked_bm25}
+        bm25_max = max(bm25_by_text.values(), default=0.0) or 1.0
+
+        scored: List[Tuple[float, Dict]] = []
+        for tid, haystack, move, evidence, blob, source in docs:
+            b = (bm25_by_text.get(haystack, 0.0) / bm25_max)
+            cos = 0.0
+            if query_embedding is not None and blob:
+                vec = _blob_to_vec(blob)
+                if vec:
+                    cos = max(0.0, _cosine(query_embedding, vec))
+            score = 0.4 * b + 0.6 * cos if query_embedding is not None else b
+            if score > 0.05:
+                scored.append((score, {
+                    "id": tid, "move": move, "evidence": evidence,
+                    "source": source,
+                }))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [d for _, d in scored[:k]]
 
 
 # ==============================================================================
@@ -6082,6 +6224,82 @@ class SYMBION:
         except Exception as ex:
             logger.error(f"[req={request_id}] self-eval bg: {ex}")
 
+    # -- Technique promotion (high-fidelity move retention) ---------------
+
+    async def promote_last_turn(self, session: str,
+                                  user_text: str = "") -> Dict:
+        """Promote the most recent (query, response) pair in `session` to
+        the `techniques` table. If `user_text` is non-empty, use it as
+        the move verbatim — the user knows what worked better than the
+        judge does. Otherwise ask the judge model to extract the move in
+        one sentence.
+
+        Returns {"ok": bool, "id": int, "move": str, "reason": str}.
+        """
+        try:
+            recent = self.memory.get_recent(session, n=10)
+        except Exception as ex:
+            return {"ok": False, "id": 0, "move": "", "reason": f"history fetch failed: {ex}"}
+        # Find the most recent assistant message and the user message that
+        # preceded it. Walk backwards through recent.
+        last_assistant_idx = -1
+        for i in range(len(recent) - 1, -1, -1):
+            if recent[i].get("role") == "assistant":
+                last_assistant_idx = i
+                break
+        if last_assistant_idx <= 0:
+            return {"ok": False, "id": 0, "move": "",
+                    "reason": "no recent assistant turn to promote"}
+        # Find the user message directly before it.
+        user_query = ""
+        for j in range(last_assistant_idx - 1, -1, -1):
+            if recent[j].get("role") == "user":
+                user_query = recent[j].get("content", "")
+                break
+        if not user_query:
+            return {"ok": False, "id": 0, "move": "",
+                    "reason": "no preceding user message found"}
+        response = recent[last_assistant_idx].get("content", "")
+
+        # Extract or accept the move text.
+        move = (user_text or "").strip()
+        if not move:
+            client = self._judge_active()
+            if isinstance(client, OfflineJudgeStub):
+                return {"ok": False, "id": 0, "move": "",
+                        "reason": "no LLM available to extract the move; pass explicit text after /promote"}
+            try:
+                raw = await client.chat_json(
+                    self._jmodel("self_eval"), MOVE_EXTRACT_SYSTEM,
+                    f"Query:\n{user_query}\n\nResponse:\n{response}", 0.1, 200)
+                parsed = _parse_json(raw, {"move": ""})
+                move = (parsed.get("move") or "").strip()
+            except Exception as ex:
+                return {"ok": False, "id": 0, "move": "",
+                        "reason": f"move extraction failed: {ex}"}
+            if not move:
+                return {"ok": False, "id": 0, "move": "",
+                        "reason": "the judge saw no replicable move in this turn; pass explicit text after /promote if you disagree"}
+
+        # Embed the technique so retrieval can score against future queries.
+        embedding: Optional[List[float]] = None
+        try:
+            embedding = await self.embeddings.embed(f"{user_query}\n{move}")
+        except Exception as ex:
+            logger.warning(f"technique embedding skipped: {ex}")
+
+        active_user = self._active_user(session)
+        evidence = response[:1500] if response else ""
+        try:
+            tid = self.memory.save_technique(
+                query=user_query, move=move, evidence=evidence,
+                session=session, user=active_user,
+                embedding=embedding, source="local")
+        except Exception as ex:
+            return {"ok": False, "id": 0, "move": move,
+                    "reason": f"save failed: {ex}"}
+        return {"ok": True, "id": tid, "move": move, "reason": ""}
+
     # -- Knowledge gap check ------------------------------
 
     async def _check_knowledge_gaps(self, query: str, response: str, session: str):
@@ -6954,6 +7172,45 @@ class SYMBION:
             for h in hist:
                 ts = (h.get("timestamp","") or "")[:10]
                 lines.append(f"  {ts}  {(h.get('summary') or h.get('event_type') or '')[:120]}")
+            return lines
+
+        if c_low.startswith("/promote"):
+            # /promote          — extract move via the judge
+            # /promote <text>   — use the text verbatim as the move
+            tail = c[len("/promote"):].strip()
+            try:
+                import asyncio as _aio
+                # web_command runs sync from inside FastAPI's async context;
+                # use create_task + wait_for-loop isn't right here. Build a
+                # fresh loop for this one-shot since we're in a sync method.
+                try:
+                    loop = _aio.get_event_loop()
+                    if loop.is_running():
+                        # Re-entrant: schedule on the running loop, block via thread.
+                        import concurrent.futures
+                        fut = _aio.run_coroutine_threadsafe(
+                            self.promote_last_turn(session, tail), loop)
+                        result = fut.result(timeout=15)
+                    else:
+                        result = loop.run_until_complete(
+                            self.promote_last_turn(session, tail))
+                except RuntimeError:
+                    result = _aio.run(self.promote_last_turn(session, tail))
+            except Exception as ex:
+                return [f"Promote failed: {type(ex).__name__}: {ex}"]
+            if result["ok"]:
+                return [f"OK Technique #{result['id']} saved:", f"  {result['move']}"]
+            return [f"Skipped: {result['reason']}"]
+
+        if c_low == "/techniques":
+            techs = self.memory.list_techniques(user=user, limit=20)
+            if not techs:
+                return [f"No techniques saved yet for {user}. Use /promote after a useful turn."]
+            lines = [f"Techniques for {user} (newest first):"]
+            for t in techs:
+                src = "shared" if t["source"] == "shared" else "local"
+                ts  = (t["ts"] or "")[:10]
+                lines.append(f"  [{t['id']}] {ts} ({src}) {t['move'][:120]}")
             return lines
 
         if c_low == "/gaps":
@@ -8559,6 +8816,32 @@ def run_terminal(symbion: "SYMBION"):
         elif raw.startswith("/task-abandon"):
             parts=raw.split(); tid=int(parts[1]) if len(parts)>1 else 0
             symbion.tasks.abandon(tid); print(green("  OK Task abandoned."))
+        elif raw.startswith("/promote"):
+            # /promote                       — extract move via LLM
+            # /promote <free-text move>      — use this text verbatim
+            user_text = raw[len("/promote"):].strip()
+            try:
+                result = asyncio.run(symbion.promote_last_turn(session, user_text))
+            except Exception as ex:
+                print(red(f"  Promote failed: {type(ex).__name__}: {ex}"))
+            else:
+                if result["ok"]:
+                    print(green(f"  OK Technique #{result['id']} saved:"))
+                    print(f"     {dim(result['move'])}")
+                else:
+                    print(yellow(f"  Skipped: {result['reason']}"))
+        elif raw=="/techniques":
+            user = symbion._active_user(session)
+            techs = symbion.memory.list_techniques(user=user, limit=20)
+            if not techs:
+                print(dim(f"  No techniques saved yet for {user}. Use /promote after a useful turn."))
+            else:
+                print()
+                for t in techs:
+                    src = "local" if t["source"] == "local" else "shared"
+                    ts  = (t["ts"] or "")[:10]
+                    print(f"  [{t['id']}] {dim(ts)} {dim('('+src+')'):<10} {cyan(t['move'][:100])}")
+                print()
         elif raw=="/gaps":
             gaps=symbion.gaps.get_open()
             if not gaps: print(dim("  No open knowledge gaps."))
