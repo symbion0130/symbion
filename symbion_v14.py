@@ -272,6 +272,32 @@ class SymbionConfig:
     hf_router_model:          str = "deepseek-ai/DeepSeek-V4-Pro:novita"
     hf_router_base_url:       str = "https://router.huggingface.co/v1"
 
+    # Groq: hardware-accelerated inference for open-weights models. Same
+    # weight families as Ollama can run locally, but at 500-1500 tok/s on
+    # Groq's LPU hardware vs 5-20 tok/s on consumer GPUs. Fourth pair
+    # sibling to Anthropic / Moonshot / Ollama.
+    #
+    # Verified defaults (Groq /v1/models, 2026-05-23):
+    #   responder: llama-3.3-70b-versatile  (chat-tuned, no reasoning complication)
+    #   judge:     llama-3.1-8b-instant     (cheap structured-JSON classifier)
+    #
+    # Why not Qwen 3 32B (the available Qwen on Groq today): Qwen 3 has
+    # thinking mode baked into its chat template. Without
+    # `reasoning_effort: 'none'` it emits <think>...</think> blocks that
+    # eat max_tokens and leak markup into responses. With it, quality
+    # drops noticeably because the model is running outside its trained
+    # mode. Llama 3.3 70B has none of these issues, is larger, and is
+    # one of Groq's most stable models. GroqClient honors
+    # `reasoning_effort` for Qwen 3 anyway via _eff_reasoning() below,
+    # so swapping in `qwen/qwen3-32b` via symbion.json works clean.
+    #
+    # Lineup shifts; re-verify with
+    # `curl https://api.groq.com/openai/v1/models -H "Authorization: Bearer $KEY"`.
+    groq_api_key:             str = field(default_factory=lambda: os.getenv("GROQ_API_KEY",""))
+    groq_responder_model:     str = "llama-3.3-70b-versatile"
+    groq_judge_model:         str = "llama-3.1-8b-instant"
+    groq_base_url:            str = "https://api.groq.com/openai/v1"
+
     # DeepSeek direct: bypasses the HF Router middleman, usually cheaper for
     # the same DeepSeek model and lower latency (no router hop).
     # HARD-WIRED as the escalation BACKUP when DEEPSEEK_API_KEY is set —
@@ -2198,6 +2224,97 @@ class DeepSeekClient(OpenAIClient):
         self.cfg     = cfg
         self._url    = base_url.rstrip("/") + "/chat/completions"
         self.cb      = CircuitBreaker("deepseek", cfg.circuit_open_after)
+
+
+class GroqClient(OpenAIClient):
+    """Groq Cloud — hardware-accelerated inference for open-weights models.
+    OpenAI-compatible API at api.groq.com/openai/v1. Same Qwen / Llama /
+    Mixtral / DeepSeek weights you can run on Ollama, but at 500-1500 tok/s
+    on Groq's LPU hardware vs 5-20 tok/s on consumer GPUs.
+
+    Symbion's 'fourth pair' alongside Anthropic / Moonshot / Ollama —
+    targeted at the case where you want open-weights privacy properties +
+    cloud-speed latency, paying per-token instead of per-watt.
+
+    chat_text / chat_json / stream / describe_image inherited from
+    OpenAIClient verbatim (wire format is identical). Drops
+    response_format={"type":"json_object"} via the chat_json override
+    below because not every Groq-hosted model supports JSON mode and a
+    rejected field fails the whole request — same approach
+    HFRouterClient uses for the same reason.
+
+    supports_tools stays False; Groq's hosted models don't expose
+    Anthropic-style native tool use, so the agent loop falls back to
+    single-shot tool dispatch when this client is the responder.
+    """
+    def __init__(self, api_key: str, model: str, cfg: SymbionConfig,
+                 base_url: str = "https://api.groq.com/openai/v1"):
+        self.api_key = api_key
+        self.model   = model
+        self.cfg     = cfg
+        self._url    = base_url.rstrip("/") + "/chat/completions"
+        self.cb      = CircuitBreaker("groq", cfg.circuit_open_after)
+
+    def _eff_reasoning(self, model: str) -> dict:
+        """Qwen 3 ships with thinking-mode in its chat template. Without
+        an opt-out, every response opens with <think>...</think> blocks
+        that consume the max_tokens budget and leak markup. Adding
+        `reasoning_effort: 'none'` to the request body disables the
+        thinking pass for Groq-hosted reasoning models. Returns {} for
+        non-reasoning models so the param is omitted (some models reject
+        unrecognized fields)."""
+        m = (model or self.model or "").lower()
+        if "qwen3" in m or "qwen-3" in m:
+            return {"reasoning_effort": "none"}
+        return {}
+
+    async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
+        async def _call():
+            m = model or self.model
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model": m,
+                    "max_tokens": max_tokens, "temperature": temp,
+                    "messages":[{"role":"system","content":system},
+                                {"role":"user","content":user}],
+                    **self._eff_reasoning(m)})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
+        async def _call():
+            m = model or self.model
+            async with httpx.AsyncClient(timeout=90) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model": m,
+                    "max_tokens": max_tokens, "temperature": temp,
+                    "messages": messages,
+                    **self._eff_reasoning(m)})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
+        m = model or self.model
+        body = {"model": m,
+                "max_tokens": cfg.max_tokens, "temperature": cfg.temperature,
+                "messages": messages, "stream": True,
+                **self._eff_reasoning(m)}
+        async with httpx.AsyncClient(timeout=180) as c:
+            async with c.stream("POST", self._url, headers=self._h(), json=body) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "): continue
+                    data = line[6:]
+                    if data == "[DONE]": break
+                    try:
+                        chunk = json.loads(data)
+                        tok = chunk["choices"][0].get("delta", {}).get("content", "")
+                        if tok:
+                            yield tok
+                    except (json.JSONDecodeError, KeyError):
+                        continue
 
 
 class OfflineJudgeStub(BaseClient):
@@ -5872,6 +5989,9 @@ class SYMBION:
         if provider == "deepseek" and self.cfg.deepseek_api_key:
             return DeepSeekClient(self.cfg.deepseek_api_key, self.cfg.deepseek_model,
                                   self.cfg, base_url=self.cfg.deepseek_base_url)
+        if provider == "groq" and self.cfg.groq_api_key:
+            return GroqClient(self.cfg.groq_api_key, self.cfg.groq_responder_model,
+                              self.cfg, base_url=self.cfg.groq_base_url)
         if provider == "ollama":
             c = OllamaClient(self.cfg.ollama_host, self.cfg)
             if c.is_available(): return c
@@ -6210,6 +6330,15 @@ class SYMBION:
                 override = getattr(self.cfg, f"ollama_{role}_model", "") or ""
                 if override: return override
             return self.cfg.ollama_judge_model or self.cfg.judge_model
+        if p == "groq":
+            # Groq pair (fourth sibling): hardware-accelerated open-weights
+            # inference. Same Qwen/Llama weights as Ollama can run, but at
+            # cloud-speed latency. Per-role overrides via cfg.groq_<role>_model
+            # honored if set.
+            if role:
+                override = getattr(self.cfg, f"groq_{role}_model", "") or ""
+                if override: return override
+            return self.cfg.groq_judge_model
         if p == "openai":              return self.cfg.openai_model
         if p == "hf_router":           return self.cfg.hf_router_model
         if p == "deepseek":            return self.cfg.deepseek_model
@@ -6221,6 +6350,7 @@ class SYMBION:
         if self.cfg.llm_provider == "kimi":      return self.cfg.kimi_model
         if self.cfg.llm_provider == "ollama":
             return self.cfg.ollama_responder_model or self.cfg.responder_model
+        if self.cfg.llm_provider == "groq":      return self.cfg.groq_responder_model
         if self.cfg.llm_provider == "openai":    return self.cfg.openai_model
         if self.cfg.llm_provider == "hf_router": return self.cfg.hf_router_model
         if self.cfg.llm_provider == "deepseek":  return self.cfg.deepseek_model
@@ -9856,7 +9986,7 @@ Examples:
     parser.add_argument("--setup",            action="store_true",  help="Guided setup (Windows-safe .env writer)")
     parser.add_argument("--web",              action="store_true",  help="Launch web UI + REST API")
     parser.add_argument("--kill",             action="store_true",  help="Stop a running --web server (POSTs /api/shutdown to localhost:port)")
-    parser.add_argument("--provider",         default=None,         choices=["ollama","anthropic","openai","kimi","hf_router","deepseek"])
+    parser.add_argument("--provider",         default=None,         choices=["ollama","anthropic","openai","kimi","hf_router","deepseek","groq"])
     parser.add_argument("--host",             default=None)
     parser.add_argument("--port",             type=int,default=None)
     parser.add_argument("--judge",            default=None)
