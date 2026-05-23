@@ -9154,6 +9154,12 @@ HELP_TEXT = f"""
     /voice-test       run voice-tone queries
     /provider <kimi|anthropic>
                       switch responder provider at runtime
+    /update           check for updates from GitHub. If behind, prompts to
+                      pull, then tells you how to apply (/quit + relaunch
+                      for Python changes; install-electron-app.ps1 -Force
+                      separately if the Electron app was also updated).
+                      Same workflow as the Electron tray "Check for
+                      updates..." menu entry.
     /escalate         force the NEXT turn to use the stronger Anthropic model
                       (Opus 4.7 by default) — costs more, use for medical/
                       clinical, multi-source synthesis, or hard reasoning
@@ -9645,6 +9651,71 @@ def run_terminal(symbion: "SYMBION"):
             else:
                 print(green(f"  OK Sync against {res['path']}: "
                              f"+{res['imported']} imported, +{res['exported']} exported"))
+
+        elif raw=="/update":
+            # Pull latest from GitHub. Companion to the Electron tray's
+            # "Check for updates..." entry -- same workflow, terminal UX:
+            # fetch, compare HEAD..origin/main, prompt, pull --ff-only,
+            # detect electron/ changes, tell user how to apply.
+            #
+            # Can't restart the current process from inside the running
+            # process meaningfully, so we just tell the user to /quit
+            # and relaunch. If the update touched electron/, we also
+            # surface the rebuild command (must be run separately because
+            # this Python process is the running backend).
+            import subprocess as _u_subp
+            try:
+                print(dim("  Checking for updates..."))
+                r = _u_subp.run(["git","fetch","origin","main"], cwd=str(_REPO_ROOT),
+                                capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    print(red(f"  git fetch failed: {(r.stderr or '').strip()}"))
+                    print(dim(f"  Manual recovery: cd {_REPO_ROOT}; git fetch origin main"))
+                else:
+                    r = _u_subp.run(["git","rev-list","HEAD..origin/main","--count"],
+                                    cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=10)
+                    behind = int((r.stdout or "0").strip() or "0")
+                    if behind == 0:
+                        print(green(f"  You're on the latest version "
+                                    f"(v14.0+{_resolve_build_hash()})."))
+                    else:
+                        plural = "" if behind == 1 else "s"
+                        print(yellow(f"  {behind} commit{plural} available since your version."))
+                        ans = input(amber("  Apply update? [Y/n]: ")).strip().lower()
+                        if ans and ans not in {"y", "yes"}:
+                            print(dim("  Update cancelled."))
+                        else:
+                            old_head = _u_subp.run(["git","rev-parse","HEAD"], cwd=str(_REPO_ROOT),
+                                                    capture_output=True, text=True, timeout=5).stdout.strip()
+                            r = _u_subp.run(["git","pull","--ff-only","origin","main"],
+                                            cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=60)
+                            if r.returncode != 0:
+                                print(red(f"  git pull failed: {(r.stderr or '').strip()}"))
+                                print(dim("  Likely cause: uncommitted local changes."))
+                                print(dim(f"  Try: cd {_REPO_ROOT}; git stash; git pull origin main"))
+                            else:
+                                new_head = _u_subp.run(["git","rev-parse","HEAD"], cwd=str(_REPO_ROOT),
+                                                        capture_output=True, text=True, timeout=5).stdout.strip()
+                                diff = _u_subp.run(["git","diff","--name-only",f"{old_head}..{new_head}"],
+                                                    cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=10).stdout
+                                _electron_changed = any(
+                                    (line.startswith("electron/") and
+                                     any(line.endswith(s) for s in [".js","package.json","package-lock.json"]))
+                                    for line in (diff or "").splitlines())
+                                print(green(f"  OK Pulled {behind} commit{plural}."))
+                                print(dim(f"     {old_head[:7]} -> {new_head[:7]}"))
+                                print()
+                                print(yellow("  To apply the update:"))
+                                print(yellow("    1. Type /quit to exit Symbion"))
+                                print(yellow("    2. Run 'symbion' again (or relaunch Symbion.exe)"))
+                                if _electron_changed:
+                                    print()
+                                    print(yellow("  This update also touches the Electron desktop app."))
+                                    print(yellow("  To rebuild it (~3 min):"))
+                                    print(yellow(f"    cd {_REPO_ROOT}"))
+                                    print(yellow("    .\\scripts\\install-electron-app.ps1 -Force"))
+            except Exception as _ex:
+                print(red(f"  Update failed: {type(_ex).__name__}: {_ex}"))
         elif raw=="/gaps":
             gaps=symbion.gaps.get_open()
             if not gaps: print(dim("  No open knowledge gaps."))
