@@ -734,8 +734,23 @@ If you do: {"has_message": true, "message": "...", "reason": "why this matters n
 
 Don't manufacture reasons. If there's nothing worth saying, say so."""
 
-SUMMARISE_SYSTEM = """Summarise this conversation in 3-4 sentences. Capture main topics/conclusions,
-tone and dynamic, key facts about the human. Third person. Concise."""
+SUMMARISE_SYSTEM = """Summarise this conversation in 3-5 sentences, third person, concise.
+
+PRIORITIZE THE MOVE THAT WORKED, not just the topic. If the conversation
+turned a corner — a reframe, a pivot, a question that broke the loop, an
+analogy that made something click — name THAT specifically and what
+preceded it. The point of this summary is to make the technique
+replicable next time, not just to log that a topic was discussed.
+
+Capture, in roughly this order of importance:
+  1. The move / technique / reframe (if any). What turned the corner.
+     Be specific — "asked X which surfaced Y" beats "discussed X".
+  2. Concrete conclusions or decisions reached.
+  3. Key facts about the human worth carrying forward.
+  4. Tone / dynamic, only if it shifted meaningfully.
+
+If there was no move worth replicating — just normal Q&A or chat —
+say so plainly. Don't manufacture insight that wasn't there."""
 
 CONSOLIDATE_SYSTEM = """Merge these N summaries of past Symbion sessions into ONE consolidated
 summary. They were grouped because they're semantically similar — likely the same recurring
