@@ -329,7 +329,7 @@ function buildTrayMenu(health) {
     { label: status, enabled: false },
     { type: 'separator' },
     { label: 'Open Symbion',  click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else { createWindow(); } } },
-    { label: 'Open analytics', click: () => shell.openExternal(`${UI_URL}analytics?suggest=1`) },
+    { label: 'Open analytics', click: () => openAnalyticsWindow() },
     { type: 'separator' },
     { label: 'Quit Symbion',  click: () => { app.isQuitting = true; app.quit(); } },
   ]);
@@ -366,6 +366,89 @@ function updateTrayFromHealth(health) {
     }
   }
   lastTrayFailures = fails;
+}
+
+// Open the /analytics route in a managed BrowserWindow. The route is
+// gated by X-API-Key auth (same as /api/chat), and a plain
+// shell.openExternal() opens the default browser which doesn't send
+// the header — that's the "invalid api key" symptom users hit when
+// clicking 'Open analytics' from the tray menu. Inject the key via
+// webRequest.onBeforeSendHeaders so the URL stays clean (no key in
+// query params, no key in browser history, no key in server access
+// logs). Reads symbion.json directly each call so a rotated key
+// takes effect without restarting Electron.
+let analyticsWindow = null;
+
+function openAnalyticsWindow() {
+  // Focus the existing window if it's already open instead of stacking.
+  if (analyticsWindow && !analyticsWindow.isDestroyed()) {
+    if (analyticsWindow.isMinimized()) analyticsWindow.restore();
+    analyticsWindow.focus();
+    return;
+  }
+  // Re-read symbion.json (and .env fallback) per click so key rotations
+  // don't require an Electron restart. cfg is module-level and stale
+  // after the user rotates a key in symbion.json.
+  let apiKey = '';
+  try {
+    const freshCfg = loadConfig();
+    apiKey = (freshCfg.api_key || '').trim();
+  } catch (e) {}
+  if (!apiKey) {
+    // Fallback: pull from .env (SYMBION_API_KEY=...)
+    try {
+      const envPath = path.join(REPO_ROOT || '', '.env');
+      if (envPath && fs.existsSync(envPath)) {
+        const raw = fs.readFileSync(envPath, 'utf8');
+        const m = raw.match(/^SYMBION_API_KEY\s*=\s*(.+?)\s*$/m);
+        if (m) apiKey = m[1].replace(/^["']|["']$/g, '').trim();
+      }
+    } catch (e) {}
+  }
+
+  analyticsWindow = new BrowserWindow({
+    width: 1024,
+    height: 720,
+    minWidth: 600,
+    minHeight: 400,
+    backgroundColor: '#0c0a08',
+    title: 'Symbion analytics',
+    icon: path.join(__dirname, 'assets',
+      process.platform === 'win32' ? 'symbion.ico' :
+      process.platform === 'darwin' ? 'symbion.icns' : 'symbion-512.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    autoHideMenuBar: true,
+  });
+
+  // Inject X-API-Key on every request from this window's session. Scope
+  // to JUST this window's session (defaultSession would affect every
+  // BrowserWindow) — analytics auth shouldn't leak into the main chat
+  // window's network requests.
+  if (apiKey) {
+    analyticsWindow.webContents.session.webRequest.onBeforeSendHeaders(
+      { urls: [`${UI_URL}*`] },
+      (details, callback) => {
+        details.requestHeaders['X-API-Key'] = apiKey;
+        callback({ requestHeaders: details.requestHeaders });
+      });
+  } else {
+    // No key resolvable — show a clear in-page error rather than the
+    // server's 401 page (which is opaque about why).
+    analyticsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(
+      `<html><body style="background:#0c0a08;color:#eee;font-family:sans-serif;padding:2rem">
+       <h1 style="color:#ffd089">Symbion analytics — no API key</h1>
+       <p>Couldn't resolve SYMBION_API_KEY from symbion.json or .env.</p>
+       <p>Add <code>api_key</code> to symbion.json or <code>SYMBION_API_KEY=...</code> to .env, then restart Symbion.</p>
+       </body></html>`)}`);
+    analyticsWindow.on('closed', () => { analyticsWindow = null; });
+    return;
+  }
+
+  analyticsWindow.loadURL(`${UI_URL}analytics?suggest=1`);
+  analyticsWindow.on('closed', () => { analyticsWindow = null; });
 }
 
 function startTray() {
