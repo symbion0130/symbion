@@ -97,6 +97,11 @@ let backendDied = false;  // gets set when the child exits unexpectedly
 // backend then fails to bind to PORT and Symbion appears "broken".
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
+  // Lock is held by another Symbion / installed Symbion.exe — exit
+  // silently. The other instance's 'second-instance' handler will
+  // focus its window if it has one. Stale lockfiles in %APPDATA%\
+  // symbion-app\ from a crashed prior run can cause this too;
+  // delete %APPDATA%\symbion-app\lockfile to recover.
   app.quit();
 } else {
   app.on('second-instance', () => {
