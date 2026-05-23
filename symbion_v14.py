@@ -8034,6 +8034,59 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             **_health_dict(),
         })
 
+    @app.get("/analytics")
+    async def analytics_route(request: Request):
+        """Render scripts/analytics.py's report as HTML. Query params:
+          since=7d/24h/30m   (default 7d)
+          suggest=1          (include threshold-fired suggestions)
+          session=PREFIX     (filter by session prefix)
+          format=json        (raw JSON instead of HTML)
+        Same auth gate as /api/chat — X-API-Key required when configured.
+        """
+        _auth(request); _rate(request)
+        # Lazy import so a broken analytics module never blocks app boot.
+        try:
+            import importlib.util as _ilu
+            spec = _ilu.spec_from_file_location(
+                "_symbion_analytics",
+                str(_REPO_ROOT / "scripts" / "analytics.py"))
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as ex:
+            return HTMLResponse(
+                f"<h1>Analytics unavailable</h1><p>{type(ex).__name__}: {ex}</p>",
+                status_code=503)
+
+        q = request.query_params
+        since_s = q.get("since", "7d")
+        suggest = q.get("suggest", "").lower() in ("1", "true", "yes")
+        session_filter = q.get("session") or None
+        fmt = q.get("format", "html").lower()
+        try:
+            since = mod._parse_since(since_s)
+        except ValueError as ex:
+            return HTMLResponse(f"<h1>Bad request</h1><p>{ex}</p>", status_code=400)
+
+        events = mod.load_events(since, session_filter=session_filter)
+        # Open DB read-only — analytics never mutates.
+        import sqlite3 as _sql
+        db_path = str(_anchor(symbion.cfg.db_path))
+        db = _sql.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            report_md, triggers = mod.build_report(events, db, since, suggest=suggest)
+        finally:
+            db.close()
+
+        if fmt == "json":
+            return JSONResponse({"report_md": report_md,
+                                 "triggers": triggers,
+                                 "since": since.isoformat(),
+                                 "turn_count": len(events)})
+        html_doc = mod.render_html(
+            report_md,
+            title=f"Symbion analytics — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        return HTMLResponse(html_doc)
+
     # Caps for /api/chat. Starlette buffers the whole request body in
     # memory; without a cap a large POST is a large allocation that then
     # flows into retrieval/logging/model prompts. 1MB is well above any

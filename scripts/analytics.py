@@ -704,6 +704,121 @@ def build_report(events: List[Dict], db: sqlite3.Connection,
 # Notification helpers (shared with the in-process watcher)
 # ============================================================================
 
+def render_html(report_md: str, *, title: str = "Symbion analytics") -> str:
+    """Minimal markdown → HTML for the analytics report. Handles only the
+    patterns build_report() emits — headers, **bold**, `code`, tables,
+    bulleted lists, numbered items, blockquotes. Not general-purpose.
+
+    Used by the web `/analytics` route. Kept here (not in symbion_v14.py)
+    so the analytics CLI can offer `--out report.html` later without
+    duplicating the rendering logic.
+    """
+    import html
+    rows: List[str] = report_md.split("\n")
+    out: List[str] = []
+    in_table = False
+    table_rows: List[str] = []
+    in_list = False
+
+    def inline(s: str) -> str:
+        # Order matters: code first (its content is then NOT bolded), bold
+        # before italics (since ** is `*` repeated).
+        s = re.sub(r"`([^`]+)`", lambda m: f"<code>{html.escape(m.group(1))}</code>", s)
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+        return s
+
+    def flush_table() -> None:
+        nonlocal table_rows
+        if not table_rows:
+            return
+        if len(table_rows) < 2:
+            for r in table_rows:
+                out.append(f"<p>{inline(html.escape(r))}</p>")
+            table_rows = []
+            return
+        header = [c.strip() for c in table_rows[0].strip("|").split("|")]
+        body_rows = []
+        for r in table_rows[2:]:  # skip the separator row
+            cells = [c.strip() for c in r.strip("|").split("|")]
+            body_rows.append(cells)
+        h_html = "".join(f"<th>{inline(html.escape(c))}</th>" for c in header)
+        b_html = "".join(
+            "<tr>" + "".join(f"<td>{inline(html.escape(c))}</td>" for c in r) + "</tr>"
+            for r in body_rows)
+        out.append(f"<table><thead><tr>{h_html}</tr></thead>"
+                    f"<tbody>{b_html}</tbody></table>")
+        table_rows = []
+
+    def flush_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for ln in rows:
+        if ln.startswith("|"):
+            flush_list()
+            in_table = True
+            table_rows.append(ln)
+            continue
+        elif in_table:
+            flush_table()
+            in_table = False
+
+        stripped = ln.lstrip()
+        if ln.startswith("### "):
+            flush_list(); out.append(f"<h3>{inline(html.escape(ln[4:]))}</h3>")
+        elif ln.startswith("## "):
+            flush_list(); out.append(f"<h2>{inline(html.escape(ln[3:]))}</h2>")
+        elif ln.startswith("# "):
+            flush_list(); out.append(f"<h1>{inline(html.escape(ln[2:]))}</h1>")
+        elif stripped.startswith("- "):
+            if not in_list:
+                out.append("<ul>"); in_list = True
+            out.append(f"<li>{inline(html.escape(stripped[2:]))}</li>")
+        elif stripped.startswith("> "):
+            flush_list()
+            out.append(f"<blockquote>{inline(html.escape(stripped[2:]))}</blockquote>")
+        elif re.match(r"^\d+\.\s", stripped):
+            flush_list()
+            out.append(f"<p class='numbered'>{inline(html.escape(stripped))}</p>")
+        elif stripped == "":
+            flush_list()
+        else:
+            flush_list()
+            out.append(f"<p>{inline(html.escape(ln))}</p>")
+    flush_table(); flush_list()
+
+    body = "\n".join(out)
+    style = """
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              max-width: 960px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.5;
+              background: #0c0a08; color: #eee; }
+      h1, h2, h3 { color: #ffd089; margin-top: 1.5em; }
+      h1 { border-bottom: 1px solid #444; padding-bottom: 0.3em; }
+      h2 { border-bottom: 1px solid #333; padding-bottom: 0.2em; }
+      code { background: #222; padding: 0.1em 0.35em; border-radius: 3px;
+             font-family: 'SF Mono', Consolas, monospace; font-size: 0.9em; }
+      table { border-collapse: collapse; margin: 0.5em 0 1em 0; width: 100%; }
+      th, td { border: 1px solid #333; padding: 0.4em 0.7em; text-align: left; }
+      th { background: #1a1a1a; }
+      blockquote { border-left: 3px solid #ffd089; padding: 0.5em 1em; margin: 1em 0;
+                    background: #161410; color: #ccc; font-style: italic; }
+      ul { padding-left: 1.5em; }
+      .numbered { margin: 0.4em 0 0.4em 1.5em; }
+      strong { color: #ffd089; }
+    """
+    return (
+        "<!doctype html><html lang='en'><head>"
+        "<meta charset='utf-8'>"
+        f"<title>{html.escape(title)}</title>"
+        f"<style>{style}</style>"
+        "</head><body>"
+        f"{body}"
+        "</body></html>"
+    )
+
+
 def post_to_slack(webhook_url: str, text: str,
                    timeout: float = 5.0) -> Tuple[bool, str]:
     """POST a simple text payload to a Slack incoming webhook. Returns
