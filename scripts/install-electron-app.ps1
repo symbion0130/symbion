@@ -119,13 +119,25 @@ if ((Test-Path $nodeModules) -and (Test-Path $pkgLock)) {
 if ($needInstall) {
     Write-Section "npm install in electron/"
     Push-Location $electronDir
+    # PowerShell 5.1 wraps native-executable stderr as NativeCommandError
+    # records when $ErrorActionPreference='Stop' is in scope — and that
+    # preference propagates INTO npm.ps1 (the shim), where its own internal
+    # `& node.exe ...` invocation then terminates on the first deprecation
+    # warning npm emits. Lowering preference to 'Continue' for just the
+    # npm call lets warnings flow through without crashing the script.
+    # $LASTEXITCODE remains the source of truth for actual failure.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        & npm install --no-audit --no-fund 2>&1 | Out-Host
+        & npm install --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) {
             Write-Host "npm install failed (exit $LASTEXITCODE)." -ForegroundColor Red
             exit 1
         }
-    } finally { Pop-Location }
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Pop-Location
+    }
 }
 
 # ------------------------------------------------------------------------
@@ -167,13 +179,20 @@ if ((Test-Path $installer) -and -not $Force) {
 if ($needBuild) {
     Write-Section "npm run build:win"
     Push-Location $electronDir
+    # Same NativeCommandError-via-Stop-preference pitfall as npm install
+    # above. electron-builder also emits deprecation/info to stderr.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        & npm run build:win 2>&1 | Out-Host
+        & npm run build:win
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
             exit 1
         }
-    } finally { Pop-Location }
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Pop-Location
+    }
 }
 
 if (-not (Test-Path $installer)) {
