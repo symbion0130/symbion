@@ -312,9 +312,16 @@ Entry point              main()
        end_turn or max_iterations (default 8).
      - Single-shot: existing resp_client.stream() path. Optional CoT wrap.
 5. Stale-draft fallback — single-shot only.
-6. Self-eval — FIRE-AND-FORGET (2026-05-21). Runs in parallel with response
-   delivery instead of blocking it; saves 2-3s/turn on substantive responses.
-   Revision still triggers when score < 0.40, with a max of one revision.
+6. Self-eval — FIRE-AND-FORGET (2026-05-21). `_self_eval_bg` runs in parallel
+   with response delivery instead of blocking it; saves 2-3s/turn on substantive
+   responses. **Revision was intentionally dropped** at the same time (fired
+   ~0/50 turns in samples — the latency cost wasn't paying off). Self-eval is
+   now pure telemetry: scores still populate `HealthMetrics.last_self_eval_confidence`
+   and a `would-have-revised` line lands in the log when `score < 0.40`, but no
+   user-visible revision occurs. To reintroduce revision, the path is the
+   streaming `[SYMBION_REVISE]` sentinel + client-side replace (see the
+   `[SYMBION_REVISE]` handlers still in place at lines 8910 + 9852 for the
+   terminal/web sides).
 7. Background tasks (fire-and-forget) — summarise, profile update,
      knowledge gap check, identity moment recording
 8. Health + learn — HealthMetrics.record(), SymbionLearner.record()
