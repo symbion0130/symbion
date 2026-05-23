@@ -210,6 +210,29 @@ Groq was added to Worker injection on 2026-05-23 to make the auto-fallback (`cfg
 
 **Storage architecture: D:\ is the soul, machines are bodies.** The portable `D:\symbion` drive carries Symbion's identity (code, `symbion.db`, logs, `.env`, conversation history). Local `%USERPROFILE%\symbion` on any specific machine is just a fast NTFS workspace mirroring D:\ for the duration of a work session. The Yoga, the Surface, any future machine: interchangeable hardware whose role is to provide compute. Plug in D:\, sync local from it, work, and the post-commit hook keeps D:\ updated as you commit.
 
+**OneDrive cross-instance state sync (independent of D:\).** Symbion ALSO syncs conversation state via OneDrive — this predates the D:\ portable workflow and runs in parallel. `scripts/sync.py` handles it; the atexit hook registered in `main()` (line 10175ish in `symbion_v14.py`) auto-fires `sync.py push` on every clean Symbion exit (Ctrl+C / `/quit` / uvicorn shutdown). On Symbion startup, `sync.py pull` pulls fresh state if OneDrive has a newer copy. The result: history "just appears" on a new machine that's signed into the same Microsoft account, with no D:\ involvement needed.
+
+What OneDrive syncs (lives at `%OneDrive%\Symbion\sync\`):
+- `symbion.db` — conversation history, summaries, identity moments, techniques
+- `symbion_events.jsonl` — append-only telemetry
+- `symbion_transparency.log` — append-only audit log
+- `session.lock` — JSON `{machine, started, pid}` that marks which machine currently owns the active session. Prevents two machines from writing the DB simultaneously (which corrupts SQLite). `sync.py pull --force` takes over a stale lock; locks older than 24h are considered stale automatically.
+- `.env` and `.pat` — pushed by `scripts/push-env.ps1` (not by sync.py — separate mechanism, same OneDrive folder).
+- `shared_learnings.md` — techniques cross-instance sync (different code path again — see Technique pool section).
+
+What OneDrive does NOT sync (deliberately per-machine):
+- `symbion.json` (config — each machine may want different `llm_provider`, `electron_tray_enabled`, etc.)
+- `.python/` (portable Python — bootstraps per-machine)
+- `archive/` (legacy versions, large + machine-specific)
+- `electron/node_modules`, `electron/dist/win-unpacked`, `__pycache__/` (regen artifacts)
+
+**Pull-on-start / push-on-exit pattern** is deliberate: SQLite in WAL mode can't survive live cloud sync (would corrupt the DB during background writes). `sync.py push` first runs `PRAGMA wal_checkpoint(TRUNCATE)` to fold the WAL into the main `.db` file, then copies the consolidated `.db` to OneDrive atomically. Reverse on pull. Failure modes: refuses to push if local `symbion.db` is busy (another Symbion instance running on the same machine — `BEGIN IMMEDIATE` probe), refuses to pull if OneDrive isn't reachable (`%OneDrive%` env var unset or folder missing).
+
+**OneDrive sync vs. D:\ portable sync — they coexist, both are useful:**
+- **OneDrive** = passive, automatic, cloud-based, low-friction. Carries DB + logs only. Right tool when both machines are online + signed into the same MS account + just need conversation continuity. Triggered on Symbion's process lifecycle (start/exit).
+- **D:\** = physical, complete, offline-capable. Carries code + DB + logs + portable Python + pre-built installer + scripts. Right tool when seeding a brand-new machine, transferring offline, or wanting reproducible code state between machines. Triggered on git commit (via post-commit hook).
+- On a machine that has both: Symbion's startup pull picks the newer of OneDrive vs. local. D:\ contributes via the `sync-from-portable.ps1` workflow which seeds local from D:\, then Symbion starts and OneDrive sync layer takes over. Order: D:\ → local → OneDrive merge → ready.
+
 **Two-path install model.** Symbion reaches a new machine via either route — both are supported and produce a usable install:
 1. **Worker one-liner** (`irm <worker-url>?t=<token> \| iex`) → fetches `install.ps1` from GitHub → clones repo → bootstraps Python + Electron. Always pulls the latest committed code; needs no physical media; used for net-new machines. The 7 Cloudflare Secrets gate this path.
 2. **Portable D:\ drive** → plug in, run `D:\symbion\install.ps1` or `D:\symbion\electron\dist\Symbion Setup 0.1.0.exe` directly. No internet required for the install itself (keys + DB + logs travel with the drive). Used when you want offline transfer or to seed a machine with existing conversation history. **`scripts/sync-to-portable.ps1` is what keeps the D:\ mirror current** — auto-fired by the post-commit hook on every commit; run manually if D:\ wasn't mounted at commit time. D:\ is exFAT, so no symlink option exists; the scripts are the only sync mechanism.

@@ -1,6 +1,54 @@
 # Symbion setup guide
 
-How to go from a fresh machine to a running Symbion. Four paths depending on what you have on hand.
+How to go from a fresh machine to a running Symbion. Multiple paths depending on what you have on hand — but **conversation history travels automatically via OneDrive** regardless of which install path you use. See "Cross-machine sync" below.
+
+---
+
+## TL;DR fresh-machine setup
+
+| You have | Do this |
+|---|---|
+| New machine + internet + same MS account | Run the Worker one-liner. History auto-restores from OneDrive on first launch. |
+| New machine + D:\ portable drive | Plug D:\ in, double-click `D:\symbion\electron\dist\Symbion Setup 0.1.0.exe`. History travels with the drive AND auto-reconciles with OneDrive. |
+| Existing machine just needs a refresh | `%USERPROFILE%\symbion\scripts\install-web.cmd` |
+
+After install, **one-time per machine**: run `scripts\install-git-hooks.ps1` to wire up the post-commit hook that auto-syncs to D:\.
+
+---
+
+## Cross-machine sync: how your history travels
+
+Symbion has **two parallel sync mechanisms** — both are usually on at once. You don't have to think about either; they handle themselves. But knowing what's happening helps when something goes wrong.
+
+### Mechanism 1: OneDrive (automatic, cloud) — `scripts/sync.py`
+
+**Active by default if `%OneDrive%` env var is set on the machine.** Symbion auto-pulls state on startup, auto-pushes state on clean exit. No manual action needed.
+
+| What syncs (lives at `%OneDrive%\Symbion\sync\`) | What it carries |
+|---|---|
+| `symbion.db` | Full conversation history, summaries, identity moments, techniques |
+| `symbion_events.jsonl` | Append-only telemetry log |
+| `symbion_transparency.log` | Append-only audit log |
+| `session.lock` | Marks which machine currently owns the active session |
+| `.env` | API keys (pushed separately by `scripts/push-env.ps1`) |
+| `shared_learnings.md` | Cross-instance techniques (separate code path; see Technique pool in CLAUDE.md) |
+
+**What doesn't sync** (deliberately per-machine): `symbion.json`, `.python/`, `archive/`, `electron/node_modules`, `__pycache__`, anything regeneratable.
+
+**The session.lock matters.** Two machines running Symbion at the same time would corrupt the shared `symbion.db`. The lock prevents this: when machine A is running Symbion, OneDrive shows a lock with `{machine: "Yoga", started: ..., pid: ...}`. Machine B's startup sees the lock and refuses to take over. `python scripts/sync.py pull --force` takes over a stuck lock (locks older than 24h are considered stale automatically).
+
+### Mechanism 2: D:\ portable drive (physical, complete) — `scripts/sync-to-portable.ps1`
+
+**Active if `D:\symbion\` exists and you've set up the post-commit hook.** Carries the *full* repo + DB + logs + portable Python + pre-built installer. Mirrored to D:\ after every `git commit` via the post-commit hook installed by `scripts/install-git-hooks.ps1`.
+
+**Why this exists alongside OneDrive:** OneDrive only carries conversation state. D:\ carries the source code + portable Python + installer too, so a brand-new machine with no internet can boot Symbion directly from the drive. Also useful when you want a frozen, reproducible code snapshot you can carry.
+
+### Both mechanisms, when to think about each
+
+- **Day-to-day work, two-machine flow (Yoga and Surface, same account)**: OneDrive handles it. Open Symbion on machine A, work, exit. Open Symbion on machine B; your history is there. Don't think about D:\.
+- **Setting up a brand-new machine with internet**: Worker one-liner. OneDrive seeds history on first launch.
+- **Setting up an offline machine or seeding from frozen state**: D:\ portable drive. OneDrive will reconcile with the drive's DB on first launch.
+- **Code development across machines**: D:\ via the post-commit hook keeps the drive current. `sync-from-portable.ps1` pulls D:\ to local at the start of a session.
 
 ---
 
@@ -24,7 +72,9 @@ What it does, in order:
 
 1. **Clones the repo** to `%USERPROFILE%\symbion` (install git via winget first if missing — requires UAC approval one time).
 2. **Bootstraps portable Python** via `scripts\bootstrap-portable.bat` (~5 min, ~100 MB into `.python\`).
-3. **Seeds `.env`** with `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`, `SYMBION_API_KEY` from the Worker's injected secrets. (OneDrive seed, if synced, wins over Worker injection and provides Kimi/DeepSeek too.)
+3. **Seeds `.env`** with `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`, `SYMBION_API_KEY`, `GROQ_API_KEY`, `KIMI_API_KEY` from the Worker's injected secrets (5 keys as of 2026-05-23). (OneDrive seed, if synced via `push-env.ps1`, wins over Worker injection and additionally provides `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` if you've added them.)
+4. **Skips Ollama by default** (opt-in via `-WithOllama` flag — saves ~870 MB download). Cloud providers work without it.
+5. **Builds + silently installs the Electron desktop app** to `%LOCALAPPDATA%\Programs\Symbion\`.
 4. **Launches Symbion** in a new window via the `symbion` shim.
 
 `SYMBION_INSTALL_DIR` overrides the install directory if you want it somewhere other than `%USERPROFILE%\symbion`. Re-running on a machine that already has Symbion is safe — it does a `git pull` and skips already-installed Python deps.
@@ -107,13 +157,16 @@ python symbion_v14.py --provider anthropic   # terminal REPL
 Symbion needs **at least one** LLM provider. Keys go in `.env` (gitignored — never check them in). `--setup` walks you through it interactively, or write the file manually:
 
 ```ini
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-KIMI_API_KEY=...
-BRAVE_API_KEY=...        # optional, for higher-quality web_search
+ANTHROPIC_API_KEY=sk-ant-...        # primary responder + judge (Sonnet 4.6 + Haiku 4.5)
+GROQ_API_KEY=gsk_...                # auto-fallback when Anthropic 529s
+KIMI_API_KEY=...                    # Moonshot K2.6 (--provider kimi)
+BRAVE_API_KEY=...                   # optional, for higher-quality web_search
+OPENAI_API_KEY=sk-...               # optional, --provider openai
+DEEPSEEK_API_KEY=...                # optional, --provider deepseek
+SYMBION_API_KEY=...                 # auth between the web UI and the backend
 ```
 
-You don't need all of them. The default `symbion.json` ships with `llm_provider: anthropic`, so an Anthropic key alone is enough for the full stack (responder + judge both go through Anthropic — Sonnet 4.6 + Haiku 4.5).
+You don't need all of them. The default `symbion.json` ships with `llm_provider: anthropic` + `fallback_chain: ["groq"]`, so an Anthropic key alone is enough for the full stack, and adding a Groq key gives you auto-failover. The Worker one-liner injects the top 5 keys (Anthropic / Groq / Kimi / Brave / Symbion) automatically; OpenAI and DeepSeek are manual-add only.
 
 ---
 
@@ -171,7 +224,8 @@ Key fields with sensible defaults:
 
 | Field | Default | Notes |
 |---|---|---|
-| `llm_provider` | `"anthropic"` | `anthropic`, `openai`, `ollama`, `kimi`, `hf_router`, `deepseek` |
+| `llm_provider` | `"anthropic"` | `anthropic`, `groq`, `openai`, `ollama`, `kimi`, `hf_router`, `deepseek` |
+| `fallback_chain` | `["groq"]` (this install; default `[]`) | Providers tried in order when the primary's circuit breaker is open. In-chat italic notice prints when fallback fires. |
 | `anthropic_model` | `claude-sonnet-4-6` | Responder |
 | `anthropic_judge_model` | `claude-haiku-4-5-20251001` | Pre-gen judge, self-eval, profile, summarisation |
 | `max_tokens` | `8192` | Responder cap. Drop to `~4000` on Ollama models with smaller context |
