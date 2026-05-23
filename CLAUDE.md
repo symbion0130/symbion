@@ -203,6 +203,11 @@ Groq was added to Worker injection on 2026-05-23 to make the auto-fallback (`cfg
 | `scripts/install-ollama.ps1` | Install Ollama + pull `mistral`, `llama3.2`, `mxbai-embed-large`. `-SkipModels`, `-Models "a,b,c"`. |
 | `scripts/install-electron-app.ps1` | Winget-install Node.js LTS, `npm install` in `electron/`, `npm run build:win`, silent NSIS install. Idempotent across each phase. `-Force` rebuilds + reinstalls. Called by `install.ps1` Phase 2.6 unless `-SkipElectronApp` / `$env:SYMBION_SKIP_ELECTRON_APP`. |
 | `scripts/tailscale-https.ps1` | Tailscale serve/funnel wrapper for HTTPS on `*.ts.net`. Required for browser geolocation on non-localhost devices. |
+| `scripts/sync-to-portable.ps1` | Mirror the live repo to a portable destination (default `D:\symbion`). Loaded mode (default) includes portable Python + pre-built Symbion Setup .exe so the destination is plug-and-play on another Windows machine; `-Lean` strips both for a ~25 MB source-only mirror. `.env` included by default; pass `-ExcludeEnv` to strip keys. Uses `robocopy /MIR` so destination becomes an exact mirror of source minus exclusions (regeneratable: `node_modules`, `win-unpacked`, `__pycache__`; machine-specific: `_pastes`, `verify_artifacts`; personal: resume files; never: `ollama-models` which lives outside the repo). |
+
+**Two-path install model.** Symbion can reach a new machine via either route — both are supported and produce a usable install:
+1. **Worker one-liner** (`irm <worker-url>?t=<token> \| iex`) → fetches `install.ps1` from GitHub → clones repo → bootstraps Python + Electron. Always pulls the latest committed code; needs no physical media; used for net-new machines. The 7 Cloudflare Secrets gate this path.
+2. **Portable D:\ drive** → plug in, run `D:\symbion\install.ps1` or `D:\symbion\electron\dist\Symbion Setup 0.1.0.exe` directly. No internet required for the install itself (keys + DB + logs travel with the drive). Used when you want offline transfer or to seed a machine with existing conversation history. **`scripts/sync-to-portable.ps1` is what keeps the D:\ mirror current** — run it before each transfer. D:\ is exFAT, so no symlink option exists; the script is the only sync mechanism.
 
 **Edit constraints when touching install/deploy:**
 
