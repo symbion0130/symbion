@@ -5953,9 +5953,12 @@ class SYMBION:
             self.kimi_client = KimiClient(self.cfg.kimi_api_key, self.cfg.kimi_model,
                                           self.cfg.kimi_base_url, self.cfg)
 
-        if self.client and not isinstance(self.client, OfflineJudgeStub):
-            print(soft_green(f"  Provider  :  {self.cfg.llm_provider.upper()}  OK"))
-        else:
+        # Success case is silent (trimmed 2026-05-24 — terminal welcome
+        # was meant to be clean; the OK confirmation was noise). Only
+        # the OFFLINE-STUB fallback prints since that's an actionable
+        # degraded state the user needs to know about. /info exposes
+        # the provider on demand for anyone who wants confirmation.
+        if not (self.client and not isinstance(self.client, OfflineJudgeStub)):
             print(yellow("  Provider  :  OFFLINE-STUB (no LLM — judge disabled)"))
 
         # Same-model judge/responder warning: self-eval becomes circular when
