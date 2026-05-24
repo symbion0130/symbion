@@ -117,6 +117,10 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat{
   flex:1;overflow-y:auto;overflow-x:hidden;
   padding:1.5rem 1rem 1rem;
+  /* position:relative anchors the absolutely-positioned watermark below
+     so it sits inside the visible chat viewport (not the full scroll
+     height). */
+  position:relative;
   /* overscroll-behavior:contain stops iOS rubber-band from scrolling
      the BODY when the chat is at its top/bottom edge. Without this,
      overscrolling the chat at the top can pull the whole layout up
@@ -137,6 +141,30 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
      messages exist the column grows past 100% and #chat scrolls as
      usual; the min-height has no effect on populated chats. */
   min-height:100%;
+  /* z-index:1 keeps messages above the .chat-watermark (z-index:0) so
+     text always wins over the background mark. */
+  position:relative;z-index:1;
+}
+/* Background watermark: faint logo mark behind active conversation.
+   Hidden when no .msg.you yet (the empty-state's bright breathing mark
+   carries that moment); revealed once the user has typed at least one
+   message via the :has() rule below. Static — the text streaming and
+   the empty-state already carry the "alive" signal; this is brand
+   presence, not animation. Centered in the visible chat viewport
+   (position:absolute inside #chat which is position:relative), so it
+   doesn't scroll with the conversation. */
+.chat-watermark{
+  position:absolute;inset:0;
+  display:none;
+  align-items:center;justify-content:center;
+  pointer-events:none;
+  z-index:0;
+}
+#chat:has(.msg.you) .chat-watermark{display:flex}
+.chat-watermark svg{
+  width:280px;height:280px;
+  opacity:.055;
+  overflow:visible;
 }
 /* Empty state lives inside #chat-inner so it occupies the same column.
    Hidden as soon as the FIRST user message lands — not just any .msg,
@@ -218,7 +246,15 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 .msg-label{
   font-size:.7rem;font-weight:700;color:var(--sym);
   letter-spacing:.04em;text-transform:uppercase;
-  margin-bottom:.35rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;
+  margin-bottom:.35rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;
+}
+/* Tiny inline mark threads the logo through every Symbion message —
+   visually anchors the assistant's voice to the brand without adding
+   chrome. Warm drop-shadow matches the empty-state's breathing palette
+   so the cohesion reads even though this one is static. */
+.msg-mark{
+  width:14px;height:14px;flex-shrink:0;overflow:visible;
+  filter:drop-shadow(0 0 3px rgba(215,175,95,.55));
 }
 .msg-body{
   white-space:pre-wrap;word-break:break-word;
@@ -838,7 +874,24 @@ footer::before{
   </div>
 </div>
 <main>
-  <div id="chat"><div id="chat-inner">
+  <div id="chat">
+  <!-- Background watermark: revealed once the first user message lands
+       (CSS selector #chat:has(.msg.you) flips display:none -> flex).
+       Static, very low opacity so it never competes with message text. -->
+  <div class="chat-watermark" aria-hidden="true">
+    <svg viewBox="0 0 100 100" width="280" height="280">
+      <circle cx="50" cy="50" r="49.8" fill="#000000"/>
+      <circle cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+      <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
+        <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
+        <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
+        <circle cx="30" cy="50" r="4" fill="#faf0d7"/>
+        <circle cx="50" cy="50" r="6.5" fill="none" stroke="#faf0d7" stroke-width="3.5"/>
+        <circle cx="70" cy="50" r="4" fill="#faf0d7"/>
+      </g>
+    </svg>
+  </div>
+  <div id="chat-inner">
     <!-- Empty state: shown until the first message lands in this view.
          Hidden via JS when chatInner gains a .msg child. Restrained on
          purpose — Symbion is a personal tool, not a consumer chatbot
@@ -857,7 +910,8 @@ footer::before{
       </svg>
       <div class="es-hint">listening</div>
     </div>
-  </div></div>
+  </div>
+  </div>
 </main>
 <footer>
   <div id="attach-strip" class="attach-strip"></div>
@@ -941,6 +995,25 @@ if (window.visualViewport) {
 
 const chat=document.getElementById('chat');
 const chatInner=document.getElementById('chat-inner');
+
+// Inline mark used as the visual prefix on every Symbion message label.
+// Threads the logo identity through the assistant's voice without adding
+// chrome. .msg-mark CSS pulls the same warm drop-shadow palette as the
+// breathing watermark so the cohesion reads even though this one is static.
+const SYM_MARK_SVG = (
+  '<svg class="msg-mark" viewBox="0 0 100 100" aria-hidden="true">' +
+    '<circle cx="50" cy="50" r="49.8" fill="#000000"/>' +
+    '<circle cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>' +
+    '<g transform="translate(50 50) scale(0.74) translate(-50 -50)">' +
+      '<path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>' +
+      '<path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>' +
+      '<circle cx="30" cy="50" r="4" fill="#faf0d7"/>' +
+      '<circle cx="50" cy="50" r="6.5" fill="none" stroke="#faf0d7" stroke-width="3.5"/>' +
+      '<circle cx="70" cy="50" r="4" fill="#faf0d7"/>' +
+    '</g>' +
+  '</svg>'
+);
+const SYM_LABEL_HTML = '<div class="msg-label">' + SYM_MARK_SVG + 'Symbion</div>';
 const inp=document.getElementById('inp');
 const btn=document.getElementById('btn');
 const thinkBtn=document.getElementById('think-btn');
@@ -1635,7 +1708,7 @@ function connect(){
       const count=d.count||0;
       const note=document.createElement('div');
       note.className='msg sym';
-      note.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+      note.innerHTML=SYM_LABEL_HTML + '<div class="msg-body"></div>';
       note.querySelector('.msg-body').textContent=`Session summarised (${count} msg${count===1?'':'s'} folded into long-term memory). Starting fresh.`;
       chatInner.appendChild(note);
       scrollToBottom(true);
@@ -1698,7 +1771,7 @@ function updateStatus(s){
 function startMsg(){
   activeMsg=document.createElement('div');
   activeMsg.className='msg sym';
-  activeMsg.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  activeMsg.innerHTML=SYM_LABEL_HTML + '<div class="msg-body"></div>';
   activeCursor=document.createElement('span');
   activeCursor.className='cursor';
   activeMsg.querySelector('.msg-body').appendChild(activeCursor);
@@ -1769,7 +1842,7 @@ function addYou(text){
 function addSymStatic(text){
   const d=document.createElement('div');
   d.className='msg sym';
-  d.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  d.innerHTML=SYM_LABEL_HTML + '<div class="msg-body"></div>';
   d.querySelector('.msg-body').textContent=text;
   chatInner.appendChild(d);
 }
@@ -1800,7 +1873,7 @@ function addYouRemote(text){
 function addSymStaticRemote(text){
   const d=document.createElement('div');
   d.className='msg sym';
-  d.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  d.innerHTML=SYM_LABEL_HTML + '<div class="msg-body"></div>';
   const label=d.querySelector('.msg-label');
   label.appendChild(_syncedChip('synced'));
   d.querySelector('.msg-body').textContent=text;
@@ -1816,7 +1889,7 @@ function addSymStaticRemote(text){
 function addSymStreamingRemote(){
   const d=document.createElement('div');
   d.className='msg sym';
-  d.innerHTML='<div class="msg-label">Symbion</div><div class="msg-body"></div>';
+  d.innerHTML=SYM_LABEL_HTML + '<div class="msg-body"></div>';
   const label=d.querySelector('.msg-label');
   label.appendChild(_syncedChip('synced'));
   chatInner.appendChild(d);
