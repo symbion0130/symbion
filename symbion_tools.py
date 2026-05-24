@@ -516,14 +516,25 @@ class SymbionTools:
                         f"read_file returns raw bytes which are not useful for vision.")
             content = p.read_text(errors="replace")
             total = len(content)
+            total_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
             chunk = content[offset:offset + max_chars]
-            remaining = total - offset - len(chunk)
+            end = offset + len(chunk)
+            remaining = total - end
+            # Anchored counts header — keeps the model from eyeballing.
+            # 2026-05-24 self-review confab: Symbion read the full file via
+            # agent loop (cap-exempted), then asserted "~4500 lines" when
+            # the file was 9,303. Putting the truth at the TOP of the
+            # response lands ground-truth in working context before the
+            # content overwhelms it. Same shape for full and partial reads
+            # so callers always see line + char totals.
+            if remaining == 0 and offset == 0:
+                header = f"[file: {p.name} | {total_lines} lines | {total} chars | full read]\n"
+            else:
+                header = f"[file: {p.name} | {total_lines} lines | {total} chars | chunk {offset}-{end}]\n"
             suffix = ""
-            if offset > 0:
-                suffix += f"[chars {offset}-{offset+len(chunk)} of {total}]"
             if remaining > 0:
-                suffix += f"\n\n[...{remaining} chars remaining — use read_file_chunk with offset={offset+len(chunk)} to continue]"
-            return chunk + ("\n\n" + suffix if suffix else "")
+                suffix = f"\n\n[...{remaining} chars remaining — use read_file_chunk with offset={end} to continue]"
+            return header + chunk + suffix
         except ValueError as ex:
             return f"Error: invalid path ({type(ex).__name__}). Report verbatim, do not invent reasons."
         except PermissionError:

@@ -159,6 +159,41 @@ class TestWorkspaceSandbox:
         assert target.exists()
         assert target.read_text() == "machine-wide ok"
 
+    def test_read_file_anchors_line_and_char_counts(self, tmp_path):
+        # 2026-05-24 anti-confab: every read_file response must lead with a
+        # `[file: NAME | N lines | M chars | ...]` header so the model has
+        # a ground-truth anchor and can't eyeball-and-guess. Locked in
+        # after a self-review where Symbion read symbion_v14.py (9,303
+        # lines) via the agent loop and asserted "~4500 lines" anyway.
+        tools = SymbionTools(str(tmp_path))
+        tools.write_file("three.txt", "a\nb\nc\n")
+        out = tools.read_file("three.txt")
+        first = out.splitlines()[0]
+        assert first.startswith("[file: three.txt |")
+        assert "3 lines" in first
+        assert "6 chars" in first
+        assert "full read" in first
+        # File content itself still arrives intact.
+        assert "a\nb\nc" in out
+
+    def test_read_file_chunk_header_reports_chunk_range(self, tmp_path):
+        # Partial reads carry the same anchored totals plus the chunk range
+        # the caller actually got. Without this, multi-chunk reviews lose
+        # track of which slice they're looking at.
+        tools = SymbionTools(str(tmp_path))
+        body = "\n".join(f"row {i}" for i in range(50))  # 50 lines, no trailing newline
+        tools.write_file("rows.txt", body)
+        out = tools.read_file_chunk("rows.txt", offset=0, max_chars=30)
+        first = out.splitlines()[0]
+        assert first.startswith("[file: rows.txt |")
+        assert "50 lines" in first
+        assert f"{len(body)} chars" in first
+        assert "chunk 0-30" in first
+        # Partial read also keeps the explicit "more remaining" tail so the
+        # model knows to call read_file_chunk again instead of inferring.
+        assert "chars remaining" in out
+        assert "offset=30" in out
+
 
 # === 4.3: SSRF protection ===
 
