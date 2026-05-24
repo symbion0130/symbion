@@ -162,6 +162,10 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
    only while empty-state is visible (CSS selector :has(.msg.you)
    hides the parent, which stops the running animation per spec). */
 .es-mark{
+  /* overflow:visible so the breathing ring (scales 1.05 from a
+     resting position that already touches the viewBox edge at
+     r=47.85+stroke/2=50) doesn't get clipped at peak inhale. */
+  overflow:visible;
   filter:drop-shadow(0 0 8px rgba(215,175,95,.18));
   animation:es-breathe-glow 3.5s ease-in-out infinite;
 }
