@@ -3,24 +3,27 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0c0a08">
+<meta name="theme-color" content="#050508">
 <title>Symbion</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
-  /* Warm palette (2026-05-19) -- matched to the terminal's amber/gold/
-     warm-white/soft-orange so a Night-Light-shifted display reads the
-     same way on web and terminal. Blue/purple were washed out under
-     warm-shift; amber/gold/soft-orange survive cleanly. Dark surfaces
-     stay near-black with a slight warm bias so they don't compete. */
-  --bg:#0c0a08;--surface:#1a1612;--surface-2:#221c14;--border:#332c22;
-  --text:#faf0d7;--muted:#6a6050;--muted-2:#a89c80;
-  /* Muted amber / terra-cotta (2026-05-19): full-saturation #ffaf00 +
-     #ff8700 were reading too hot. Pulled toward tan / camel so the
-     accents read as warm rather than bright. */
-  --sym:#d7af5f;--sym-soft:#d7af5f22;--you:#afd787;--you-soft:#afd78722;
-  --accent:#c87a3a;--warn:#d49b3f;--danger:#c8553d;
-  --thinking:#1a1814;--thinking-border:#332c22;
+  /* Electric indigo / violet palette (2026-05-24) -- swapped from the
+     prior warm amber/gold to match the futuristic vibe of the breathing
+     watermark + composer redesign. True dark backgrounds with a slight
+     cool tint so they don't render purple on uncalibrated displays.
+     Terminal stays warm (separate surface). */
+  --bg:#050508;--surface:#0d0d14;--surface-2:#14141f;--border:#2a2a3a;
+  --text:#f0f0fa;--muted:#5a5a70;--muted-2:#9090a8;
+  /* Electric accents: violet primary (--sym), indigo secondary
+     (--accent), bright violet for peaks (--accent-bright). The
+     bright variant is what the breathing glow + composer focus
+     rings push toward at saturation peaks. */
+  --sym:#8b5cf6;--sym-soft:#8b5cf622;
+  --accent:#6366f1;--accent-bright:#a78bfa;--accent-deep:#7c3aed;
+  --you:#22d3ee;--you-soft:#22d3ee22;
+  --warn:#f59e0b;--danger:#ef4444;
+  --thinking:#0d0d14;--thinking-border:#2a2a3a;
   --radius:14px;
 }
 html,body{
@@ -71,10 +74,10 @@ header{
   padding-top:max(.6rem,env(safe-area-inset-top));
   border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:.65rem;flex-shrink:0;
-  background:linear-gradient(180deg,var(--bg) 0%,#0c0a08f2 100%);
+  background:linear-gradient(180deg,var(--bg) 0%,#050508f2 100%);
   backdrop-filter:blur(6px);
 }
-.dot{width:7px;height:7px;border-radius:50%;background:var(--you);flex-shrink:0;box-shadow:0 0 8px #afd78788}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--you);flex-shrink:0;box-shadow:0 0 10px #22d3eeaa}
 .dot.dead{background:var(--danger);box-shadow:0 0 8px #ef444488}
 .brand{font-size:1.2rem;font-weight:700;color:var(--text);letter-spacing:.01em}
 .brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.4rem;vertical-align:.05em}
@@ -106,7 +109,7 @@ header{
   white-space:nowrap;
 }
 .pill b{color:var(--text);font-weight:600}
-.pill.warn{background:#3a2a0033;border-color:#3a2a00;color:var(--warn)}
+.pill.warn{background:#1f1a3a33;border-color:#1f1a3a;color:var(--warn)}
 .pill.warn b{color:var(--warn)}
 /* #st-welfare default-hidden rule moved next to the status-rows CSS
    (see further down). updateStatus() now flips it to display:flex
@@ -185,28 +188,28 @@ main:has(.msg.you) .chat-watermark{display:flex}
   animation:wm-breathe-glow 3.5s ease-in-out infinite;
 }
 @keyframes wm-breathe-glow{
-  0%,100%{filter:drop-shadow(0 0 6px  rgba(215,175,95,.30))}
-  50%    {filter:drop-shadow(0 0 32px rgba(220,140,55,.55))}
+  0%,100%{filter:drop-shadow(0 0  6px rgba(139,92,246,.35))}
+  50%    {filter:drop-shadow(0 0 36px rgba(99,102,241,.65))}
 }
 @keyframes wm-breathe-ring{
   0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
-  50%    {stroke-opacity:.85; stroke-width:5.2; transform:scale(1.015)}
+  50%    {stroke-opacity:.90; stroke-width:5.5; transform:scale(1.02)}
 }
-/* Typing-active mode: when the composer detects keystrokes the
-   watermark steps into a faster, brighter breathing cycle so the
-   ring visibly reacts to the user's interaction. Opacity also bumps
-   so the reaction is felt, not just half-glimpsed. Reverts after
-   ~1.2s of no input via the JS timer below. */
-.chat-watermark.typing{opacity:.16}
-.chat-watermark.typing svg{animation:wm-breathe-glow-active 1.8s ease-in-out infinite}
-.chat-watermark.typing .wm-ring-pulse{animation:wm-breathe-ring-active 1.8s ease-in-out infinite}
+/* Typing-active mode: punchier than the prior pass — faster cycle
+   (1.2s, was 1.8s), bigger opacity jump (.06 -> .25), bigger scale
+   delta (1.0 -> 1.10), and a saturated electric-violet peak that
+   reads as plasma rather than glow. Reverts after ~1.2s of no
+   keystrokes via the JS timer below. */
+.chat-watermark.typing{opacity:.25}
+.chat-watermark.typing svg{animation:wm-breathe-glow-active 1.2s ease-in-out infinite}
+.chat-watermark.typing .wm-ring-pulse{animation:wm-breathe-ring-active 1.2s ease-in-out infinite}
 @keyframes wm-breathe-glow-active{
-  0%,100%{filter:drop-shadow(0 0  8px rgba(232,120,56,.45))}
-  50%    {filter:drop-shadow(0 0 56px rgba(232,120,56,.85))}
+  0%,100%{filter:drop-shadow(0 0 12px rgba(167,139,250,.55))}
+  50%    {filter:drop-shadow(0 0 88px rgba(167,139,250,.98))}
 }
 @keyframes wm-breathe-ring-active{
-  0%,100%{stroke-opacity:.85; stroke-width:5;   transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:7.5; transform:scale(1.06)}
+  0%,100%{stroke-opacity:.90; stroke-width:5.5; transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:10;  transform:scale(1.10)}
 }
 @media (prefers-reduced-motion: reduce){
   .chat-watermark svg,.wm-ring-pulse{animation:none}
@@ -239,7 +242,7 @@ main:has(.msg.you) .chat-watermark{display:flex}
      resting position that already touches the viewBox edge at
      r=47.85+stroke/2=50) doesn't get clipped at peak inhale. */
   overflow:visible;
-  filter:drop-shadow(0 0 8px rgba(215,175,95,.18));
+  filter:drop-shadow(0 0 8px rgba(139,92,246,.22));
   animation:es-breathe-glow 3.5s ease-in-out infinite;
 }
 .es-ring-pulse{
@@ -247,16 +250,16 @@ main:has(.msg.you) .chat-watermark{display:flex}
   animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  /* Color shifts WITH the breath: trough = warm amber at rest,
-     rising through warm gold, peak inhale = saturated burnt orange,
-     falling back through gold. Alphas bumped so the palette reads
-     even at a glance — no longer "dim light in dark room." Stays
-     inside Symbion's warm family (amber / gold / terra-cotta) — no
-     cool tones — but the peak is visibly a different color from rest. */
-  0%,100%{filter:drop-shadow(0 0 10px rgba(215,175,95,.28))}
-  25%    {filter:drop-shadow(0 0 36px rgba(220,140,55,.62))}
-  50%    {filter:drop-shadow(0 0 72px rgba(232,120,56,.92))}
-  75%    {filter:drop-shadow(0 0 36px rgba(220,140,55,.62))}
+  /* Electric color cycle: trough = soft violet at rest, rising
+     through indigo, peak inhale = saturated bright violet (--accent-
+     bright), falling back through indigo. Stays inside the electric
+     family (violet / indigo) — no warm tones — but the peak is
+     visibly a different hue from rest. Reads as plasma rather than
+     ambient warmth. */
+  0%,100%{filter:drop-shadow(0 0 12px rgba(139, 92,246,.35))}
+  25%    {filter:drop-shadow(0 0 40px rgba( 99,102,241,.65))}
+  50%    {filter:drop-shadow(0 0 80px rgba(167,139,250,.95))}
+  75%    {filter:drop-shadow(0 0 40px rgba( 99,102,241,.65))}
 }
 @keyframes es-breathe-ring{
   /* Stroke-width pumps 4.3 -> 6.5 (50% thicker) along with the scale
@@ -280,11 +283,12 @@ main:has(.msg.you) .chat-watermark{display:flex}
 .msg.you{
   align-self:flex-end;max-width:min(85%,560px);
   background:var(--you-soft);
-  border:1px solid #afd78744;
+  border:1px solid #22d3ee55;
   border-radius:var(--radius) var(--radius) 4px var(--radius);
   padding:.75rem 1rem;color:var(--text);
   font-size:1.05rem;line-height:1.55;
   white-space:pre-wrap;word-break:break-word;
+  box-shadow:0 0 24px rgba(34,211,238,.06);
 }
 
 .msg.sym{align-self:stretch;max-width:100%}
@@ -299,7 +303,7 @@ main:has(.msg.you) .chat-watermark{display:flex}
    so the cohesion reads even though this one is static. */
 .msg-mark{
   width:14px;height:14px;flex-shrink:0;overflow:visible;
-  filter:drop-shadow(0 0 3px rgba(215,175,95,.55));
+  filter:drop-shadow(0 0 4px rgba(139,92,246,.65));
 }
 .msg-body{
   white-space:pre-wrap;word-break:break-word;
@@ -330,8 +334,8 @@ main:has(.msg.you) .chat-watermark{display:flex}
   font-size:.6rem;padding:.1rem .45rem;border-radius:4px;font-weight:600;
   text-transform:uppercase;letter-spacing:.03em;
 }
-.b-rev{background:#3a2a0044;color:var(--sym);border:1px solid #3a2a00}
-.b-warn{background:#3a2a0044;color:var(--warn);border:1px solid #3a2a00}
+.b-rev{background:#1f1a3a44;color:var(--sym);border:1px solid #1f1a3a}
+.b-warn{background:#1f1a3a44;color:var(--warn);border:1px solid #1f1a3a}
 .b-emotion{background:#2a2418;color:var(--you);border:1px solid #3a3018}
 /* "synced" chip on messages that arrived via the peer-broadcast path
    (another device on the same session sent or received it). Muted on
@@ -383,44 +387,72 @@ footer::before{
 }
 .composer{
   width:100%;max-width:1200px;
-  display:flex;gap:.5rem;align-items:flex-end;
+  display:flex;gap:.55rem;align-items:flex-end;
+  /* position:relative anchors the focus glow effects to the composer
+     row itself, not the page. */
+  position:relative;
 }
+/* Input field: dark glass with a subtle indigo glow border at rest
+   that intensifies on focus into a saturated violet halo — matches
+   the watermark's electric vibe and reads as "the channel is open". */
 #inp{
-  /* Goldilocks-tuned composer: large enough to read as the page's
-     primary action, not so large it dominates the chat. ~1.1rem font,
-     ~1.05rem padding, min-height 64 -- settled here after two prior
-     iterations (1.05rem felt small, 1.2rem felt big). */
-  flex:1;background:var(--surface);border:1px solid var(--border);
+  flex:1;background:rgba(13,13,20,.85);
+  border:1px solid rgba(139,92,246,.18);
   border-radius:var(--radius);
   padding:1.05rem 1.25rem;
   color:var(--text);font-size:1.1rem;font-family:inherit;
   resize:none;outline:none;
   min-height:64px;max-height:240px;
-  transition:border-color .15s,background .15s;
   line-height:1.55;
+  box-shadow:0 0 0 0 rgba(139,92,246,0), inset 0 0 0 1px rgba(167,139,250,.04);
+  transition:border-color .2s ease, box-shadow .25s ease, background .2s ease;
 }
 #inp::placeholder{color:var(--muted)}
-#inp:focus{border-color:var(--accent);background:var(--surface-2)}
+#inp:focus{
+  border-color:rgba(167,139,250,.55);
+  background:rgba(20,20,31,.95);
+  box-shadow:
+    0 0 0 3px rgba(139,92,246,.18),
+    0 0 32px rgba(139,92,246,.35),
+    inset 0 0 12px rgba(167,139,250,.06);
+}
 
 .icon-btn,.send-btn{
   border:none;border-radius:var(--radius);
   cursor:pointer;flex-shrink:0;font-weight:600;
-  transition:opacity .15s,transform .1s,background .15s;
+  transition:opacity .15s, transform .1s, background .2s, border-color .2s, box-shadow .25s, color .2s;
   font-family:inherit;
 }
+/* Icon buttons (attach, think, help): minimal dark glass with violet
+   accent on hover so they feel kin to the input, not bolted on. */
 .icon-btn{
-  background:transparent;color:var(--muted);
-  border:1px solid var(--border);
+  background:rgba(13,13,20,.6);color:var(--muted-2);
+  border:1px solid rgba(139,92,246,.15);
   font-size:1.15rem;width:56px;height:56px;
   display:flex;align-items:center;justify-content:center;
 }
-.icon-btn.active{color:var(--sym);border-color:var(--sym);background:var(--sym-soft)}
-.send-btn{
-  background:var(--accent);color:var(--text);
-  padding:0 1.55rem;height:56px;
-  font-size:1rem;font-weight:700;letter-spacing:.02em;
+.icon-btn:hover{
+  color:var(--accent-bright);
+  border-color:rgba(167,139,250,.45);
+  box-shadow:0 0 18px rgba(139,92,246,.25), inset 0 0 8px rgba(167,139,250,.05);
 }
-.send-btn:disabled{opacity:.35;cursor:not-allowed}
+.icon-btn.active{
+  color:var(--accent-bright);
+  border-color:var(--sym);
+  background:rgba(139,92,246,.12);
+  box-shadow:0 0 24px rgba(139,92,246,.35), inset 0 0 12px rgba(167,139,250,.08);
+}
+/* Send button: indigo→violet gradient with constant glow drop-shadow
+   that intensifies on hover. The primary action gets the strongest
+   visual weight on the composer row. */
+.send-btn{
+  background:linear-gradient(135deg, var(--accent) 0%, var(--sym) 60%, var(--accent-bright) 100%);
+  color:#fff;
+  padding:0 1.7rem;height:56px;
+  font-size:1rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  box-shadow:0 0 24px rgba(139,92,246,.45), inset 0 1px 0 rgba(255,255,255,.18);
+}
+.send-btn:disabled{opacity:.35;cursor:not-allowed;box-shadow:none}
 
 .attach-strip{
   width:100%;max-width:1200px;margin:0 auto .4rem;
@@ -454,9 +486,16 @@ footer::before{
   border:none;font-size:.75rem;cursor:pointer;line-height:1;
   display:flex;align-items:center;justify-content:center;padding:0;
 }
-.composer.drag-over #inp{border-color:var(--accent);background:var(--surface-2)}
-.send-btn:not(:disabled):hover{background:#a86332}
-.send-btn:not(:disabled):active{transform:scale(.97)}
+.composer.drag-over #inp{
+  border-color:var(--accent-bright);
+  background:rgba(20,20,31,.98);
+  box-shadow:0 0 0 3px rgba(167,139,250,.30), 0 0 48px rgba(139,92,246,.50);
+}
+.send-btn:not(:disabled):hover{
+  box-shadow:0 0 40px rgba(167,139,250,.65), 0 0 12px rgba(99,102,241,.40), inset 0 1px 0 rgba(255,255,255,.25);
+  transform:translateY(-1px);
+}
+.send-btn:not(:disabled):active{transform:scale(.97) translateY(0)}
 
 ::-webkit-scrollbar{width:6px;height:6px}
 ::-webkit-scrollbar-thumb{background:#3a3328;border-radius:3px}
@@ -478,7 +517,7 @@ footer::before{
   max-width:calc(100% - 1.5rem);
 }
 .conn-banner.visible{display:inline-flex}
-.conn-banner.warn  {color:var(--warn);  border-color:#3a2a00;background:#3a2a00cc}
+.conn-banner.warn  {color:var(--warn);  border-color:#1f1a3a;background:#1f1a3acc}
 .conn-banner.danger{color:var(--danger);border-color:#7f1d1d;background:#7f1d1dcc}
 .conn-spinner{
   width:10px;height:10px;border-radius:50%;
@@ -663,8 +702,8 @@ footer::before{
   font-size:.92rem;
 }
 .status-row.warn{
-  background:#3a2a0033;
-  border-color:#3a2a0088;
+  background:#1f1a3a33;
+  border-color:#1f1a3a88;
 }
 .status-row.warn .status-label{color:var(--warn)}
 .status-label{color:var(--muted-2);font-weight:500}
@@ -729,7 +768,7 @@ footer::before{
 }
 .boot-splash.fade{opacity:0}
 .boot-splash.done{display:none}
-.boot-mark{filter:drop-shadow(0 0 24px rgba(215,175,95,.15))}
+.boot-mark{filter:drop-shadow(0 0 28px rgba(139,92,246,.20))}
 .bm-disc,.bm-ring{opacity:0; animation:bm-fadein .3s ease forwards}
 .bm-ring{animation-delay:.05s}
 .bm-top{

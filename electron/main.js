@@ -272,7 +272,7 @@ function createWindow() {
     height: 800,
     minWidth:  720,
     minHeight: 480,
-    backgroundColor: '#0c0a08',  // matches Symbion's web UI --bg
+    backgroundColor: '#050508',  // matches Symbion's web UI --bg
     title: 'Symbion',
     icon: iconPath,
     webPreferences: {
