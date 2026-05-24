@@ -9208,6 +9208,8 @@ HELP_TEXT = f"""
                       clinical, multi-source synthesis, or hard reasoning
     /save-config      persist current config to disk
     /whoami           Symbion's self-description
+    /info             runtime snapshot: version, provider, judge, session id,
+                      profile / identity / tasks / gaps counts
     /paste            enter multi-line paste mode (end with a line containing only '///')
     /quit             exit
 
@@ -9332,12 +9334,13 @@ def run_terminal(symbion: "SYMBION"):
         proactive_thread = threading.Thread(
             target=_proactive_runner, daemon=True, name="symbion-proactive")
         proactive_thread.start()
-    profile  = symbion.memory.get_profile(user=symbion._active_user(session))
     mood_name, _ = symbion.health.mood()
 
-    if symbion.cfg.mcp_enabled and symbion.cfg.mcp_servers:
-        print(yellow(f"  MCP       :  {len(symbion.cfg.mcp_servers)} server(s) configured but "
-                     "MCP is only active in web mode (`--web`)."))
+    # Startup display trimmed (2026-05-24) to brand banner + user + mood
+    # + command guide. Provider/Judge/Version/Session/Profile/Identity/
+    # Tasks/Gaps moved to /info on demand so the welcome stays clean.
+    # MCP notice also dropped from the welcome — it never applied to
+    # terminal mode anyway (MCP only fires in --web).
 
     # Unicode box-drawing title bar with the brand mark rendered as
     # terminal-resolution block art (2026-05-21). The disc + edge ring +
@@ -9380,42 +9383,11 @@ def run_terminal(symbion: "SYMBION"):
         # (2-space indent + 10 + 2). hint is grey, trailing, optional.
         print(f"  {amber(label.ljust(10))}  {value}" + (f"  {gray(hint)}" if hint else ""))
 
-    # Version banner row -- shows the current build hash so a terminal
-    # user can confirm at a glance whether they're running newly-updated
-    # code. Same identity surfaced by /health and the Electron tray
-    # tooltip (v14.0+<7-char-hash>). Falls back to "unknown" gracefully
-    # when git isn't available or this isn't a git checkout (portable
-    # drive case).
-    _row("Version",   warm_white(f"v14.0+{_resolve_build_hash()}"),
-         gray("git commit; shifts after each update"))
-    if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
-        prov  = symbion.cfg.llm_provider.upper()
-        if symbion.cfg.use_kimi_responder and symbion.cfg.kimi_api_key:
-            model = symbion.cfg.kimi_model
-            resp_label = f"Kimi ({model})"
-        else:
-            model = (symbion.cfg.anthropic_model if symbion.cfg.llm_provider=="anthropic"
-                     else symbion.cfg.openai_model if symbion.cfg.llm_provider=="openai"
-                     else symbion.cfg.responder_model)
-            resp_label = model
-        _row("Provider",  warm_white(prov),                                gray(resp_label))
-        _row("Judge",     gray(symbion._jmodel()))
-    _row("Session",   gray(session[:20]),
-         gray("resumed -- /new for fresh, /sessions to switch") if resumed
-         else gray("fresh -- /sessions to switch"))
+    # Welcome trimmed to user identity + mood. Everything else (version,
+    # provider, judge, session id, profile facts, identity moments, tasks,
+    # gaps) moved to /info on demand.
     _row("User",      warm_white(symbion._active_user(session)),       "/user <name> to switch")
     _row("Mood",      soft_orange(mood_name))
-    if profile:
-        _row("Profile",   gold(str(len(profile))),                       "facts known")
-    moments = symbion.identity.total_moments()
-    if moments:
-        _row("Identity",  gold(str(moments)),                            "formative moments")
-    active_tasks = symbion.tasks.get_active(session)
-    if active_tasks:
-        _row("Tasks",     yellow(str(len(active_tasks))),                "active")
-    open_gaps = symbion.gaps.get_open()
-    if open_gaps:
-        _row("Gaps",      yellow(str(len(open_gaps))),                   "open knowledge gaps")
 
     # Commands by category instead of one cramped line. Subtle separator
     # before the prompt so the eye knows the header is done.
@@ -9423,7 +9395,7 @@ def run_terminal(symbion: "SYMBION"):
     print(f"  {amber('Commands')}")
     print(f"    {gray('chat')}      /think  /escalate  /paste  /provider  /feedback")
     print(f"    {gray('memory')}    /summarize  /forget  /tasks  /identity  /gaps")
-    print(f"    {gray('session')}   /sessions  /resume <n>  /new  /user <name>  /tool-stats  /whoami  /help")
+    print(f"    {gray('session')}   /sessions  /resume <n>  /new  /user <name>  /info  /tool-stats  /whoami  /help")
     print(f"    {gray('exit')}      /quit")
     print()
     print(gray("  " + "─" * 68))
@@ -9876,6 +9848,48 @@ def run_terminal(symbion: "SYMBION"):
             print()
         elif raw=="/save-config":
             symbion.cfg.save(); print(green(f"  OK Config saved to {CONFIG_FILE}"))
+        elif raw=="/info":
+            # Snapshot of the runtime state previously shown at startup.
+            # Moved here so the welcome stays minimal but the data is one
+            # command away. Mirrors the row layout from the old banner.
+            def _info_row(label: str, value: str, hint: str = ""):
+                print(f"  {amber(label.ljust(10))}  {value}" + (f"  {gray(hint)}" if hint else ""))
+            print()
+            _info_row("Version", warm_white(f"v14.0+{_resolve_build_hash()}"),
+                      gray("git commit; shifts after each update"))
+            if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
+                prov = symbion.cfg.llm_provider.upper()
+                if symbion.cfg.use_kimi_responder and symbion.cfg.kimi_api_key:
+                    resp_label = f"Kimi ({symbion.cfg.kimi_model})"
+                else:
+                    model = (symbion.cfg.anthropic_model if symbion.cfg.llm_provider=="anthropic"
+                             else symbion.cfg.openai_model if symbion.cfg.llm_provider=="openai"
+                             else symbion.cfg.responder_model)
+                    resp_label = model
+                _info_row("Provider", warm_white(prov), gray(resp_label))
+                _info_row("Judge", gray(symbion._jmodel()))
+            _info_row("Session", gray(session),
+                      gray("/new for fresh, /sessions to switch"))
+            _info_row("User", warm_white(symbion._active_user(session)),
+                      gray("/user <name> to switch"))
+            mn, _ = symbion.health.mood()
+            _info_row("Mood", soft_orange(mn))
+            prof = symbion.memory.get_profile(user=symbion._active_user(session))
+            if prof:
+                _info_row("Profile", gold(str(len(prof))), gray("facts known"))
+            moments = symbion.identity.total_moments()
+            if moments:
+                _info_row("Identity", gold(str(moments)), gray("formative moments"))
+            act_tasks = symbion.tasks.get_active(session)
+            if act_tasks:
+                _info_row("Tasks", yellow(str(len(act_tasks))), gray("active"))
+            open_g = symbion.gaps.get_open()
+            if open_g:
+                _info_row("Gaps", yellow(str(len(open_g))), gray("open knowledge gaps"))
+            if symbion.cfg.mcp_enabled and symbion.cfg.mcp_servers:
+                _info_row("MCP", warm_white(str(len(symbion.cfg.mcp_servers))),
+                          gray("server(s) configured; active in --web only"))
+            print()
         elif raw=="/whoami":
             full,_,_=symbion.respond_sync(
                 "Describe yourself -- who you are, where you came from, "
