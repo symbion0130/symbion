@@ -5,7 +5,7 @@ import logging, argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional, AsyncIterator, Callable
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, OrderedDict
 from dataclasses import dataclass, field, asdict
 
 try:    import httpx; _HTTPX = True
@@ -343,11 +343,11 @@ class SymbionConfig:
 
     # DeepSeek direct: bypasses the HF Router middleman, usually cheaper for
     # the same DeepSeek model and lower latency (no router hop).
-    # HARD-WIRED as the escalation BACKUP when DEEPSEEK_API_KEY is set —
-    # `_escalation_client()` returns DeepSeek-direct only when Anthropic Opus
-    # isn't reachable (no Anthropic key, no escalation model, or Anthropic
-    # circuit breaker open). Opus stays the primary escalation route. To
-    # disable the DeepSeek backup entirely, unset DEEPSEEK_API_KEY in .env.
+    # Available as `--provider deepseek` but NO longer the escalation
+    # backup — Groq took over that role on 2026-05-24 for consistency
+    # with the responder fallback chain (one key covers both routes).
+    # DeepSeek stays a first-class CLI provider; just doesn't auto-fire
+    # under escalation anymore.
     # Models worth knowing:
     #   - deepseek-chat       (V4 Pro general chat)
     #   - deepseek-reasoner   (R1-style chain-of-thought reasoner)
@@ -5893,6 +5893,14 @@ class SYMBION:
         # cheap live aggregate view, surfaced via /tool-stats.
         self.tool_stats: Dict[str, Dict] = {}
 
+        # LRU cache for pre-gen judge results, keyed on (judge model
+        # identifier, query text). Initialized here (was lazily created
+        # on first miss via getattr in _pre_gen_analysis) so the cache
+        # is visible at __init__, typed, and resettable — e.g. /forget
+        # can clear it cleanly to drop stale judge verdicts after a
+        # memory wipe. See _PREGEN_CACHE_MAX on this class for the cap.
+        self._pregen_cache: "OrderedDict[Tuple[str, str], Tuple[Dict, Dict]]" = OrderedDict()
+
         self.kimi_client    = None
         # /escalate sets a per-session one-shot flag, consumed at the top of
         # respond(). Per-session so the flag can't leak across terminal
@@ -6125,17 +6133,25 @@ class SYMBION:
           1. Anthropic Opus   — PRIMARY. Requires ANTHROPIC_API_KEY +
                                 anthropic_escalation_model + Anthropic
                                 circuit breaker not tripped.
-          2. DeepSeek direct  — BACKUP. Used when Opus isn't reachable
+          2. Groq             — BACKUP. Used when Opus isn't reachable
                                 (no Anthropic key, no escalation model
                                 configured, or circuit breaker open on
-                                Anthropic). Requires DEEPSEEK_API_KEY.
+                                Anthropic). Requires GROQ_API_KEY. Same
+                                provider used by the responder-fallback
+                                chain, so the keys are already in .env
+                                on a standard install.
           3. None             — caller falls back to the normal responder.
 
         Kimi-responder mode disables escalation entirely (Kimi handles its
         own depth tier internally). The circuit-breaker check on Anthropic
-        makes the DeepSeek fallback fire automatically during transient
+        makes the Groq fallback fire automatically during transient
         Anthropic outages — escalation keeps working instead of silently
         regressing to the normal Sonnet responder.
+
+        Switched DeepSeek -> Groq as the escalation backup on 2026-05-24
+        for consistency with the responder fallback chain (also Groq), so
+        one provider key covers both routes and fewer keys need to be
+        wired on fresh installs.
         """
         if self.cfg.use_kimi_responder:
             return None
@@ -6158,10 +6174,12 @@ class SYMBION:
                 return AnthropicClient(self.cfg.anthropic_api_key,
                                        self.cfg.anthropic_escalation_model,
                                        self.cfg)
-        # Backup: DeepSeek-direct when Opus isn't reachable.
-        if self.cfg.deepseek_api_key:
-            return DeepSeekClient(self.cfg.deepseek_api_key, self.cfg.deepseek_model,
-                                  self.cfg, base_url=self.cfg.deepseek_base_url)
+        # Backup: Groq when Opus isn't reachable. Routes through the
+        # configured groq_responder_model (default llama-3.3-70b-versatile);
+        # respects the TPM cap via GroqClient._eff_max_tokens.
+        if self.cfg.groq_api_key:
+            return GroqClient(self.cfg.groq_api_key, self.cfg.groq_responder_model,
+                              self.cfg, base_url=self.cfg.groq_base_url)
         return None
 
     # MCP lifecycle hooks. Called from run_terminal and build_web_app
@@ -6524,14 +6542,10 @@ class SYMBION:
             ev = await client.judge(text)
             return ev, {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
 
-        # LRU cache check. Skip on the OfflineJudgeStub path above (already
-        # non-LLM, no benefit to caching). Move-to-end on hit so frequently
-        # repeated queries don't get evicted by one-off probes.
-        cache = getattr(self, "_pregen_cache", None)
-        if cache is None:
-            from collections import OrderedDict
-            self._pregen_cache = OrderedDict()
-            cache = self._pregen_cache
+        # LRU cache check. Cache is initialized in __init__ so no lazy
+        # creation needed here. Move-to-end on hit so frequently repeated
+        # queries don't get evicted by one-off probes.
+        cache = self._pregen_cache
         cache_key = (self._jmodel(), text)
         if cache_key in cache:
             cache.move_to_end(cache_key)
