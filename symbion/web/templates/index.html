@@ -174,8 +174,16 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
   animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  0%,100%{filter:drop-shadow(0 0 8px  rgba(215,175,95,.10))}
-  50%    {filter:drop-shadow(0 0 56px rgba(215,175,95,.55))}
+  /* Color shifts WITH the breath: trough = muted amber (--sym),
+     rising = warm gold (--warn), peak inhale = saturated terra-cotta
+     (--accent), falling = warm gold again, return to amber. Stays
+     inside the existing warm palette — no cold blues / greens — but
+     the saturated peak gives the inhale a distinct color identity
+     instead of just "more of the same warmth." */
+  0%,100%{filter:drop-shadow(0 0  8px rgba(215,175,95,.10))}
+  25%    {filter:drop-shadow(0 0 28px rgba(212,155,63,.32))}
+  50%    {filter:drop-shadow(0 0 56px rgba(200,122,58,.58))}
+  75%    {filter:drop-shadow(0 0 28px rgba(212,155,63,.32))}
 }
 @keyframes es-breathe-ring{
   0%,100%{stroke-opacity:.55; transform:scale(1)}
