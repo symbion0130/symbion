@@ -190,16 +190,23 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column;
   pointer-events:none;
   z-index:0;
   opacity:0;
-  /* Slow default transition handles both the first appearance (0 -> .06)
-     and the post-cooldown return to baseline. Entering .typing uses the
-     fast transition override below for a snappy reaction. */
-  transition:opacity 1.5s ease;
+  /* Slow soft-ease transition handles both the first appearance
+     (0 -> .06 when the first user message lands) AND the post-cooldown
+     return to baseline. cubic-bezier(.4,0,.6,1) gives a gentle S-curve
+     (no abrupt start or stop) so the watermark never has a hard edge
+     in either direction. */
+  transition:opacity 2s cubic-bezier(.4,0,.6,1);
 }
 main:has(.msg.you) .chat-watermark{opacity:.06}
 /* .typing must out-specify the main:has(.msg.you) prefix above
    (otherwise the typing opacity:.25 gets overridden silently — bug
-   surfaced in the trace harness when typing showed opacity .06). */
-main:has(.msg.you) .chat-watermark.typing{opacity:.25; transition:opacity .3s ease}
+   surfaced in the trace harness when typing showed opacity .06).
+   Entry transition is now long (1.2s) so the rise into typing-mode
+   reads as a gentle swell rather than a snap-up. */
+main:has(.msg.you) .chat-watermark.typing{
+  opacity:.25;
+  transition:opacity 1.2s cubic-bezier(.4,0,.6,1);
+}
 .chat-watermark svg{
   width:420px;height:420px;
   overflow:visible;
@@ -2358,13 +2365,14 @@ inp.addEventListener('input',()=>{
     typingTimer = setTimeout(beginCoolDown, 1200);
   };
   const beginCoolDown = () => {
-    // Phase 1: fade opacity .25 -> .06 over 2s while .typing is still
+    // Phase 1: fade opacity .25 -> .06 over 3s while .typing is still
     // active (punchy animation keeps running but visibly dims). The
-    // long fade masks the animation-name swap that fires when .typing
-    // is removed at the end of Phase 2.
-    wm.style.transition = 'opacity 2s ease';
+    // long S-curve fade masks the animation-name swap that fires at
+    // the end of Phase 2 — by then opacity is near .06 (low signal),
+    // so swapping animations is barely perceptible.
+    wm.style.transition = 'opacity 3s cubic-bezier(.4,0,.6,1)';
     wm.style.opacity = '.06';
-    coolingTimer = setTimeout(finishCoolDown, 2050);
+    coolingTimer = setTimeout(finishCoolDown, 3050);
   };
   const finishCoolDown = () => {
     // Phase 2: at the already-faint opacity, swap to baseline by

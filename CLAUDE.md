@@ -547,16 +547,19 @@ Filtered subsets (gitignored) like `golden_restraint.jsonl`, `golden_tool_judgme
 
 ## Verification harnesses
 
-Four levels of "does it work?" check, in increasing cost. Use the cheapest one that covers what you're testing.
+Five levels of "does it work?" check, in increasing cost. Use the cheapest one that covers what you're testing.
 
 | What you're testing | Script | Cost | Time |
 |---|---|---|---|
-| Code-level correctness (calculator, sandbox, SSRF, JSON parse, retrieval) | `pytest tests/ -q` | $0 | ~5s |
+| Code-level correctness (calculator, sandbox, SSRF, JSON parse, retrieval) | `pytest tests/ -q --ignore=tests/integration` | $0 | ~5s |
 | Per-feature plumbing without a real LLM | `scripts/verify_session_sync.py`, `scripts/verify_peer_token_streaming.py` | $0 (stubbed `respond()`) | 10-30s |
+| **Real-provider integration** (agent loop, fallback chain, judge-skip plumbing, boot splash) | `pytest tests/integration/ -q` | ~$0.001/test (Groq + Anthropic) | ~3-5 min |
 | Behavioral / persona / tool-judgment regressions | `evals/run.py --provider <p>` | Real LLM calls | minutes |
 | End-to-end against live cfg (sanity smoke after a deploy-like change) | `scripts/smoke.py` (Ollama) or one-off respond() with live `SymbionConfig.load()` | Real LLM calls | seconds |
 
-Verification harnesses are stubbed-`respond()`-based, so they exercise plumbing (broadcast frames, WS protocol, queue draining, session sync) without burning provider budget. They boot Symbion in-process on a temp DB so the real `symbion.db` isn't polluted.
+Most verification harnesses are stubbed-`respond()`-based, so they exercise plumbing (broadcast frames, WS protocol, queue draining, session sync) without burning provider budget. They boot Symbion in-process on a temp DB so the real `symbion.db` isn't polluted.
+
+**`tests/integration/` (2026-05-23)** is the exception — exercises the FULL `respond()` pipeline against real provider calls on a temp DB, following `evals/run.py`'s isolation pattern. Covers gaps that stubbed-respond can't see: agent loop tool dispatch, fallback-chain engagement when the primary breaker trips, judge actually ran on borderline queries, boot-splash Playwright behaviour. Surfaces real regressions in the cross-provider routing layer; both the `_rmodel`/`_jmodel` active-client fix and the `cfg.groq_max_tokens` TPM cap were caught here on their first run.
 
 ## Electron desktop shell (2026-05-21)
 
