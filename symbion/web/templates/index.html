@@ -213,11 +213,21 @@ footer{
      so the footer ends at body bottom = visual viewport bottom = above
      the iOS keyboard. flex-shrink:0 keeps the composer at its natural
      height while #chat (flex:1) absorbs any leftover space. */
-  padding:.65rem 1rem;
+  position:relative;
+  padding:1.05rem 1rem .65rem;
   padding-bottom:max(.65rem,env(safe-area-inset-bottom));
-  border-top:1px solid var(--border);
   background:var(--bg);
   display:flex;flex-direction:column;align-items:center;flex-shrink:0;
+}
+/* Soft fade above the composer so chat content scrolling near the
+   bottom doesn't slam into a hard 1px border. Replaces the previous
+   border-top: 1px solid var(--border); — the input field's own border
+   is sufficient visual anchor for "this is where you type." */
+footer::before{
+  content:'';
+  position:absolute;left:0;right:0;top:-28px;height:28px;
+  background:linear-gradient(180deg,transparent,var(--bg));
+  pointer-events:none;
 }
 .composer{
   width:100%;max-width:1200px;
