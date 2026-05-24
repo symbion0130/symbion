@@ -154,27 +154,28 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
   animation:fadein .4s ease;
 }
 .empty-state.hidden{display:none}
-/* Watermarked mark + breathing ring: the glow's blur-radius pulses
-   12px -> 32px -> 12px on a 4s ease-in-out cycle, and the outer
-   white ring's stroke-opacity wave-matches so the whole thing reads
-   as a soft heartbeat for the idle "listening" state. Animation only
-   while empty-state is visible (CSS selector :has(.msg.you) hides
-   the parent, which stops the running animation per spec). */
+/* Watermarked mark + breathing ring: 3.5s ease-in-out heartbeat for
+   the idle "listening" state. Intensities tuned after the first pass
+   read as too subtle — the glow now triples in blur radius across
+   the cycle (8px -> 56px) and the ring scales 5% with a wide opacity
+   swing so the breath is obvious without being a strobe. Animation
+   only while empty-state is visible (CSS selector :has(.msg.you)
+   hides the parent, which stops the running animation per spec). */
 .es-mark{
-  filter:drop-shadow(0 0 12px rgba(215,175,95,.18));
-  animation:es-breathe-glow 4s ease-in-out infinite;
+  filter:drop-shadow(0 0 8px rgba(215,175,95,.18));
+  animation:es-breathe-glow 3.5s ease-in-out infinite;
 }
 .es-ring-pulse{
   transform-origin:50px 50px;
-  animation:es-breathe-ring 4s ease-in-out infinite;
+  animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  0%,100%{filter:drop-shadow(0 0 12px rgba(215,175,95,.14))}
-  50%    {filter:drop-shadow(0 0 32px rgba(215,175,95,.30))}
+  0%,100%{filter:drop-shadow(0 0 8px  rgba(215,175,95,.10))}
+  50%    {filter:drop-shadow(0 0 56px rgba(215,175,95,.55))}
 }
 @keyframes es-breathe-ring{
-  0%,100%{stroke-opacity:.78; transform:scale(1)}
-  50%    {stroke-opacity:1;   transform:scale(1.025)}
+  0%,100%{stroke-opacity:.55; transform:scale(1)}
+  50%    {stroke-opacity:1;   transform:scale(1.05)}
 }
 .es-hint{
   font-size:.82rem;color:var(--muted-2);
