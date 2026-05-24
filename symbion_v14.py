@@ -8153,7 +8153,7 @@ def _tailscale_ipv4() -> Optional[str]:
 
 def validate_and_report(cfg) -> list:
     warnings = []
-    _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi", "hf_router", "deepseek")
+    _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi", "groq", "hf_router", "deepseek")
     if cfg.llm_provider not in _KNOWN_PROVIDERS:
         print(red(f"\n  X  Unknown --provider '{cfg.llm_provider}'."))
         print(yellow(f"     Valid options: {', '.join(_KNOWN_PROVIDERS)}\n")); import sys; sys.exit(1)
