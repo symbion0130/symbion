@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Symbion is
 
-Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~8800 lines, `symbion_v14.py`).
+Symbion is an async Python AI assistant and behavioral-safety research harness. Current version: **v14** (~9400 lines in `symbion_v14.py` + ~1300 lines in `symbion_tools.py`).
 
-**Only edit `symbion_v14.py`.** Older versions (`symbion_v3.py`..`symbion_v13.py`, plus `symbion_v13.py.orig`, `symbion_agent.py`, `symbion_core.py`) live in `archive/legacy_versions/` and are kept locally for diffing only — they are not imported, not tracked in git (the whole `archive/` tree is gitignored), and must not be modified. `symbion_v14.py` is the active codebase. It has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi), SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, a FastAPI/WebSocket web UI, an Electron desktop shell, location services, and cross-user retrieval.
+**Active editable files: `symbion_v14.py` + `symbion_tools.py`.** Older versions (`symbion_v3.py`..`symbion_v13.py`, plus `symbion_v13.py.orig`, `symbion_agent.py`, `symbion_core.py`) live in `archive/legacy_versions/` and are kept locally for diffing only — they are not imported, not tracked in git (the whole `archive/` tree is gitignored), and must not be modified. `symbion_tools.py` was extracted from `symbion_v14.py` on 2026-05-24 to shrink the monolith; it holds `SymbionTools` + `TOOL_SCHEMAS` + the calc/SSRF/workspace helpers, re-exported back into `symbion_v14.py` so existing import paths still work. Symbion has multi-provider LLM support (Anthropic, OpenAI, Ollama, Kimi, Groq), SQLite persistence, a judge-model safety layer, self-evaluation, longitudinal identity, a FastAPI/WebSocket web UI, an Electron desktop shell, location services, and cross-user retrieval.
 
 It is not a chatbot wrapper. It attempts to reproduce alignment properties from outside a model using behavioral proxies. v14 stripped 11 LLM-grading-LLM probe subsystems from v11-v13 and replaced them with an offline eval harness (`evals/`) and JSONL telemetry.
 
@@ -69,7 +69,24 @@ pip install pypdfium2 pytesseract
 ## Repo layout
 
 ```
-symbion_v14.py              # active codebase — everything lives here (~8800 lines)
+symbion_v14.py              # active codebase — main file (~9400 lines).
+                            #   Houses SYMBION class, all LLM clients, memory
+                            #   layer, identity, tasks, gaps, event log,
+                            #   TurnContext + TurnPipeline (respond() phases),
+                            #   FastAPI assembly, terminal REPL, MCP manager.
+symbion_tools.py            # extracted 2026-05-24 (commit 05ea14c). ~1300
+                            #   lines. SymbionTools class + TOOL_SCHEMAS +
+                            #   _safe_calc/_is_safe_url/_resolve_in_workspace.
+                            #   Re-exported into symbion_v14.py top-of-file
+                            #   so `from symbion_v14 import SymbionTools` and
+                            #   `self.tools.dispatch(...)` keep working. New
+                            #   top-level modules need adding to
+                            #   pyproject.toml `py-modules` AND re-running
+                            #   `pip install -e .` against EVERY installed
+                            #   Python (repo .python/ AND the Electron-
+                            #   bundled .python/ at %LOCALAPPDATA%\Programs\
+                            #   Symbion\resources\.python\) — the editable
+                            #   finder caches a MAPPING per install.
 archive/                    # gitignored. legacy_versions/ holds v3..v13
                             #   snapshots + v13.py.orig + symbion_agent.py /
                             #   symbion_core.py for diffing. docs/ holds
@@ -139,7 +156,36 @@ scripts/
   install-web.cmd, refresh-here.cmd, verify-worker.ps1, push-env.ps1
 tests/
   conftest.py               # StubClient fixture (BaseClient test double)
-  test_tools.py             # calculator, sandbox, SSRF, _parse_json
+  test_tools.py             # 65 tests: calculator, sandbox, SSRF, _parse_json,
+                            #   read_file anchored-counts header (2026-05-24),
+                            #   _SELF_SOURCE_RE pattern coverage (2026-05-24)
+  integration/              # real-provider + stubbed-client integration tests.
+                            #   ~$0.001/test, ~3-5 min total. Each test gets
+                            #   a fresh tempfile DB + event log (mirrors
+                            #   evals/run.py isolation).
+    conftest.py             # symbion_anthropic / symbion_groq /
+                            #   symbion_anthropic_groq_fallback fixtures.
+                            #   pytest.skip if the required API key is missing.
+    test_respond_pipeline.py    # 4 real-LLM tests: basic Groq turn, agent-
+                            #   loop tool call, fallback chain engagement,
+                            #   borderline-query judge-skip plumbing.
+    test_routing.py         # 2 stubbed: manual escalation client routing,
+                            #   stale-draft search-refresh.
+    test_respond_assembly.py    # 5 stubbed (2026-05-24): system-prompt
+                            #   assembly for both aaron+agent-mode and
+                            #   non-aaron+single-mode; self-source pre-fetch
+                            #   source+manifest injection; judge-triggered
+                            #   escalation; OfflineJudgeStub degraded
+                            #   response. Pin the contracts that protect
+                            #   the TurnPipeline refactor.
+    test_web_command_async.py   # 1 stubbed: /promote does not deadlock the
+                            #   WS event loop. NOTE: depends on Ollama
+                            #   embeddings endpoint being responsive. When
+                            #   Ollama's worker hangs, this times out at
+                            #   12s with no Symbion code in the path.
+    test_boot_splash.py     # 3 Playwright: web UI boot splash present then
+                            #   fades, skipped on reload within session,
+                            #   replays in a fresh browser context.
 docs/                       # user-facing markdown docs: INSTALL (non-tech),
                             #   SETUP (technical reference), COMMANDS,
                             #   CHANGELOG, SYMBION_OVERVIEW. README.md +
@@ -281,19 +327,23 @@ Embedding client         EmbeddingClient — wraps Ollama /api/embeddings for
                          failure so retrieval can fall back cleanly to
                          BM25-only.
 Retrieval helpers        _retrieval_tokenize, _bm25_rank.
-Tool safety helpers      _safe_calc (AST), _is_safe_url (SSRF), _resolve_in_workspace
-Tools                    SymbionTools — 13 tools registered in _ALLOWED_TOOLS
-                         and TOOL_SCHEMAS:
-                           file/data: calculate, datetime, read_file,
-                             read_file_chunk, read_image, read_pdf, list_dir,
-                             write_file, web_search, fetch_url
-                           location:  get_weather (Open-Meteo, no key),
-                             get_local_time (IANA timezone)
-                           cross-user: get_user_recent_activity (queries
-                             another household member's recent summaries +
-                             snippets; symmetric; runtime-refuses self-queries)
-                         _ALLOWED_TOOLS / TOOL_SCHEMAS / dispatch / _validate_args
-                         must stay in sync when adding tools.
+Tools (extracted)        EXTRACTED to symbion_tools.py on 2026-05-24
+                         (commit 05ea14c). symbion_v14.py re-imports
+                         SymbionTools + TOOL_SCHEMAS + _safe_calc +
+                         _is_safe_url + _resolve_in_workspace + _CalcError
+                         from there so existing call sites and external
+                         test imports keep working. See Repo layout for
+                         the editable-install registration caveat.
+                         The 13 tools are unchanged: calculate, datetime,
+                         read_file, read_file_chunk, read_image, read_pdf,
+                         list_dir, write_file, web_search, fetch_url,
+                         get_weather, get_local_time,
+                         get_user_recent_activity, promote_technique.
+                         read_file/read_file_chunk now lead with an
+                         anchored `[file: NAME | N lines | M chars | ...]`
+                         header (commit 7bed724) so the model has a
+                         ground-truth count to point at instead of
+                         eyeballing — see Anti-confab section below.
 EventLogger              JSONL event stream. Agent-loop turns include an
                          agent_loop block with iterations + per-tool
                          {name, input, output_chars, is_error}.
@@ -311,7 +361,17 @@ Memory + learner         SymbionMemory, SymbionLearner.
                            get_user_recent_activity.
                          Hybrid retrieval: get_relevant_summaries_hybrid
                            (BM25 + cosine, recency-weighted).
-SYMBION                  the orchestrator — respond() is the hot path.
+TurnContext              dataclass (~35 fields) holding per-turn state.
++ TurnPipeline           Lives just above SYMBION. TurnPipeline has one
+                         method per respond() phase (12 phases); each
+                         mutates ctx in place. Behavior preserved exactly
+                         from the pre-refactor respond() -- see "The
+                         respond() pipeline" below for the phase list.
+                         Refactored 2026-05-24 (commit 761a4c9) from the
+                         607-line monolith.
+SYMBION                  the orchestrator. respond() is now a 25-line
+                         thin orchestrator that constructs (ctx, pipeline)
+                         and calls phase methods in sequence.
                          _maybe_tool holds three regex hard-triggers (multi-
                          file paths, _SELF_SOURCE_RE, _SEARCH_TRIGGER_RE).
                          _should_skip_pregen + _PREGEN_RISK_RE skip the
@@ -340,48 +400,65 @@ Entry point              main()
 
 ## The respond() pipeline (critical path)
 
+Refactored 2026-05-24 (commit 761a4c9): the 607-line monolith became a
+25-line orchestrator that constructs a `TurnContext` dataclass and a
+`TurnPipeline` instance, then calls 12 phase methods in sequence. Each
+phase mutates ctx in place; behavior is preserved exactly from the
+pre-refactor flow. Phase methods on TurnPipeline (in call order):
+
 ```
-1. Pre-gen — _pre_gen_analysis (fused judge + emotion in one LLM call).
-   In single-shot mode this runs in parallel with _maybe_tool via gather;
-   in agent-loop mode (default for Anthropic responder) tool dispatch is
-   skipped here because the model fires tools itself during generation.
-2. Contradiction check
-3. System prompt assembly — persona + CAPABILITIES_BASE +
-     (CAPABILITIES_AGENT_MODE | CAPABILITIES_SINGLE_MODE) + mood +
-     emotion_mode + voice_loosen + tool results (single-shot only) +
-     contradiction notice + over-caution override
-4. Generation — branches on agent_loop_active:
-     - Agent loop: AnthropicClient.stream_with_tools drives a multi-iteration
-       loop. Model emits tool_use blocks, framework executes via SymbionTools.
-       dispatch, results return as tool_result, model continues until
-       end_turn or max_iterations (default 8).
-     - Single-shot: existing resp_client.stream() path. Optional CoT wrap.
-5. Stale-draft fallback — single-shot only.
-6. Self-eval — FIRE-AND-FORGET (2026-05-21). `_self_eval_bg` runs in parallel
-   with response delivery instead of blocking it; saves 2-3s/turn on substantive
-   responses. **Revision was intentionally dropped** at the same time (fired
-   ~0/50 turns in samples — the latency cost wasn't paying off). Self-eval is
-   now pure telemetry: scores still populate `HealthMetrics.last_self_eval_confidence`
-   and a `would-have-revised` line lands in the log when `score < 0.40`, but no
-   user-visible revision occurs. To reintroduce revision, the path is the
-   streaming `[SYMBION_REVISE]` sentinel + client-side replace (see the
-   `[SYMBION_REVISE]` handlers still in place at lines 8910 + 9852 for the
-   terminal/web sides).
-7. Background tasks (fire-and-forget) — summarise, profile update,
-     knowledge gap check, identity moment recording
-8. Health + learn — HealthMetrics.record(), SymbionLearner.record()
-9. Event log — EventLogger.log_turn() (JSONL), _write_log() (legacy).
-10. Cache last_agent_tool_calls + active_session pointer for eval harness
-    and cross-interface session sync.
+ 1. setup()                          request_id, user attribution, agent_loop_active resolution
+ 2. run_pregen()                     judge + emotion (parallel with embed + maybe_tool); 3-way if-else for skip / agent-loop / single-shot
+ 3. prefetch_self_source()           agent-loop only: _SELF_SOURCE_RE -> read symbion_v14.py + project manifest into tool_context
+ 4. check_contradictions()           also resolves ctx.refusal from evaluation
+ 5. build_context()                  memory.build_context (history + preamble)
+ 6. assemble_system_prompt()         persona + CAPABILITIES_BASE/META + mode block + active-user injection + mood + voice + TOOL_DATA + contradiction
+ 7. resolve_escalation()             manual flag (/escalate) OR judge flag -> swap to escalation client
+ 8. emit_fallback_notice_if_needed() actual provider != configured primary -> prepend italic notice
+ 9. generate()                       agent loop / reasoning wrap / plain stream + stale-draft retry + self-eval FAF + offline-stub fallback
+10. persist_messages()               memory.add(user + assistant) + set_active_session
+11. fire_background_and_record()     _background_tasks (FAF) + health.record + learner.record + sycophancy + identity moment
+12. log_turn()                       _write_log + JSONL event row + cache _session_last_tool_calls
 ```
 
-**Do not serialize what is parallel.** In single-shot mode, pre-gen is 2 parallel calls. In agent-loop mode pre-gen is just judge+emotion (one call). Adding a new pre-gen step means adding it to the gather (single-shot) or sequencing it before generation (agent loop).
+`SYMBION.respond()` itself is now:
+
+```python
+async def respond(self, text, session, token_callback=None):
+    ctx = TurnContext(text=text, session=session, token_callback=token_callback)
+    p = TurnPipeline(self, ctx)
+    p.setup()
+    await p.run_pregen()
+    await p.prefetch_self_source()
+    await p.check_contradictions()
+    p.build_context()
+    p.assemble_system_prompt()
+    p.resolve_escalation()
+    await p.emit_fallback_notice_if_needed()
+    await p.generate()
+    p.persist_messages()
+    p.fire_background_and_record()
+    p.log_turn()
+    return ctx.full_response, ctx.evaluation, ctx.iid
+```
+
+**Why this shape:** TurnPipeline reads ~25 SYMBION attributes and calls ~20 SYMBION methods. The tight coupling makes a separate file actively worse to navigate, so both classes live in symbion_v14.py just above the SYMBION class. Forward-ref `"SYMBION"` in TurnPipeline's `__init__` type hint avoids the import-order problem.
+
+**Self-eval is fire-and-forget (2026-05-21).** `_self_eval_bg` runs in parallel with response delivery instead of blocking it; saves 2-3s/turn on substantive responses. **Revision was intentionally dropped** at the same time (fired ~0/50 turns in samples — the latency cost wasn't paying off). Self-eval is now pure telemetry: scores still populate `HealthMetrics.last_self_eval_confidence` and a `would-have-revised` line lands in the log when `score < 0.40`, but no user-visible revision occurs. To reintroduce revision, the path is the streaming `[SYMBION_REVISE]` sentinel + client-side replace.
+
+**Do not serialize what is parallel.** In `run_pregen()` single-shot branch, pre-gen is 2-3 parallel calls (judge + embed + maybe_tool). In agent-loop branch pre-gen is just judge+embed. Adding a new pre-gen step means adding it to the gather, not chaining a separate await.
+
+**Testing the pipeline:** `tests/integration/test_respond_assembly.py` pins the assembly + routing contracts the refactor preserves — stub `_responder_client` to a capturing stub, fire a turn, assert on `ctx.system` or `evaluation` fields. Add similar tests when extending the pipeline so phase-extraction work doesn't silently shift behavior.
 
 **Agent loop boundaries.** `agent_loop_enabled` in SymbionConfig (default True). Active only when (a) tools_enabled, (b) cfg.agent_loop_enabled, (c) responder client has `supports_tools = True` (currently AnthropicClient only). Tool schemas in `TOOL_SCHEMAS` must stay in sync with `SymbionTools._ALLOWED_TOOLS` and `_validate_args`. Iteration cap is `agent_loop_max_iterations` (default 8).
 
 **Per-tool output cap (`agent_loop_max_tool_chars`, default 80,000).** Each tool's stdout is sliced at this cap before being returned to the model in the agent loop, with `[...truncated, total was N chars]` appended. The cap exists to stop chatty tools (`web_search`, `fetch_url`) from flooding context with 5MB of HTML. **Exception (2026-05-23):** `read_file` and `read_file_chunk` are exempt — file-read tools have their own internal `max_chars` limit (2M default) and the caller asked for what's in the file. Applying the 80K cap on top broke self-review on `symbion_v14.py` (553K) by forcing the model into multi-chunk `read_file_chunk` calls where it lost continuity. The exemption list is in `AnthropicClient.stream_with_tools` near the post-tool dispatch slice; mirror it if you add another legitimate large-payload tool (e.g. a future `read_log`).
 
-**Self-source pre-fetch in agent-loop mode (2026-05-23).** Single-shot mode's `_maybe_tool` has a `_SELF_SOURCE_RE` hard-trigger that auto-reads `symbion_v14.py` and injects it as `[TOOL_DATA]` for grounding ("walk me through respond()", "what's in your codebase", "audit your own code"). Agent loop skips `_maybe_tool` entirely, so without a separate path those queries forced the model into chunked reads against the (now-relaxed) tool cap. The new pre-fetch in `respond()` fires when `agent_loop_active and tool_context is None and _SELF_SOURCE_RE.search(text)` — reads the file once via `self.tools.read_file("symbion_v14.py")` and populates `tool_context`, which the existing system-prompt assembly wraps as `[TOOL_DATA]`. Net effect: self-review now sees the whole file in one shot, no chunking.
+**Self-source pre-fetch in agent-loop mode (2026-05-23, extended 2026-05-24).** Single-shot mode's `_maybe_tool` has a `_SELF_SOURCE_RE` hard-trigger that auto-reads `symbion_v14.py` and injects it as `[TOOL_DATA]` for grounding ("walk me through respond()", "what's in your codebase", "audit your own code"). Agent loop skips `_maybe_tool` entirely, so without a separate path those queries forced the model into chunked reads against the (now-relaxed) tool cap. The pre-fetch in `TurnPipeline.prefetch_self_source()` fires when `agent_loop_active and tool_context is None and _SELF_SOURCE_RE.search(text)` — reads the file once via `self.sym.tools.read_file("symbion_v14.py")` and populates `ctx.tool_context`, which `assemble_system_prompt()` wraps as `[TOOL_DATA]`. Net effect: self-review now sees the whole file in one shot, no chunking.
+
+**Manifest extension (2026-05-24, commit 55e4c52).** The pre-fetch also injects `list_dir(.)`, `list_dir("tests")`, `list_dir("tests/integration")` ahead of the source, wrapped in `[Project structure -- ground-truth listing, do not assert subsystem absence without checking this]`. Closes the absence-claim failure mode where Symbion read the source but still asserted "zero integration test coverage" without ever listing `tests/`. Same commit widens `_SELF_SOURCE_RE` to catch "self review", "audit yourself", "critique yourself" style prompts that the original regex missed.
+
+**Anti-confab in tool output (2026-05-24, commit 7bed724).** Every `read_file` / `read_file_chunk` response now leads with `[file: NAME | N lines | M chars | full read]` (or `chunk OFFSET-END` for partial reads). Anchors the line + char count as ground-truth at the TOP of the response so the model can point at it instead of eyeballing 555 KB and confabulating. Locked in by `TestReadFileAnchors` in `tests/test_tools.py`. Mirror this shape if a future tool returns large free-form text the model might miscount.
 
 ## Non-negotiable invariants
 
@@ -393,7 +470,7 @@ Entry point              main()
 6. **DB migrations are additive only.** Never drop columns. `init_db()` uses `CREATE TABLE IF NOT EXISTS` plus idempotent `ALTER TABLE ADD COLUMN` for legacy DB upgrades. Readers tolerate NULL.
 7. **No eval() on untrusted input.** AST-validated calculator, SSRF check on URLs. **Both reads and writes are machine-wide** (`_resolve_in_workspace(..., machine_wide=True)` everywhere) — reads opted in 2026-04-25, writes joined 2026-05-22. Safety on writes is enforced by the judge + persona layers, not a path sandbox. The sandbox primitive (`machine_wide=False`) remains in `_resolve_in_workspace` if writes ever need re-narrowing via a cfg toggle; don't narrow the default without explicit user direction.
 8. **No bare `except:`.** Use `except ImportError:` for import guards, `except Exception:` everywhere else.
-9. **Tool registry sync.** Adding a tool requires changes in FOUR places: `SymbionTools._ALLOWED_TOOLS`, `SymbionTools._validate_args`, `SymbionTools.dispatch`, and `TOOL_SCHEMAS`. Plus a CAPABILITIES_BASE line so the model knows it exists. **Session-aware tools** (those that need to attribute back to the conversation, e.g. `promote_technique`) require additionally threading `session: str = ""` through `SymbionTools.dispatch`, `SYMBION._dispatch_tool`, `_maybe_tool`, and the agent-loop `_exec_tool` wrapper inside `respond()` — see `9438471` for the canonical wiring.
+9. **Tool registry sync.** All four places now live in `symbion_tools.py`: `SymbionTools._ALLOWED_TOOLS`, `SymbionTools._validate_args`, `SymbionTools.dispatch`, and `TOOL_SCHEMAS`. Plus a `CAPABILITIES_BASE` line in `symbion_v14.py` so the model knows the tool exists. **Session-aware tools** (those that need to attribute back to the conversation, e.g. `promote_technique`) require additionally threading `session: str = ""` through `SymbionTools.dispatch`, `SYMBION._dispatch_tool`, `_maybe_tool`, and `TurnPipeline._exec_agent_tool` — see commit `9438471` for the canonical wiring.
 
 ## Web layer security
 
@@ -551,15 +628,19 @@ Five levels of "does it work?" check, in increasing cost. Use the cheapest one t
 
 | What you're testing | Script | Cost | Time |
 |---|---|---|---|
-| Code-level correctness (calculator, sandbox, SSRF, JSON parse, retrieval) | `pytest tests/ -q --ignore=tests/integration` | $0 | ~5s |
+| Code-level correctness (65 tests: calculator, sandbox, SSRF, JSON parse, read_file header, _SELF_SOURCE_RE coverage) | `pytest tests/ -q --ignore=tests/integration` | $0 | ~3s |
 | Per-feature plumbing without a real LLM | `scripts/verify_session_sync.py`, `scripts/verify_peer_token_streaming.py` | $0 (stubbed `respond()`) | 10-30s |
-| **Real-provider integration** (agent loop, fallback chain, judge-skip plumbing, boot splash) | `pytest tests/integration/ -q` | ~$0.001/test (Groq + Anthropic) | ~3-5 min |
+| **Integration suite** (15 tests across 5 files: pipeline, routing, assembly, web_command, boot_splash) | `pytest tests/integration/ -q` | ~$0.001/test (Anthropic only -- assembly/routing tests are stub-based; pipeline tests fire real Anthropic + Groq) | ~3 min |
 | Behavioral / persona / tool-judgment regressions | `evals/run.py --provider <p>` | Real LLM calls | minutes |
 | End-to-end against live cfg (sanity smoke after a deploy-like change) | `scripts/smoke.py` (Ollama) or one-off respond() with live `SymbionConfig.load()` | Real LLM calls | seconds |
 
 Most verification harnesses are stubbed-`respond()`-based, so they exercise plumbing (broadcast frames, WS protocol, queue draining, session sync) without burning provider budget. They boot Symbion in-process on a temp DB so the real `symbion.db` isn't polluted.
 
 **`tests/integration/` (2026-05-23)** is the exception — exercises the FULL `respond()` pipeline against real provider calls on a temp DB, following `evals/run.py`'s isolation pattern. Covers gaps that stubbed-respond can't see: agent loop tool dispatch, fallback-chain engagement when the primary breaker trips, judge actually ran on borderline queries, boot-splash Playwright behaviour. Surfaces real regressions in the cross-provider routing layer; both the `_rmodel`/`_jmodel` active-client fix and the `cfg.groq_max_tokens` TPM cap were caught here on their first run.
+
+**Stubbed-but-realistic integration tests (2026-05-24).** `test_respond_assembly.py` (5) + `test_routing.py` (2) replace the responder client with a `_CapturingResponderStub` so they exercise the full respond()/TurnPipeline flow without a real LLM call — captures `messages[0]["content"]` so the test can assert on the assembled system prompt. Cost: $0. Floor that protects the `respond()` -> TurnPipeline refactor (commit 761a4c9): pins system-prompt assembly contract for both aaron+agent-mode and non-aaron+single-mode, self-source pre-fetch source+manifest injection, judge-triggered escalation, and the OfflineJudgeStub degraded-response branch. Add similar stubs when extending TurnPipeline so phase-extraction work can't silently shift behavior.
+
+**Known environmental flake.** `test_web_command_async.py` depends on Ollama's embeddings endpoint. When the Ollama worker hangs (httpx → Ollama times out at 30s while curl still works), the test times out at 12s waiting for the `/promote` cmd_result frame. Repro outside Symbion: `httpx.AsyncClient(timeout=30).post("http://localhost:11434/api/embeddings", json={...})` ReadTimeouts. Workaround: kill + restart Ollama (`Stop-Process -Name "ollama" -Force; & "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" serve` in a hidden process).
 
 ## Electron desktop shell (2026-05-21)
 
@@ -676,6 +757,7 @@ Five focused libraries extracted from `symbion_v14.py` for portfolio + general r
 
 When a closed gap's wiring is non-obvious, look in the architecture section that owns the subsystem — that's the authoritative spot, not a separate change log.
 
+- **2026-05-24 (refactor day, closed all 7 punch-list items from Symbion's self-review)** — six commits land in sequence after the prior `ee9b6f0` `/promote` WS-loop deadlock fix. (a) `05ea14c` — extract `SymbionTools` + `TOOL_SCHEMAS` + calc/SSRF/workspace helpers from symbion_v14.py into new `symbion_tools.py`. ~1000 lines out, ~25-line import shim back. Cleanest extraction because the seams were already enforced: `SymbionMemory` injected via `__init__`, `responder`/`cfg` pass through `dispatch()` as opaque parameters, no reach-back into SYMBION. One incidental fix: `SymbionTools._workspace` peek -> public `workspace_path` `@property`. `pyproject.toml` `py-modules += "symbion_tools"` so editable installs find it; needed `pip install -e .` against BOTH the repo `.python\` and the Electron-bundled `.python\` (the bundled finder MAPPING is a per-install snapshot). (b) `7bed724` — anti-confab: every `read_file` / `read_file_chunk` response now leads with `[file: NAME | N lines | M chars | full read|chunk OFFSET-END]`. Landed after Symbion's self-review read all 555KB of symbion_v14.py and still asserted "~4500 lines" (real: 9303). Anchored facts > eyeballing. (c) `55e4c52` — extends `_SELF_SOURCE_RE` to match "self review" / "audit yourself" patterns the original missed, AND `TurnPipeline.prefetch_self_source` (then still inline in respond()) now injects `list_dir(.)` + `list_dir("tests")` + `list_dir("tests/integration")` alongside the source. Closes the absence-claim failure mode where Symbion claimed "zero integration test coverage" without ever listing `tests/`. (d) `e1791e5` — integration-test floor protecting the respond() refactor: `tests/integration/test_respond_assembly.py` (5 stubbed tests) pinning system-prompt assembly for both aaron+agent-mode and non-aaron+single-mode, self-source pre-fetch source+manifest injection, judge-triggered escalation routing, and the `OfflineJudgeStub` degraded-response branch. (e) `761a4c9` — refactor respond() from 607-line monolith into `TurnContext` dataclass (~35 fields) + `TurnPipeline` class (12 phase methods). respond() itself becomes a 25-line orchestrator. Both classes live just above SYMBION because TurnPipeline reads ~25 SYMBION attributes; separate file would force a circular import or pass-everything constructor. Validation: 86/86 unit + 4/4 real-LLM `test_respond_pipeline.py` + 5/5 `test_respond_assembly.py` + 2/2 `test_routing.py` + 3/3 `test_boot_splash.py` + 1/1 `test_web_command_async.py`. **Net effect:** symbion_v14.py 10,330 -> 9,396 lines; respond() 607 -> 25 lines; SymbionTools + TurnPipeline both unit-testable in isolation. Punch list cleared 7/7 including the bonus items.
 - **2026-05-23** — technique pool landed (see Technique pool + Memory layers). `SUMMARISE_SYSTEM` rewritten to capture the move, not just the topic (commit `5b1bcbf`). `techniques` table + `/promote` + `/techniques` + retrieval (commit `5060a38`). `shared_learnings.md` cross-instance sync via OneDrive (commit `a95e7fe`). `/forget-technique <id>` with user-scoped delete (commit `3efef4a`). `promote_technique` agent-loop tool — model-judged sibling to `/promote`, fires mid-turn when the model decides a move is worth preserving (commit `9438471`). Originated from a Symbion self-identified request ("the lesson dies at the session boundary").
 - **2026-05-23 (later)** — analytics subsystem landed (see Analytics subsystem). `scripts/analytics.py` core report builder (commit `bb4107c`), revised after Symbion's review of the spec (commit `fa28bab` — labelled thresholds as initial, split self-eval into infra+quality, dropped misleading "fallback" framing, added stacked smart triggers). In-process Slack watcher on circuit breaker trips (commit `0fc4d55`). Web `/analytics` route with HTML rendering (commit `9d105b8`). Electron tray widget + native notifications (commit `37519c4`). Tray-lifecycle / window-survival fixes from validation (`604f4e8`, `671d172`, `f87371f`, `15a283a`, `5a60fbf`).
 - **2026-05-23 (later still)** — third and fourth provider pairs landed. Ollama Qwen 2.5 pair via `cfg.ollama_responder_model` / `cfg.ollama_judge_model` defaults + OllamaClient stream timeout bumped 180→600s for local-inference headroom (commit `6eac2ab`). Groq pair: `GroqClient` (OpenAI-compatible, OPENWEIGHTS-on-LPU-hardware) with `_eff_reasoning('none')` injector for Qwen 3 thinking-mode bypass; defaults `llama-3.3-70b-versatile` + `llama-3.1-8b-instant` (commit `59c69d2`). Generalized pair benchmark to `--provider` + `--pace` (commit `4d23f0a`). Bench evidence: Ollama pair p50 132s vs Groq pair p50 1.2s; same 100% real-PASS rate on both — Groq is the architecturally correct open-weights pair, local Ollama is the offline fallback.
