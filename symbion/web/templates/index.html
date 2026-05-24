@@ -231,8 +231,11 @@ main:has(.msg.you) .chat-watermark{display:flex}
 #chat-inner:has(.msg.you) .empty-state{display:none}
 .empty-state{
   margin:auto;
-  display:flex;flex-direction:column;align-items:center;gap:1rem;
-  opacity:.65;
+  display:flex;flex-direction:column;align-items:center;gap:1.2rem;
+  /* Was .65 — dampened the breathing glow's punch. At full opacity
+     the saturated keyframes (.40 -> 1.0 alpha) show their actual
+     intensity instead of being premultiplied down by the parent. */
+  opacity:1;
   pointer-events:none;
   animation:fadein .4s ease;
 }
@@ -257,27 +260,28 @@ main:has(.msg.you) .chat-watermark{display:flex}
   animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  /* All-purple plasma cycle: deep-violet trough -> violet rising ->
-     saturated electric indigo-blue at peak inhale (rgb 94,102,255 —
-     right at the violet/electric-blue boundary, max saturation) ->
-     back through violet. Tightens the prior pass which leaned into
-     light pastel violet at peak; this peak reads as ionized plasma. */
-  0%,100%{filter:drop-shadow(0 0 12px rgba(124, 58,237,.40))}
-  25%    {filter:drop-shadow(0 0 44px rgba(139, 92,246,.72))}
-  50%    {filter:drop-shadow(0 0 88px rgba( 94,102,255,1.00))}
-  75%    {filter:drop-shadow(0 0 44px rgba(139, 92,246,.72))}
+  /* All-purple plasma cycle, intensified: trough alpha bumped so the
+     mark is always glowing (not "ambient at rest"), peak stays at the
+     saturated electric indigo-blue (rgb 94,102,255) but blur radius
+     pushed higher to broadcast further into the dark surround. */
+  0%,100%{filter:drop-shadow(0 0  18px rgba(124, 58,237,.60))}
+  25%    {filter:drop-shadow(0 0  56px rgba(139, 92,246,.85))}
+  50%    {filter:drop-shadow(0 0 110px rgba( 94,102,255,1.00))}
+  75%    {filter:drop-shadow(0 0  56px rgba(139, 92,246,.85))}
 }
 @keyframes es-breathe-ring{
-  /* Stroke-width pumps 4.3 -> 6.5 (50% thicker) along with the scale
-     and opacity wave, so the ring visibly swells as it inhales — the
-     "actually breathing" shape Lala wanted, not just a static line
-     floating outward. */
-  0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:6.5; transform:scale(1.05)}
+  /* Ring intensity bumped to match the watermark-typing pump: stroke
+     swings 4.3 -> 8 (was 4.3 -> 6.5), scale 1.0 -> 1.08 (was 1.05),
+     opacity .65 -> 1.0 (was .55 -> 1.0). The intro mark is the page's
+     focal visual — it has to feel as alive as the typing-mode
+     watermark, not subtler than it. */
+  0%,100%{stroke-opacity:.65; stroke-width:4.3; transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:8;   transform:scale(1.08)}
 }
 .es-hint{
-  font-size:.82rem;color:var(--muted-2);
-  letter-spacing:.06em;font-weight:500;
+  font-size:.95rem;color:var(--muted-2);
+  letter-spacing:.08em;font-weight:500;
+  text-shadow:0 0 12px rgba(139,92,246,.35);
 }
 @media (prefers-reduced-motion: reduce){
   .es-mark,.es-ring-pulse{animation:none}
@@ -990,7 +994,7 @@ footer::before{
          purpose — Symbion is a personal tool, not a consumer chatbot
          that needs a "How can I help you today?" CTA. -->
     <div id="empty-state" class="empty-state" aria-hidden="true">
-      <svg class="es-mark" viewBox="0 0 100 100" width="144" height="144">
+      <svg class="es-mark" viewBox="0 0 100 100" width="220" height="220">
         <circle cx="50" cy="50" r="49.8" fill="#000000"/>
         <circle class="es-ring-pulse" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
         <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
