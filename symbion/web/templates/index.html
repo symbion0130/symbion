@@ -87,16 +87,15 @@ header{
 }
 .dot.dead{background:var(--danger);box-shadow:0 0 10px #ef4444aa}
 .brand{font-size:1.2rem;font-weight:700;color:var(--text);letter-spacing:.01em}
-.brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.4rem;vertical-align:.05em}
 .brand .user{
-  /* Active user displayed in the slot where v14's "provider" indicator
-     used to live. Surfaced here because Symbion is per-user (memory,
-     identity, cross-user retrieval) — knowing who you're typing AS is
-     more load-bearing than which model is responding (provider moved
-     into the sidebar's Status tab). Updated from localStorage on load
-     and whenever the user changes via the picker / /user command. */
+  /* Active user displayed inline with the Symbion brand. Surfaced
+     here (rather than version) because Symbion is per-user (memory,
+     identity, cross-user retrieval) — who you're typing AS is more
+     load-bearing than the build number, which lives in the sidebar
+     Status tab. Updated from localStorage on load and whenever the
+     user changes via the picker / /user command. */
   font-size:.78rem;color:var(--you);font-weight:500;
-  margin-left:.55rem;letter-spacing:.02em;vertical-align:.1em;
+  margin-left:.6rem;letter-spacing:.02em;vertical-align:.12em;
 }
 .brand .user::before{
   content:'·';color:var(--muted);margin-right:.55rem;
@@ -301,7 +300,23 @@ main:has(.msg.you) .chat-watermark{display:flex}
   box-shadow:0 0 24px rgba(34,211,238,.06);
 }
 
-.msg.sym{align-self:stretch;max-width:100%}
+.msg.sym{
+  /* Glass bubble: frosted dark with a violet hairline border + soft
+     outer glow so Symbion's voice has visual containment matching the
+     user-side bubble. Backdrop-filter:blur layers the surface against
+     the watermark so the breathing mark behind stays present without
+     dragging text legibility. */
+  align-self:stretch;max-width:100%;
+  background:rgba(13,13,20,.42);
+  border:1px solid rgba(139,92,246,.20);
+  border-radius:var(--radius);
+  padding:.85rem 1.1rem;
+  -webkit-backdrop-filter:blur(10px);
+  backdrop-filter:blur(10px);
+  box-shadow:
+    inset 0 0 0 1px rgba(167,139,250,.04),
+    0 0 28px rgba(139,92,246,.06);
+}
 .msg-label{
   font-size:.7rem;font-weight:700;color:var(--sym);
   letter-spacing:.04em;text-transform:uppercase;
@@ -451,6 +466,14 @@ footer::before{
   border-color:var(--sym);
   background:rgba(139,92,246,.12);
   box-shadow:0 0 24px rgba(139,92,246,.35), inset 0 0 12px rgba(167,139,250,.08);
+}
+/* Think button is text-labeled rather than glyph — widen the hit box
+   and tighten the font so "Think" reads as a real action, not a
+   cramped icon-square pretending to hold a word. */
+.think-btn{
+  width:auto;min-width:78px;padding:0 1rem;
+  font-size:.88rem;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;
 }
 /* Send button: indigo→violet gradient with constant glow drop-shadow
    that intensifies on hover. The primary action gets the strongest
@@ -883,7 +906,7 @@ footer::before{
 <header>
   <button id="sidebar-btn" class="menu-btn sidebar-btn" type="button" title="Sessions" aria-label="Open session list">&#9776;</button>
   <div class="dot" id="dot" aria-label="connection"></div>
-  <div class="brand">Symbion<span class="ver">v14</span><span class="user" id="hdr-user"></span></div>
+  <div class="brand">Symbion<span class="user" id="hdr-user"></span></div>
 </header>
 
 <!-- Sessions sidebar: backdrop + slide-in panel. Lists past sessions
@@ -912,6 +935,10 @@ footer::before{
   </div>
   <div class="sb-panel hidden" data-panel="status">
     <div class="status-rows">
+      <div class="status-row">
+        <span class="status-label">Version</span>
+        <span class="status-value" id="st-version">--</span>
+      </div>
       <div class="status-row">
         <span class="status-label">Provider</span>
         <span class="status-value" id="st-provider">--</span>
@@ -1025,7 +1052,7 @@ footer::before{
          filter at pick time to avoid the silent-skip surprise. -->
     <input id="file-input" type="file" multiple style="display:none">
     <button id="attach-btn" class="icon-btn" title="Attach file or image" aria-label="Attach file or image">&#128206;</button>
-    <button id="think-btn" class="icon-btn" title="Toggle reasoning trace" aria-label="Toggle reasoning">?</button>
+    <button id="think-btn" class="icon-btn think-btn" type="button" title="Toggle thinking mode (show reasoning trace)" aria-label="Toggle thinking mode">Think</button>
     <button id="btn" class="send-btn">Send</button>
   </div>
 </footer>
@@ -1142,22 +1169,25 @@ function newSessionId(){
 let SESSION=localStorage.getItem(SESSION_STORE)||newSessionId();
 let ws, activeMsg=null, activeCursor=null, activeThinking=null, showReasoning=false;
 
-// Provider indicator: poll /health on load + every 30s and write into
-// the Sidebar > Status tab's Provider row. Per-turn fallback diversions
-// are surfaced via the in-chat italic notice; this is the ambient "what
-// model am I usually getting" indicator. Silent on failure — leaves
-// the row at "--" rather than flashing an error.
-function refreshProvider(){
+// Sidebar > Status tab ambient fields: poll /health on load + every
+// 30s and write Provider + Version rows. Per-turn fallback diversions
+// are surfaced via the in-chat italic notice; this is the ambient
+// "what model am I usually getting / what build am I on" panel.
+// Silent on failure — rows stay at "--" rather than flashing an error.
+function refreshStatusAmbient(){
   fetch('/health',{cache:'no-store'})
     .then(r=>r.ok?r.json():null)
     .then(d=>{
-      const el=document.getElementById('st-provider');
-      if(el && d && d.provider) el.textContent=d.provider;
+      if(!d) return;
+      const prov=document.getElementById('st-provider');
+      if(prov && d.provider) prov.textContent=d.provider;
+      const ver=document.getElementById('st-version');
+      if(ver && d.version) ver.textContent=d.version;
     })
     .catch(()=>{});
 }
-refreshProvider();
-setInterval(refreshProvider, 30000);
+refreshStatusAmbient();
+setInterval(refreshStatusAmbient, 30000);
 
 // Active user displayed in the header subtitle slot. Sourced from
 // localStorage (the same store the user-picker modal writes to) so
