@@ -199,7 +199,13 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column;
    keeps running underneath while the visibility eases out. */
 .chat-watermark .wm-layer{
   position:absolute;
-  width:420px;height:420px;
+  /* clamp(min, preferred, max) keeps the watermark a usable scale on
+     every viewport. Desktop renders the prior 420px (60vmin = 60% of
+     the smaller axis ~ 480px, capped to 420px). iPhone portrait at
+     375x667 vmin=375 -> 60vmin=225px so the mark fits inside the
+     screen with room to spare instead of extending past the edges. */
+  width:clamp(180px, 60vmin, 420px);
+  height:clamp(180px, 60vmin, 420px);
   opacity:0;
 }
 .chat-watermark .wm-baseline-layer{

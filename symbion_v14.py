@@ -145,25 +145,28 @@ def magenta(t): return _c("35", t)
 def bold(t):    return _c("1",  t)
 def dim(t):     return _c("2",  t)
 def blue(t):    return _c("34", t)
-# Warm palette (added 2026-05-19) — readable on Night Light / warm-shifted
-# displays where blue/purple/cyan get washed out. Uses 256-colour ANSI
-# (`38;5;N`) for amber/gold/orange/warm-white tones; falls back to plain
-# text when _USE_COLOR is off. Terminals that don't speak 256-colour
-# render as fallback approximations on the nearest 16-colour mapping.
-def amber(t):       return _c("38;5;179", t)  # muted gold-tan, ~#d7af5f
-def gold(t):        return _c("38;5;178", t)  # darker gold, ~#d7af00
-def warm_white(t):  return _c("38;5;230", t)  # cream / off-white, ~#ffffd7
-def soft_orange(t): return _c("38;5;173", t)  # muted terra-cotta, ~#d7875f
-def gray(t):        return _c("38;5;245", t)  # mid-gray, ~#8a8a8a
-def soft_green(t):  return _c("38;5;150", t)  # warm sage, ~#afd787
+# Electric indigo/violet palette (2026-05-24) — matches the web UI's
+# theme swap from the prior warm-amber system. Uses 256-colour ANSI
+# (`38;5;N`) approximations of the web's --sym / --accent / --accent-bright
+# violet & indigo hues. Function names are KEPT (amber/gold/warm_white/
+# soft_orange/soft_green) for backward compatibility — every existing
+# call site continues to work; the colours just render electric now.
+# Read the comments next to each for what the helper actually emits.
+def amber(t):       return _c("38;5;99",  t)  # primary violet  ~#875fff  (was muted gold-tan)
+def gold(t):        return _c("38;5;57",  t)  # deep indigo     ~#5f00ff  (was darker gold)
+def warm_white(t):  return _c("38;5;255", t)  # cool near-white ~#eeeeee  (was cream)
+def soft_orange(t): return _c("38;5;141", t)  # bright violet   ~#af87ff  (was terra-cotta)
+def gray(t):        return _c("38;5;245", t)  # mid-gray, unchanged
+def soft_green(t):  return _c("38;5;87",  t)  # cool cyan       ~#5fffff  (was warm sage — matches web --you)
 
 def warm_white_open() -> str:
-    """Open the warm-white colour scope WITHOUT a closing reset, so free
-    text that follows (e.g. user input at the 'you >' prompt) renders
-    in warm-white. The scope stays open until the next ANSI reset --
+    """Open the cool-near-white colour scope WITHOUT a closing reset, so
+    free text that follows (e.g. user input at the 'you >' prompt) renders
+    in cool white. The scope stays open until the next ANSI reset --
     most coloured helpers above emit `\\x1b[0m` at the end, which closes
-    this scope automatically the next time we print() any of them."""
-    return "\033[38;5;230m" if _USE_COLOR else ""
+    this scope automatically the next time we print() any of them.
+    Name kept for compat; emits cool-white (256-colour 255) post-2026-05-24."""
+    return "\033[38;5;255m" if _USE_COLOR else ""
 
 logger = logging.getLogger("symbion")
 
