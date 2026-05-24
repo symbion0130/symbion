@@ -128,6 +128,32 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat-inner{
   max-width:1200px;margin:0 auto;
   display:flex;flex-direction:column;gap:1.4rem;
+  /* min-height:100% lets the empty-state's margin:auto vertically
+     center it inside #chat (which has flex:1 from main). When real
+     messages exist the column grows past 100% and #chat scrolls as
+     usual; the min-height has no effect on populated chats. */
+  min-height:100%;
+}
+/* Empty state lives inside #chat-inner so it occupies the same column.
+   Hidden as soon as the FIRST user message lands — not just any .msg,
+   because system notices (location denied, sync notifications, etc.)
+   also render as .msg.sym and would prematurely hide the empty state.
+   "You haven't talked yet" is the actual semantic. Centered vertically
+   by stretching #chat-inner (via min-height:100% below) to fill #chat
+   and using auto margins on the empty-state. */
+#chat-inner:has(.msg.you) .empty-state{display:none}
+.empty-state{
+  margin:auto;
+  display:flex;flex-direction:column;align-items:center;gap:.7rem;
+  opacity:.55;
+  pointer-events:none;
+  animation:fadein .4s ease;
+}
+.empty-state.hidden{display:none}
+.es-mark{filter:drop-shadow(0 0 18px rgba(215,175,95,.12))}
+.es-hint{
+  font-size:.78rem;color:var(--muted-2);
+  letter-spacing:.04em;font-weight:500;
 }
 
 .msg{animation:fadein .18s ease;word-wrap:break-word}
@@ -784,7 +810,26 @@ footer::before{
   </div>
 </div>
 <main>
-  <div id="chat"><div id="chat-inner"></div></div>
+  <div id="chat"><div id="chat-inner">
+    <!-- Empty state: shown until the first message lands in this view.
+         Hidden via JS when chatInner gains a .msg child. Restrained on
+         purpose — Symbion is a personal tool, not a consumer chatbot
+         that needs a "How can I help you today?" CTA. -->
+    <div id="empty-state" class="empty-state" aria-hidden="true">
+      <svg class="es-mark" viewBox="0 0 100 100" width="84" height="84">
+        <circle cx="50" cy="50" r="49.8" fill="#000000"/>
+        <circle cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+        <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
+          <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
+          <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
+          <circle cx="30" cy="50" r="4" fill="#faf0d7"/>
+          <circle cx="50" cy="50" r="6.5" fill="none" stroke="#faf0d7" stroke-width="3.5"/>
+          <circle cx="70" cy="50" r="4" fill="#faf0d7"/>
+        </g>
+      </svg>
+      <div class="es-hint">listening</div>
+    </div>
+  </div></div>
 </main>
 <footer>
   <div id="attach-strip" class="attach-strip"></div>
