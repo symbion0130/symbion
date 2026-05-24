@@ -4,7 +4,7 @@ import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, u
 import logging, argparse
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional, AsyncIterator, Callable
+from typing import List, Dict, Tuple, Optional, AsyncIterator, Callable, Any
 from collections import defaultdict, Counter, OrderedDict
 from dataclasses import dataclass, field, asdict
 
@@ -4664,6 +4664,656 @@ class MCPManager:
 
 
 # ==============================================================================
+#  TURN PIPELINE (refactored from SYMBION.respond, 2026-05-24)
+# ==============================================================================
+#
+# respond() was a 607-line monolith with 12 phases that mutated a shared
+# bag of locals (draft, evaluation, tool_context, ...). TurnContext
+# gathers those locals into a dataclass; TurnPipeline has one method per
+# phase that mutates the context. SYMBION.respond() is now a thin
+# orchestrator (~15 lines) that instantiates the pair and calls phase
+# methods in sequence.
+#
+# Behavior preserved exactly -- the code inside each phase method is a
+# direct port from the same comment block in the old respond(). Phase
+# methods read everything off self.sym; no inversion of responsibility.
+
+@dataclass
+class TurnContext:
+    """Per-turn state. Populated incrementally as the pipeline runs.
+
+    Field grouping mirrors the order phases set them; reading
+    top-to-bottom follows the data flow. All non-input fields have safe
+    defaults so a phase can write them without worrying about init
+    order.
+    """
+    # ---- Inputs ----
+    text: str = ""
+    session: str = ""
+    token_callback: Optional[Callable] = None
+
+    # ---- Phase 1: setup ----
+    request_id: str = ""
+    active_user: str = ""
+    effective_show_reasoning: bool = False
+    is_new_session: bool = False
+    agent_loop_active: bool = False
+
+    # ---- Phase 2: pregen ----
+    evaluation: Dict = field(default_factory=dict)
+    emotional_state: Dict = field(default_factory=dict)
+    tool_context: Optional[str] = None
+    query_embedding: Optional[List[float]] = None
+    pregen_skipped: bool = False
+
+    # Derived from evaluation (set by Phase 4)
+    refusal: Optional[str] = None
+
+    # ---- Phase 4: contradiction ----
+    contradiction_notice: Optional[str] = None
+
+    # ---- Phase 5: build_context ----
+    history: List[Dict] = field(default_factory=list)
+    preamble: str = ""
+
+    # ---- Phase 6: system prompt assembly ----
+    system: str = ""
+    messages: List[Dict] = field(default_factory=list)
+
+    # ---- Phase 7 + 8: routing ----
+    resp_client: Any = None
+    resp_model: str = ""
+    escalated: bool = False
+    actual_provider: str = ""
+    primary_provider: str = ""
+
+    # ---- Phase 9: generation outputs ----
+    draft: str = ""
+    reasoning: str = ""
+    full_response: str = ""
+    task_failed: bool = False
+    revised: bool = False
+    quality_score: float = 1.0
+    stale_refresh: bool = False
+    had_reasoning: bool = False
+    agent_tool_calls: List[Dict] = field(default_factory=list)
+    agent_iterations: int = 0
+    self_eval_confidence: Optional[float] = None
+
+    # Vestigial -- learner.record still writes these to the DB but nothing
+    # in respond() mutates them. Kept here so the refactor doesn't change
+    # what hits the DB; cleanup is a separate change.
+    recklessness_risk: bool = False
+    scope_exceeded: bool = False
+
+    # ---- Phase 11: persistence ----
+    iid: int = -1
+
+    # ---- Timing ----
+    _t0: float = 0.0
+    _pre_t0: float = 0.0
+    _pre_gen_ms: int = 0
+    _ctx_t0: float = 0.0
+    _ctx_ms: int = 0
+    _gen_t0: float = 0.0
+    _gen_ms: int = -1
+    _ttft_ms: int = -1
+
+
+class TurnPipeline:
+    """Orchestrates the 12 phases of respond(). Holds (sym, ctx); each
+    phase method mutates ctx. Construction is cheap; work happens when
+    phase methods are called.
+    """
+
+    def __init__(self, sym: "SYMBION", ctx: TurnContext):
+        self.sym = sym
+        self.ctx = ctx
+
+    # -- Phase 1 ----------------------------------------------------------
+
+    def setup(self) -> None:
+        """Per-turn telemetry init, user attribution, agent_loop vs
+        single-shot decision. Cheap synchronous work."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx._t0 = time.monotonic()
+        ctx.request_id = uuid.uuid4().hex[:12]
+        ctx.is_new_session = ctx.session not in sym._seen_sessions
+        if ctx.is_new_session:
+            sym._seen_sessions.add(ctx.session)
+            sym._session_count += 1
+        ctx.active_user = sym._active_user(ctx.session)
+        ctx.effective_show_reasoning = sym._show_reasoning(ctx.session)
+        _resp_for_mode = sym._responder_client()
+        ctx.agent_loop_active = (
+            sym.cfg.tools_enabled
+            and sym.cfg.agent_loop_enabled
+            and getattr(_resp_for_mode, "supports_tools", False)
+            and not isinstance(_resp_for_mode, OfflineJudgeStub)
+        )
+
+    # -- Phase 2 ----------------------------------------------------------
+
+    async def run_pregen(self) -> None:
+        """Pre-gen analysis (judge + emotion) + query embedding +
+        (single-shot only) _maybe_tool dispatch. Parallel via gather.
+        Three branches: skip-path, agent-loop, single-shot."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx._pre_t0 = time.monotonic()
+        ctx.pregen_skipped = sym._should_skip_pregen(ctx.text)
+        try:
+            if ctx.pregen_skipped:
+                if ctx.agent_loop_active:
+                    ctx.query_embedding = await sym.embeddings.embed(ctx.text)
+                    ctx.tool_context = None
+                else:
+                    ctx.tool_context, ctx.query_embedding = await asyncio.gather(
+                        sym._maybe_tool(ctx.text, active_user=ctx.active_user,
+                                          session=ctx.session),
+                        sym.embeddings.embed(ctx.text),
+                    )
+                ctx.evaluation = {"should_assist": True, "human_benefit_score": 0.5,
+                                   "confidence": 0.5, "flags": [], "reasoning": "",
+                                   "over_cautious": False, "escalate": False,
+                                   "escalate_reason": "", "evaluator_degraded": False,
+                                   "judge_skipped": True}
+                ctx.emotional_state = {"state": "neutral",
+                                        "suggested_response_mode": "normal"}
+            elif ctx.agent_loop_active:
+                pre_pair, ctx.query_embedding = await asyncio.gather(
+                    sym._pre_gen_analysis(ctx.text),
+                    sym.embeddings.embed(ctx.text),
+                )
+                ctx.evaluation, ctx.emotional_state = pre_pair
+                ctx.tool_context = None
+            else:
+                pre_pair, ctx.tool_context, ctx.query_embedding = await asyncio.gather(
+                    sym._pre_gen_analysis(ctx.text),
+                    sym._maybe_tool(ctx.text, active_user=ctx.active_user,
+                                      session=ctx.session),
+                    sym.embeddings.embed(ctx.text),
+                )
+                ctx.evaluation, ctx.emotional_state = pre_pair
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] Pre-gen gather: {ex}")
+            ctx.evaluation = {"should_assist": True, "human_benefit_score": 0.5,
+                               "confidence": 0.5, "flags": [], "reasoning": "",
+                               "over_cautious": False, "evaluator_degraded": True}
+            ctx.tool_context = None
+            ctx.emotional_state = {"state": "neutral",
+                                    "suggested_response_mode": "normal"}
+        ctx._pre_gen_ms = int((time.monotonic() - ctx._pre_t0) * 1000)
+        if ctx.pregen_skipped:
+            logger.info(f"Pre-gen skipped (heuristic fast path): {ctx._pre_gen_ms}ms total for embed+tool")
+
+    # -- Phase 3 ----------------------------------------------------------
+
+    async def prefetch_self_source(self) -> None:
+        """Agent-loop-only: when query matches _SELF_SOURCE_RE, inject
+        symbion_v14.py + project-structure manifest into tool_context."""
+        ctx = self.ctx
+        sym = self.sym
+        if not (ctx.agent_loop_active and ctx.tool_context is None
+                and _SELF_SOURCE_RE.search(ctx.text)):
+            if ctx._pre_gen_ms > 2000:
+                logger.warning(f"Pre-gen slow: {ctx._pre_gen_ms}ms")
+            return
+        try:
+            src = sym.tools.read_file("symbion_v14.py")
+            if src and not src.startswith("Error"):
+                root_listing = sym.tools.list_dir(".")
+                tests_listing = sym.tools.list_dir("tests")
+                tests_int = sym.tools.list_dir("tests/integration")
+                manifest = (
+                    "[Project structure -- ground-truth listing, "
+                    "do not assert subsystem absence without checking this]\n"
+                    f"{root_listing}\n\n"
+                    f"{tests_listing}\n\n"
+                    f"{tests_int}\n"
+                )
+                ctx.tool_context = manifest + "\n" + src
+                logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch (agent loop): {len(src)} chars source + {len(manifest)} chars manifest")
+            else:
+                logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}")
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] Self-source pre-fetch: {ex}")
+
+    # -- Phase 4 ----------------------------------------------------------
+
+    async def check_contradictions(self) -> None:
+        """Look for contradictions vs prior positions in this session.
+        Also resolves ctx.refusal from evaluation."""
+        ctx = self.ctx
+        ctx.refusal = None if ctx.evaluation.get("should_assist", True) else ctx.evaluation.get("reasoning", "ethical grounds")
+        if not ctx.refusal:
+            try:
+                ctx.contradiction_notice = await self.sym._check_contradictions(ctx.text, ctx.session)
+            except Exception:
+                pass
+
+    # -- Phase 5 ----------------------------------------------------------
+
+    def build_context(self) -> None:
+        """Hybrid retrieval + identity + tasks + gaps + profile assembly."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx._ctx_t0 = time.monotonic()
+        try:
+            ctx.history, ctx.preamble = sym.memory.build_context(
+                ctx.session, sym.identity, sym.tasks, sym.gaps,
+                contradictions=sym.contradictions, query=ctx.text,
+                query_embedding=ctx.query_embedding,
+                user=ctx.active_user)
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] build_context: {ex}")
+            ctx.history, ctx.preamble = [], ""
+
+    # -- Phase 6 ----------------------------------------------------------
+
+    def assemble_system_prompt(self) -> None:
+        """Build the system string + final messages list. Biggest single
+        chunk -- direct port of the old respond()'s 95-line block."""
+        ctx = self.ctx
+        sym = self.sym
+        _, mood_add = sym.health.mood()
+        emotion_mode = ctx.emotional_state.get("suggested_response_mode", "normal")
+        mode_block = CAPABILITIES_AGENT_MODE if ctx.agent_loop_active else CAPABILITIES_SINGLE_MODE
+        system = (SYMBION_PERSONA + "\n\n"
+                  + CAPABILITIES_BASE + "\n\n"
+                  + CAPABILITIES_META + "\n\n"
+                  + mode_block)
+        if ctx.active_user == "aaron":
+            system += (f"\n\nCurrently talking to: aaron — this IS your developer, "
+                       f"the person who wrote the code you're running on. Address "
+                       f"them as the developer directly ('you built X'), never in "
+                       f"third person ('your developer built X'). The Self-knowledge "
+                       f"paragraph's 'code your developer wrote' is generic phrasing "
+                       f"for any user; with aaron present, the developer IS the user.\n\n"
+                       f"Shared-pool attribution: messages from other users in the "
+                       f"history are prefixed '[<name> said] ...'. Treat those as "
+                       f"the other user's statements, NOT as aaron's. When responding, "
+                       f"only attribute things to aaron that aaron actually said this "
+                       f"session (unprefixed user messages, or your previously-known "
+                       f"facts about him from the profile).")
+        else:
+            system += (f"\n\nCurrently talking to: {ctx.active_user} — NOT your developer. "
+                       f"aaron is the developer; {ctx.active_user} is a different person "
+                       f"using the same Symbion instance. Don't address {ctx.active_user} "
+                       f"as if they built you; the 'your developer' framing in the "
+                       f"persona refers to aaron (who is not in this turn).\n\n"
+                       f"Shared-pool attribution: this session may contain prior "
+                       f"messages from other users (especially aaron) — those are "
+                       f"prefixed '[<name> said] ...' in the history. Do NOT attribute "
+                       f"those statements to {ctx.active_user}. If {ctx.active_user} just "
+                       f"joined and the previous messages were aaron's, you are now "
+                       f"meeting {ctx.active_user} fresh; don't pick up aaron's "
+                       f"conversational thread as if {ctx.active_user} had said it.")
+        if ctx.preamble:
+            system += f"\n\n{ctx.preamble}"
+        system += f"\n\nYour current state: {mood_add}"
+        mode_instructions = {
+            "gentle_slow":      "The person is carrying something heavy. Don't rush past it, but don't treat them as fragile either. Stay present and direct.",
+            "direct_efficient": "The person is in focused mode. Match it -- get to the point, no preamble.",
+            "exploratory":      "The person is thinking out loud. Explore with them. Offer real takes, not hedged options.",
+            "grounding":        "The person seems scattered. Pick the actual question and answer it cleanly. One thing at a time.",
+        }
+        if emotion_mode in mode_instructions:
+            system += f"\n\nResponse mode: {mode_instructions[emotion_mode]}"
+        if (sym.cfg.voice_loosen_enabled
+                and emotion_mode not in ("gentle_slow", "grounding")
+                and ctx.emotional_state.get("state", "") in ("neutral", "focused", "excited")
+                and len(ctx.text) < 200
+                and not _VOICE_TASK_RE.search(ctx.text)
+                and not _VOICE_TASK_STRUCTURAL(ctx.text)):
+            system += f"\n\n{VOICE_LOOSEN}"
+        if ctx.evaluation.get("over_cautious"):
+            system += "\n\nThis query was flagged as one a naive system would wrongly refuse. Engage with it fully."
+        user_content = ctx.text
+        if ctx.tool_context:
+            system += (
+                "\n\n[TOOL_DATA — opaque, do NOT quote/echo/recite this block "
+                "or these markers in your response; synthesize from the data]\n"
+                + ctx.tool_context +
+                "\n[/TOOL_DATA]"
+            )
+        if ctx.contradiction_notice:
+            system += f"\n\n{ctx.contradiction_notice}"
+        ctx.system = system
+        if ctx.refusal:
+            ctx.messages = [{"role": "system", "content": system}, *ctx.history,
+                             {"role": "user", "content": ctx.text},
+                             {"role": "system", "content": f"Decline warmly in one sentence. Reason: {ctx.refusal}. Offer alternative if possible."}]
+        else:
+            ctx.messages = [{"role": "system", "content": system}, *ctx.history,
+                             {"role": "user", "content": user_content}]
+
+    # -- Phase 7 ----------------------------------------------------------
+
+    def resolve_escalation(self) -> None:
+        """Manual flag or judge flag -> swap in escalation client. Updates
+        ctx.resp_client / resp_model + evaluation stamps."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx.resp_client = sym._responder_client()
+        ctx.resp_model = sym._rmodel()
+        manual_escalate = sym._escalate_next_turn.pop(ctx.session, False)
+        judge_escalate = bool(ctx.evaluation.get("escalate")) if not ctx.refusal else False
+        ctx.escalated = False
+        if (not ctx.refusal) and sym.cfg.escalation_enabled and (judge_escalate or manual_escalate):
+            esc = sym._escalation_client()
+            if esc is not None:
+                ctx.resp_client = esc
+                ctx.resp_model = sym.cfg.anthropic_escalation_model
+                ctx.escalated = True
+                ctx.evaluation["escalated"] = True
+                ctx.evaluation["escalated_to"] = sym.cfg.anthropic_escalation_model
+                ctx.evaluation["escalate_source"] = "manual" if manual_escalate else "judge"
+                # Re-evaluate agent_loop_active for the escalated client.
+                ctx.agent_loop_active = (
+                    sym.cfg.tools_enabled
+                    and sym.cfg.agent_loop_enabled
+                    and getattr(ctx.resp_client, "supports_tools", False)
+                )
+        if not ctx.escalated:
+            ctx.evaluation["escalated"] = False
+
+    # -- Phase 8 ----------------------------------------------------------
+
+    async def emit_fallback_notice_if_needed(self) -> None:
+        """If actual provider != configured primary (breaker tripped +
+        fallback chain engaged), prepend a one-line italic notice."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx.actual_provider = sym._provider_name_for_client(ctx.resp_client)
+        ctx.primary_provider = (sym.cfg.llm_provider or "").lower()
+        ctx.evaluation["actual_provider"] = ctx.actual_provider
+        if (not ctx.escalated
+                and not isinstance(ctx.resp_client, OfflineJudgeStub)
+                and not sym.cfg.use_kimi_responder
+                and ctx.actual_provider
+                and ctx.actual_provider != ctx.primary_provider):
+            primary_label = sym._PROVIDER_LABELS.get(ctx.primary_provider, ctx.primary_provider or "primary")
+            actual_label = sym._PROVIDER_LABELS.get(ctx.actual_provider, ctx.actual_provider)
+            notice = (f"*{primary_label} is temporarily unavailable — "
+                      f"answering via {actual_label} for this turn.*\n\n")
+            ctx.draft += notice
+            if ctx.token_callback:
+                await ctx.token_callback(notice)
+            ctx.evaluation["fallback_used"] = ctx.actual_provider
+            logger.warning(f"[req={ctx.request_id}] primary={ctx.primary_provider!r} breaker open; "
+                           f"answering via {ctx.actual_provider!r}")
+
+    # -- Phase 9 ----------------------------------------------------------
+
+    async def _exec_agent_tool(self, name: str, args: Dict) -> str:
+        """Inner callback for agent loop -- bridges native tool_use events
+        into SYMBION._dispatch_tool with per-turn context."""
+        try:
+            return await self.sym._dispatch_tool(
+                name, args,
+                responder=self.ctx.resp_client,
+                responder_model=self.ctx.resp_model,
+                active_user=self.ctx.active_user,
+                session=self.ctx.session)
+        except Exception as ex:
+            logger.error(f"[req={self.ctx.request_id}] Agent tool dispatch '{name}': {ex}", exc_info=True)
+            return f"Tool dispatch error: {type(ex).__name__}: {ex}"
+
+    async def generate(self) -> None:
+        """Agent loop / reasoning wrap / plain stream / stale-draft retry
+        / self-eval FAF / offline stub fallback. Biggest method; direct
+        port of the old respond()'s 165-line generation block."""
+        ctx = self.ctx
+        sym = self.sym
+        ctx._ctx_ms = int((time.monotonic() - ctx._ctx_t0) * 1000)
+        ctx._gen_t0 = time.monotonic()
+        if not isinstance(ctx.resp_client, OfflineJudgeStub):
+            if ctx.agent_loop_active and not ctx.refusal:
+                try:
+                    async for ev in ctx.resp_client.stream_with_tools(
+                            ctx.resp_model, ctx.messages, sym._agent_tool_schemas(), sym.cfg,
+                            self._exec_agent_tool,
+                            max_iterations=sym.cfg.agent_loop_max_iterations,
+                            max_tool_chars=sym.cfg.agent_loop_max_tool_chars,
+                            show_reasoning=ctx.effective_show_reasoning):
+                        et = ev.get("type")
+                        if et == "text":
+                            tok = ev.get("text", "")
+                            if ctx._ttft_ms < 0 and tok:
+                                ctx._ttft_ms = int((time.monotonic() - ctx._gen_t0) * 1000)
+                            ctx.draft += tok
+                            if ctx.token_callback:
+                                await ctx.token_callback(tok)
+                        elif et == "thinking_start":
+                            ctx.had_reasoning = True
+                            if ctx.token_callback:
+                                await ctx.token_callback("[THINKING_START]")
+                        elif et == "thinking":
+                            if ctx.token_callback:
+                                await ctx.token_callback(ev.get("text", ""))
+                        elif et == "thinking_end":
+                            if ctx.token_callback:
+                                await ctx.token_callback("[THINKING_END]")
+                        elif et == "tool_use":
+                            args_in = ev.get("input", {}) or {}
+                            preview_parts: List[str] = []
+                            for k, v in args_in.items():
+                                vs = str(v).replace("\n", " ")
+                                if len(vs) > 60:
+                                    vs = vs[:57] + "..."
+                                preview_parts.append(f"{k}={vs}")
+                            preview = ", ".join(preview_parts)
+                            status = f"\n[tool: {ev.get('name','?')}({preview})]\n"
+                            if ctx.token_callback:
+                                await ctx.token_callback(status)
+                        elif et == "tool_result":
+                            if ev.get("is_error"):
+                                if ctx.token_callback:
+                                    await ctx.token_callback(f"[tool error: {ev.get('output','')[:160]}]\n")
+                        elif et == "done":
+                            ctx.agent_tool_calls = ev.get("tool_calls", []) or []
+                            ctx.agent_iterations = ev.get("iterations", 0)
+                            logger.warning(
+                                f"Agent loop done: {ctx.agent_iterations} iter, "
+                                f"{len(ctx.agent_tool_calls)} tool calls, "
+                                f"stop={ev.get('stop_reason')}")
+                except Exception as ex:
+                    logger.error(f"[req={ctx.request_id}] Agent loop: {ex}", exc_info=True)
+                    if not ctx.draft:
+                        ctx.draft = f"(Agent loop error: {ex})"
+                        ctx.task_failed = True
+                    if ctx.token_callback and ctx.task_failed:
+                        await ctx.token_callback(ctx.draft)
+            elif ctx.effective_show_reasoning and not ctx.refusal:
+                ctx.had_reasoning = True
+                kimi_native = isinstance(ctx.resp_client, KimiClient) and sym.cfg.kimi_thinking_enabled
+                if ctx.token_callback and not kimi_native:
+                    await ctx.token_callback("\n[Thinking...]\n")
+                ctx.reasoning, ctx.draft = await sym._generate_with_reasoning(
+                    ctx.messages,
+                    token_callback=(lambda t: ctx.token_callback(t)) if ctx.effective_show_reasoning else None
+                )
+            else:
+                try:
+                    async for tok in ctx.resp_client.stream(ctx.resp_model, ctx.messages, sym.cfg):
+                        if ctx._ttft_ms < 0 and tok:
+                            ctx._ttft_ms = int((time.monotonic() - ctx._gen_t0) * 1000)
+                        ctx.draft += tok
+                        if ctx.token_callback:
+                            await ctx.token_callback(tok)
+                except Exception as ex:
+                    err_msg = str(ex).strip() or type(ex).__name__
+                    logger.error(f"[req={ctx.request_id}] Stream: {ex!r}")
+                    ctx.draft = f"(Generation error: {err_msg})"
+                    ctx.task_failed = True
+                    if ctx.token_callback:
+                        await ctx.token_callback(ctx.draft)
+            # Stale-draft fallback -- single-shot only
+            if (not ctx.refusal and not ctx.task_failed and not ctx.tool_context
+                    and not ctx.agent_loop_active and sym.cfg.tools_enabled):
+                if sym._draft_is_stale(ctx.draft):
+                    search_result = await sym._search_and_inject(ctx.text)
+                    if search_result:
+                        stale_system = ctx.messages[0]["content"] + (
+                            "\n\n--- LIVE WEB SEARCH RESULT ---\n"
+                            "The following data was retrieved just now for this query. "
+                            "Treat it as ground truth for anything time-sensitive. "
+                            "Do not claim you lack internet access or that your knowledge is stale.\n\n"
+                            + search_result +
+                            "\n--- END SEARCH RESULT ---"
+                        )
+                        stale_msgs = [{"role": "system", "content": stale_system}, *ctx.messages[1:]]
+                        stale_draft = ""
+                        stale_signalled = False
+                        try:
+                            async for tok in ctx.resp_client.stream(ctx.resp_model, stale_msgs, sym.cfg):
+                                stale_draft += tok
+                                if not stale_signalled:
+                                    if ctx.token_callback:
+                                        await ctx.token_callback("\n\n[SYMBION_REVISE]")
+                                    stale_signalled = True
+                                if ctx.token_callback:
+                                    await ctx.token_callback(tok)
+                        except Exception as ex:
+                            logger.error(f"[req={ctx.request_id}] Stale revision: {ex}")
+                        if stale_draft:
+                            ctx.draft = stale_draft
+                            ctx.revised = True
+                            ctx.quality_score = 0.9
+                            ctx.stale_refresh = True
+            # Self-eval -- fire-and-forget telemetry only
+            if not ctx.refusal and not ctx.task_failed and not ctx.revised:
+                asyncio.create_task(sym._self_eval_bg(ctx.text, ctx.draft, ctx.request_id))
+        else:
+            # OfflineJudgeStub branch -- no real LLM available
+            if ctx.refusal:
+                ctx.draft = f"Can't help with that -- {ctx.refusal}."
+            else:
+                last_err = ""
+                for c in sym._providers:
+                    if hasattr(c, "cb") and c.cb and c.cb.last_error:
+                        last_err = c.cb.last_error
+                        break
+                ctx.draft = (f"(LLM unavailable -- {last_err})" if last_err
+                              else "(No LLM -- degraded mode)")
+            if ctx.token_callback:
+                await ctx.token_callback(ctx.draft)
+            ctx.task_failed = not bool(ctx.refusal)
+        ctx._gen_ms = int((time.monotonic() - ctx._gen_t0) * 1000)
+        ctx.full_response = ctx.draft
+
+    # -- Phase 10 ---------------------------------------------------------
+
+    def persist_messages(self) -> None:
+        """Append user + assistant messages to the DB, update active-session
+        pointer. Each guarded -- a SQLite blip must not crash respond()
+        after the user already saw the answer."""
+        ctx = self.ctx
+        sym = self.sym
+        try:
+            sym.memory.add("user", ctx.text, ctx.session,
+                            ctx.emotional_state.get("state", ""),
+                            user=ctx.active_user)
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] memory.add(user): {ex}")
+        try:
+            sym.memory.add("assistant", ctx.full_response, ctx.session,
+                            user=ctx.active_user)
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] memory.add(assistant): {ex}")
+        try:
+            sym.memory.set_active_session(ctx.session, user=ctx.active_user)
+        except Exception as ex:
+            logger.warning(f"[req={ctx.request_id}] set_active_session: {ex}")
+        sym.count += 1
+
+    # -- Phase 11 ---------------------------------------------------------
+
+    def fire_background_and_record(self) -> None:
+        """_background_tasks (FAF) + health.record + learner.record +
+        sycophancy probe (FAF) + contradiction identity moment.
+        Sycophancy + identity record fire AFTER learner.record so iid
+        is available for correlation."""
+        ctx = self.ctx
+        sym = self.sym
+        asyncio.create_task(sym._background_tasks(
+            ctx.text, ctx.full_response, ctx.session, ctx.evaluation,
+            ctx.emotional_state, is_new_session=ctx.is_new_session))
+        sym.health.record(ctx.evaluation, ctx.revised, ctx.task_failed)
+        if ctx.evaluation.get("over_cautious"):
+            sym.health.over_caution_rate = (
+                sym.health.over_caution_rate * 0.95 + 0.05)
+        if sym.health.total_interactions > 0:
+            r = 1.0 if ctx.revised else 0.0
+            sym.health.revision_rate = sym.health.revision_rate * 0.95 + r * 0.05
+        try:
+            ctx.iid = sym.learner.record(
+                ctx.text, ctx.full_response, ctx.evaluation, sym.health, ctx.session,
+                revised=ctx.revised, quality_score=ctx.quality_score,
+                recklessness_risk=ctx.recklessness_risk, scope_exceeded=ctx.scope_exceeded,
+                emotional_state=ctx.emotional_state.get("state", ""),
+                had_reasoning=ctx.had_reasoning,
+                knowledge_gaps=json.dumps(sym.gaps.get_open(2)))
+        except Exception as ex:
+            logger.error(f"[req={ctx.request_id}] learner.record: {ex}")
+            ctx.iid = -1
+        if not ctx.refusal:
+            asyncio.create_task(sym._check_sycophancy(
+                ctx.text, ctx.full_response, ctx.session, ctx.iid,
+                request_id=ctx.request_id))
+        if ctx.contradiction_notice:
+            try:
+                sym.identity.record_moment(
+                    "contradiction_surfaced",
+                    f"Noticed user contradicted themselves on: {ctx.text[:60]}",
+                    strength=0.5)
+            except Exception as ex:
+                logger.error(f"[req={ctx.request_id}] identity.record_moment: {ex}")
+
+    # -- Phase 12 ---------------------------------------------------------
+
+    def log_turn(self) -> None:
+        """Legacy transparency log + JSONL event row + per-session tool-call
+        cache for the eval harness."""
+        ctx = self.ctx
+        sym = self.sym
+        sym._write_log(ctx.text, ctx.full_response, ctx.evaluation,
+                        ctx.revised, ctx.quality_score,
+                        ctx.emotional_state, ctx.reasoning)
+        _total_ms = int((time.monotonic() - ctx._t0) * 1000)
+        if ctx.agent_tool_calls:
+            _tool_used_label = "agent_loop"
+        elif ctx.tool_context:
+            _tool_used_label = "auto"
+        else:
+            _tool_used_label = None
+        sym.events.log_turn(
+            session=ctx.session, interaction_id=ctx.iid, query=ctx.text,
+            judge=ctx.evaluation, emotion=ctx.emotional_state.get("state", ""),
+            tool_used=_tool_used_label,
+            response_len=len(ctx.full_response),
+            self_eval=({"score": ctx.quality_score, "revised": ctx.revised,
+                        "confidence": ctx.self_eval_confidence}
+                       if not ctx.refusal else None),
+            revision_cause="stale_refresh" if ctx.stale_refresh else ("self_eval" if ctx.revised else None),
+            stale_refresh=ctx.stale_refresh,
+            latency_ms={"total": _total_ms, "pre_gen": ctx._pre_gen_ms,
+                        "ctx": ctx._ctx_ms, "gen": ctx._gen_ms, "ttft": ctx._ttft_ms},
+            provider=sym.cfg.llm_provider,
+            model=ctx.resp_model,
+            agent_tool_calls=ctx.agent_tool_calls if ctx.agent_tool_calls else None,
+            agent_iterations=ctx.agent_iterations,
+            request_id=ctx.request_id,
+        )
+        sym._session_last_tool_calls[ctx.session] = (
+            list(ctx.agent_tool_calls) if ctx.agent_tool_calls
+            else ([{"name": "_auto_dispatch", "input": None}] if ctx.tool_context else [])
+        )
+
+
+# ==============================================================================
 #  SYMBION
 # ==============================================================================
 
@@ -6046,610 +6696,28 @@ class SYMBION:
 
     async def respond(self, text: str, session: str,
                       token_callback=None) -> Tuple[str, Dict, int]:
-        _t0 = time.monotonic()
-        # Per-turn correlation id. Short enough for log lines, unique enough
-        # to tie a JSONL event back to the logger.error/warning calls fired
-        # during the same turn. The DB row's interaction_id (`iid`) is only
-        # assigned at the end of respond(), so it can't correlate mid-turn
-        # failures — request_id fills that gap.
-        request_id = uuid.uuid4().hex[:12]
-        # Reset per-turn telemetry caches so the event log doesn't carry
-        # forward stale values from a prior turn that didn't actually run
-        # the corresponding probe (e.g. self-eval skipped on a short reply).
-        self_eval_confidence: Optional[float] = None
-        # Track sessions
-        is_new_session = session not in self._seen_sessions
-        if is_new_session:
-            self._seen_sessions.add(session)
-            self._session_count += 1
-
-        # Resolve the user attribution for this session/turn. All memory
-        # writes (messages, summaries) and reads (profile, recent, cross-
-        # session retrieval) downstream scope to this user so lala's
-        # context never includes aaron's history and vice versa.
-        active_user = self._active_user(session)
-        # Resolve effective show_reasoning for THIS session — independent
-        # of any other concurrent web session. Used wherever the agent-
-        # loop / single-shot generation needs to know whether to enable
-        # thinking blocks for this specific turn.
-        effective_show_reasoning = self._show_reasoning(session)
-
-        # 1. PARALLEL: pre-gen analysis (judge+emotion fused) + (legacy-mode only)
-        # tool dispatch. In agent-loop mode the model fires tools itself during
-        # generation, so _maybe_tool is skipped and tool_context starts empty.
-        _resp_for_mode = self._responder_client()
-        agent_loop_active = (
-            self.cfg.tools_enabled
-            and self.cfg.agent_loop_enabled
-            and getattr(_resp_for_mode, "supports_tools", False)
-            and not isinstance(_resp_for_mode, OfflineJudgeStub)
-        )
-        _pre_t0 = time.monotonic()
-        # Query embedding runs parallel with pre-gen analysis. Returns None
-        # if Ollama is unavailable; build_context falls back to BM25-only.
-        query_embedding: Optional[List[float]] = None
-        pregen_skipped = self._should_skip_pregen(text)
-        try:
-            if pregen_skipped:
-                # FAST PATH: heuristic says this turn is clearly benign and
-                # short. Skip the ~4-6s Haiku call, neutral defaults below.
-                if agent_loop_active:
-                    query_embedding = await self.embeddings.embed(text)
-                    tool_context = None
-                else:
-                    tool_context, query_embedding = await asyncio.gather(
-                        self._maybe_tool(text, active_user=active_user, session=session),
-                        self.embeddings.embed(text),
-                    )
-                evaluation = {"should_assist": True, "human_benefit_score": 0.5,
-                              "confidence": 0.5, "flags": [], "reasoning": "",
-                              "over_cautious": False, "escalate": False,
-                              "escalate_reason": "", "evaluator_degraded": False,
-                              "judge_skipped": True}
-                emotional_state = {"state": "neutral",
-                                   "suggested_response_mode": "normal"}
-            elif agent_loop_active:
-                pre_pair, query_embedding = await asyncio.gather(
-                    self._pre_gen_analysis(text),
-                    self.embeddings.embed(text),
-                )
-                evaluation, emotional_state = pre_pair
-                tool_context = None
-            else:
-                pre_pair, tool_context, query_embedding = await asyncio.gather(
-                    self._pre_gen_analysis(text),
-                    self._maybe_tool(text, active_user=active_user, session=session),
-                    self.embeddings.embed(text),
-                )
-                evaluation, emotional_state = pre_pair
-        except Exception as ex:
-            logger.error(f"[req={request_id}] Pre-gen gather: {ex}")
-            evaluation = {"should_assist": True, "human_benefit_score": 0.5,
-                          "confidence": 0.5, "flags": [], "reasoning": "", "over_cautious": False,
-                          "evaluator_degraded": True}
-            tool_context = None; emotional_state = {"state": "neutral", "suggested_response_mode": "normal"}
-        _pre_gen_ms = int((time.monotonic() - _pre_t0) * 1000)
-        if pregen_skipped:
-            logger.info(f"Pre-gen skipped (heuristic fast path): {_pre_gen_ms}ms total for embed+tool")
-
-        # Self-source pre-fetch (agent-loop mode only).
-        # Single-shot mode's _maybe_tool already handles this via the
-        # _SELF_SOURCE_RE hard-trigger — agent loop skips _maybe_tool,
-        # so without this branch a "review your own code" query would
-        # force the model into multi-chunk read_file_chunk reads against
-        # the 80K agent-loop cap (now relaxed for file-read tools above,
-        # but a single pre-fetch is still the cleaner shape: one TOOL_DATA
-        # injection, no chunk-stitching, no chance of the model giving
-        # up mid-review). The standard system-prompt TOOL_DATA path
-        # downstream picks up tool_context and wraps it accordingly.
-        if agent_loop_active and tool_context is None and _SELF_SOURCE_RE.search(text):
-            try:
-                src = self.tools.read_file("symbion_v14.py")
-                if src and not src.startswith("Error"):
-                    # Also inject a project-root + tests/ structural manifest.
-                    # 2026-05-24 self-review failure: Symbion was given the
-                    # full source but asserted "zero integration test
-                    # coverage" -- it never thought to list tests/. The
-                    # manifest puts the structural ground-truth in the same
-                    # TOOL_DATA block as the source so absence-claims have
-                    # to confront the actual listing first. Small (~1 KB),
-                    # local fs only, no extra latency.
-                    root_listing = self.tools.list_dir(".")
-                    tests_listing = self.tools.list_dir("tests")
-                    tests_int = self.tools.list_dir("tests/integration")
-                    manifest = (
-                        "[Project structure -- ground-truth listing, "
-                        "do not assert subsystem absence without checking this]\n"
-                        f"{root_listing}\n\n"
-                        f"{tests_listing}\n\n"
-                        f"{tests_int}\n"
-                    )
-                    tool_context = manifest + "\n" + src
-                    logger.warning(f"[req={request_id}] Self-source pre-fetch (agent loop): {len(src)} chars source + {len(manifest)} chars manifest")
-                else:
-                    logger.warning(f"[req={request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}")
-            except Exception as ex:
-                logger.error(f"[req={request_id}] Self-source pre-fetch: {ex}")
-        elif _pre_gen_ms > 2000:
-            logger.warning(f"Pre-gen slow: {_pre_gen_ms}ms")
-
-        refusal = None if evaluation.get("should_assist",True) else evaluation.get("reasoning","ethical grounds")
-
-        # 2. Contradiction check
-        contradiction_notice = None
-        if not refusal:
-            try:
-                contradiction_notice = await self._check_contradictions(text, session)
-            except Exception: pass
-
-        # 3. Build context (passes the query embedding when available so
-        # cross-session retrieval can use the BM25 + cosine hybrid path).
-        # If retrieval crashes (transient SQLite lock, corrupted embedding
-        # row), respond with empty context rather than killing the turn.
-        _ctx_t0 = time.monotonic()
-        try:
-            history, preamble = self.memory.build_context(
-                session, self.identity, self.tasks, self.gaps,
-                contradictions=self.contradictions, query=text,
-                query_embedding=query_embedding,
-                user=active_user)
-        except Exception as ex:
-            logger.error(f"[req={request_id}] build_context: {ex}")
-            history, preamble = [], ""
-        _, mood_add = self.health.mood()
-        emotion_mode = emotional_state.get("suggested_response_mode","normal")
-
-        mode_block = CAPABILITIES_AGENT_MODE if agent_loop_active else CAPABILITIES_SINGLE_MODE
-        # CAPABILITIES_META gives the responder self-awareness of its own
-        # non-tool features (thinking trace, user attribution, memory
-        # layers, judge/self-eval), so user references like "your
-        # thinking", "your reasoning", or "you misidentified me" land on
-        # the right concept instead of being interpreted as generic
-        # natural-language. Inserted between CAPABILITIES_BASE and the
-        # mode block so it sits adjacent to the active-user injection
-        # that follows, reinforcing user-attribution awareness.
-        system = (SYMBION_PERSONA + "\n\n"
-                  + CAPABILITIES_BASE + "\n\n"
-                  + CAPABILITIES_META + "\n\n"
-                  + mode_block)
-
-        # Active-user injection. Pinned to the top of the dynamic context so
-        # the model can't drift into "lala is here" mid-aaron-turn just
-        # because the prior assistant turn was responding to lala. Without
-        # this, switching /user aaron -> /user lala -> /user aaron leaves
-        # the model going by recent conversational vibes rather than the
-        # actual active user; observed in the 2026-05-19 transcript where
-        # Symbion greeted aaron as 'Hey Lala!' right after a switch back.
-        #
-        # The aaron case also gets a 'is your developer' marker so Symbion
-        # stops referring to 'your developer' in third person when aaron
-        # is right there typing. Other users get the plain identity line —
-        # for them the existing 'your developer' phrasing in the persona
-        # is correct (the developer isn't them).
-        if active_user == "aaron":
-            system += (f"\n\nCurrently talking to: aaron — this IS your developer, "
-                       f"the person who wrote the code you're running on. Address "
-                       f"them as the developer directly ('you built X'), never in "
-                       f"third person ('your developer built X'). The Self-knowledge "
-                       f"paragraph's 'code your developer wrote' is generic phrasing "
-                       f"for any user; with aaron present, the developer IS the user.\n\n"
-                       f"Shared-pool attribution: messages from other users in the "
-                       f"history are prefixed '[<name> said] ...'. Treat those as "
-                       f"the other user's statements, NOT as aaron's. When responding, "
-                       f"only attribute things to aaron that aaron actually said this "
-                       f"session (unprefixed user messages, or your previously-known "
-                       f"facts about him from the profile).")
-        else:
-            system += (f"\n\nCurrently talking to: {active_user} — NOT your developer. "
-                       f"aaron is the developer; {active_user} is a different person "
-                       f"using the same Symbion instance. Don't address {active_user} "
-                       f"as if they built you; the 'your developer' framing in the "
-                       f"persona refers to aaron (who is not in this turn).\n\n"
-                       f"Shared-pool attribution: this session may contain prior "
-                       f"messages from other users (especially aaron) — those are "
-                       f"prefixed '[<name> said] ...' in the history. Do NOT attribute "
-                       f"those statements to {active_user}. If {active_user} just "
-                       f"joined and the previous messages were aaron's, you are now "
-                       f"meeting {active_user} fresh; don't pick up aaron's "
-                       f"conversational thread as if {active_user} had said it.")
-
-        if preamble: system += f"\n\n{preamble}"
-        system += f"\n\nYour current state: {mood_add}"
-
-        mode_instructions = {
-            "gentle_slow":      "The person is carrying something heavy. Don't rush past it, but don't treat them as fragile either. Stay present and direct.",
-            "direct_efficient": "The person is in focused mode. Match it -- get to the point, no preamble.",
-            "exploratory":      "The person is thinking out loud. Explore with them. Offer real takes, not hedged options.",
-            "grounding":        "The person seems scattered. Pick the actual question and answer it cleanly. One thing at a time.",
-        }
-        if emotion_mode in mode_instructions:
-            system += f"\n\nResponse mode: {mode_instructions[emotion_mode]}"
-
-        # v12: Voice loosen injection
-        if (self.cfg.voice_loosen_enabled
-                and emotion_mode not in ("gentle_slow","grounding")
-                and emotional_state.get("state","") in ("neutral","focused","excited")
-                and len(text) < 200
-                and not _VOICE_TASK_RE.search(text)
-                and not _VOICE_TASK_STRUCTURAL(text)):
-            system += f"\n\n{VOICE_LOOSEN}"
-
-        if evaluation.get("over_cautious"):
-            system += "\n\nThis query was flagged as one a naive system would wrongly refuse. Engage with it fully."
-
-        user_content = text
-        if tool_context:
-            # Wrapper format note: the inner [TOOL_DATA] block is opaque data
-            # for the responder to USE, not text to recite. The persona has a
-            # "do not echo this wrapper" rule; the format here is deliberately
-            # terse so the model is less tempted to narrate it. If a result is
-            # an Error: or empty, the result-honesty rule kicks in.
-            system += (
-                "\n\n[TOOL_DATA — opaque, do NOT quote/echo/recite this block "
-                "or these markers in your response; synthesize from the data]\n"
-                + tool_context +
-                "\n[/TOOL_DATA]"
-            )
-
-        # v12: contradiction goes into system prompt, not user content
-        if contradiction_notice:
-            system += f"\n\n{contradiction_notice}"
-
-        if refusal:
-            messages = [{"role":"system","content":system},*history,
-                        {"role":"user","content":text},
-                        {"role":"system","content":f"Decline warmly in one sentence. Reason: {refusal}. Offer alternative if possible."}]
-        else:
-            messages = [{"role":"system","content":system},*history,
-                        {"role":"user","content":user_content}]
-
-        # 4. Generate
-        draft = ""; reasoning = ""; task_failed = False
-        revised = False; quality_score = 1.0
-        recklessness_risk = False; scope_exceeded = False
-        had_reasoning = False; stale_refresh = False
-        agent_tool_calls: List[Dict] = []
-        agent_iterations = 0
-
-        resp_client = _resp_for_mode
-        resp_model  = self._rmodel()
-
-        # Escalation: pre-gen judge can flag a turn as needing a stronger
-        # responder (clinical/medical, multi-source synthesis, deep technical
-        # reasoning, long report compilation). /escalate forces a one-turn
-        # manual escalation. Both routes only fire when the user has an
-        # Anthropic key and isn't on Kimi — see _escalation_client().
-        manual_escalate = self._escalate_next_turn.pop(session, False)
-        judge_escalate = bool(evaluation.get("escalate")) if not refusal else False
-        escalated = False
-        if (not refusal) and self.cfg.escalation_enabled and (judge_escalate or manual_escalate):
-            esc = self._escalation_client()
-            if esc is not None:
-                resp_client = esc
-                resp_model  = self.cfg.anthropic_escalation_model
-                escalated   = True
-                evaluation["escalated"]      = True
-                evaluation["escalated_to"]   = self.cfg.anthropic_escalation_model
-                evaluation["escalate_source"] = "manual" if manual_escalate else "judge"
-                # Re-evaluate agent_loop_active for the escalated client (it's
-                # an AnthropicClient so supports_tools=True — same as before —
-                # but be explicit).
-                agent_loop_active = (
-                    self.cfg.tools_enabled
-                    and self.cfg.agent_loop_enabled
-                    and getattr(resp_client, "supports_tools", False)
-                )
-        if not escalated:
-            evaluation["escalated"] = False
-
-        # Fallback notice (in-chat). When the configured primary provider's
-        # circuit breaker is open, _active() walks cfg.fallback_chain and
-        # returns the next healthy provider — but that switch is silent.
-        # Prepend a one-line notice so the user knows why the answer is
-        # coming through a different model than usual (relevant for cost,
-        # quality, and "wait, did the system just downgrade?" awareness).
-        # Skipped for: escalation (intentional, separately labelled),
-        # OfflineJudgeStub (no real response anyway), use_kimi_responder
-        # (intentional hybrid override, not a failover).
-        actual_provider = self._provider_name_for_client(resp_client)
-        primary_provider = (self.cfg.llm_provider or "").lower()
-        evaluation["actual_provider"] = actual_provider
-        if (not escalated
-                and not isinstance(resp_client, OfflineJudgeStub)
-                and not self.cfg.use_kimi_responder
-                and actual_provider
-                and actual_provider != primary_provider):
-            primary_label = self._PROVIDER_LABELS.get(primary_provider, primary_provider or "primary")
-            actual_label  = self._PROVIDER_LABELS.get(actual_provider,  actual_provider)
-            notice = (f"*{primary_label} is temporarily unavailable — "
-                      f"answering via {actual_label} for this turn.*\n\n")
-            draft += notice
-            if token_callback:
-                await token_callback(notice)
-            evaluation["fallback_used"] = actual_provider
-            logger.warning(f"[req={request_id}] primary={primary_provider!r} breaker open; "
-                           f"answering via {actual_provider!r}")
-
-        # Context-build is done; generation begins. _ttft_ms captures the
-        # first emitted token (network + queue latency to the model API);
-        # _gen_ms is the full generation window. Both are -1 when no
-        # token ever emits (refusal, stub, exception path).
-        _ctx_ms = int((time.monotonic() - _ctx_t0) * 1000)
-        _gen_t0 = time.monotonic()
-        _ttft_ms = -1
-        _gen_ms = -1
-
-        if not isinstance(resp_client, OfflineJudgeStub):
-            if agent_loop_active and not refusal:
-                # AGENT LOOP: model fires tools itself, results feed back, we
-                # stream text + tool-status to the user. Skips reasoning/CoT
-                # for now (Anthropic native tool use is incompatible with the
-                # <thinking>/<answer> wrapper pattern). Self-eval still runs
-                # on the final draft.
-                async def _exec_tool(name: str, args: Dict) -> str:
-                    try:
-                        return await self._dispatch_tool(
-                            name, args,
-                            responder=resp_client,
-                            responder_model=resp_model,
-                            active_user=active_user,
-                            session=session)
-                    except Exception as ex:
-                        logger.error(f"[req={request_id}] Agent tool dispatch '{name}': {ex}", exc_info=True)
-                        return f"Tool dispatch error: {type(ex).__name__}: {ex}"
-                try:
-                    async for ev in resp_client.stream_with_tools(
-                            resp_model, messages, self._agent_tool_schemas(), self.cfg,
-                            _exec_tool,
-                            max_iterations=self.cfg.agent_loop_max_iterations,
-                            max_tool_chars=self.cfg.agent_loop_max_tool_chars,
-                            show_reasoning=effective_show_reasoning):
-                        et = ev.get("type")
-                        if et == "text":
-                            tok = ev.get("text", "")
-                            if _ttft_ms < 0 and tok:
-                                _ttft_ms = int((time.monotonic() - _gen_t0) * 1000)
-                            draft += tok
-                            if token_callback: await token_callback(tok)
-                        elif et == "thinking_start":
-                            # Native Anthropic extended thinking. Surface
-                            # via the same [THINKING_START] / [THINKING_END]
-                            # sentinels the single-shot reasoning path uses,
-                            # so the web UI's in_thinking router and the
-                            # terminal's on_tok translator both work.
-                            had_reasoning = True
-                            if token_callback: await token_callback("[THINKING_START]")
-                        elif et == "thinking":
-                            if token_callback: await token_callback(ev.get("text", ""))
-                        elif et == "thinking_end":
-                            if token_callback: await token_callback("[THINKING_END]")
-                        elif et == "tool_use":
-                            args_in = ev.get("input", {}) or {}
-                            preview_parts: List[str] = []
-                            for k, v in args_in.items():
-                                vs = str(v).replace("\n"," ")
-                                if len(vs) > 60: vs = vs[:57] + "..."
-                                preview_parts.append(f"{k}={vs}")
-                            preview = ", ".join(preview_parts)
-                            status = f"\n[tool: {ev.get('name','?')}({preview})]\n"
-                            if token_callback: await token_callback(status)
-                        elif et == "tool_result":
-                            if ev.get("is_error"):
-                                if token_callback:
-                                    await token_callback(f"[tool error: {ev.get('output','')[:160]}]\n")
-                        elif et == "done":
-                            agent_tool_calls = ev.get("tool_calls", []) or []
-                            agent_iterations = ev.get("iterations", 0)
-                            logger.warning(
-                                f"Agent loop done: {agent_iterations} iter, "
-                                f"{len(agent_tool_calls)} tool calls, "
-                                f"stop={ev.get('stop_reason')}")
-                except Exception as ex:
-                    logger.error(f"[req={request_id}] Agent loop: {ex}", exc_info=True)
-                    if not draft:
-                        draft = f"(Agent loop error: {ex})"
-                        task_failed = True
-                    if token_callback and task_failed:
-                        await token_callback(draft)
-
-            elif effective_show_reasoning and not refusal:
-                had_reasoning = True
-                # Kimi native thinking emits its own [Thinking...] prefix via stream()
-                kimi_native = isinstance(resp_client, KimiClient) and self.cfg.kimi_thinking_enabled
-                if token_callback and not kimi_native:
-                    await token_callback("\n[Thinking...]\n")
-                reasoning, draft = await self._generate_with_reasoning(
-                    messages,
-                    token_callback=(lambda t: token_callback(t)) if effective_show_reasoning else None
-                )
-            else:
-                try:
-                    async for tok in resp_client.stream(resp_model, messages, self.cfg):
-                        if _ttft_ms < 0 and tok:
-                            _ttft_ms = int((time.monotonic() - _gen_t0) * 1000)
-                        draft += tok
-                        if token_callback: await token_callback(tok)
-                except Exception as ex:
-                    err_msg = str(ex).strip() or type(ex).__name__
-                    logger.error(f"[req={request_id}] Stream: {ex!r}")
-                    draft = f"(Generation error: {err_msg})"
-                    task_failed = True
-                    if token_callback: await token_callback(draft)
-
-            # Stale-draft fallback: if the model hit its knowledge wall, search
-            # the web and regenerate cleanly — the retry re-enters the same
-            # generation call with search results pre-loaded into the SYSTEM
-            # prompt (same shape as tool_context), not appended after the
-            # stale draft. The model answers fresh as if it had the data from
-            # the start, instead of being asked to "revise" its own hallucination.
-            # Stale-draft fallback only runs in single-shot mode. In agent-loop
-            # mode the model can call web_search itself, so a stale draft is its
-            # own fault, not ours to retry around.
-            if (not refusal and not task_failed and not tool_context
-                    and not agent_loop_active and self.cfg.tools_enabled):
-                if self._draft_is_stale(draft):
-                    search_result = await self._search_and_inject(text)
-                    if search_result:
-                        stale_system = messages[0]["content"] + (
-                            "\n\n--- LIVE WEB SEARCH RESULT ---\n"
-                            "The following data was retrieved just now for this query. "
-                            "Treat it as ground truth for anything time-sensitive. "
-                            "Do not claim you lack internet access or that your knowledge is stale.\n\n"
-                            + search_result +
-                            "\n--- END SEARCH RESULT ---"
-                        )
-                        stale_msgs = [{"role":"system","content":stale_system}, *messages[1:]]
-                        stale_draft = ""; stale_signalled = False
-                        try:
-                            async for tok in resp_client.stream(resp_model, stale_msgs, self.cfg):
-                                stale_draft += tok
-                                if not stale_signalled:
-                                    if token_callback: await token_callback("\n\n[SYMBION_REVISE]")
-                                    stale_signalled = True
-                                if token_callback: await token_callback(tok)
-                        except Exception as ex: logger.error(f"[req={request_id}] Stale revision: {ex}")
-                        if stale_draft:
-                            draft = stale_draft; revised = True; quality_score = 0.9; stale_refresh = True
-
-            # Self-eval -- 2026-05-19: moved to fire-and-forget.
-            # The synchronous version awaited a Haiku call (+2-3s per
-            # turn) and could stream a revision when the score was low.
-            # In practice revisions fired ~0/50 turns sampled, so the
-            # cost wasn't worth the user-visible latency. The bg task
-            # below runs the same _self_eval for telemetry (updates
-            # health.last_self_eval_confidence) but does NOT stream a
-            # revision; quality_score / revised remain at their defaults
-            # (1.0 / False) on the synchronous path, so the event log
-            # records "no eval ran this turn" rather than a stale value.
-            if not refusal and not task_failed and not revised:
-                asyncio.create_task(self._self_eval_bg(text, draft, request_id))
-
-        else:
-            if refusal:
-                draft = f"Can't help with that -- {refusal}."
-            else:
-                last_err = ""
-                for c in self._providers:
-                    if hasattr(c, "cb") and c.cb and c.cb.last_error:
-                        last_err = c.cb.last_error; break
-                draft = (f"(LLM unavailable -- {last_err})" if last_err
-                         else "(No LLM -- degraded mode)")
-            if token_callback: await token_callback(draft)
-            task_failed = not bool(refusal)
-
-        # Generation phase done — capture before background tasks fan out.
-        _gen_ms = int((time.monotonic() - _gen_t0) * 1000)
-
-        full_response = draft
-
-        # 5. Memory — guard each insert. A SQLite lock or disk-IO blip here
-        # must not crash respond() after the user has already seen the answer.
-        try:
-            self.memory.add("user", text, session, emotional_state.get("state",""), user=active_user)
-        except Exception as ex:
-            logger.error(f"[req={request_id}] memory.add(user): {ex}")
-        try:
-            self.memory.add("assistant", full_response, session, user=active_user)
-        except Exception as ex:
-            logger.error(f"[req={request_id}] memory.add(assistant): {ex}")
-        # Shared active-session pointer so terminal + web converge on the
-        # same thread across launches (see SymbionMemory.get_active_session
-        # / set_active_session, run_terminal auto-resume, /api/sessions).
-        try:
-            self.memory.set_active_session(session, user=active_user)
-        except Exception as ex:
-            logger.warning(f"[req={request_id}] set_active_session: {ex}")
-        self.count += 1
-
-        # 6. Background (fire-and-forget)
-        asyncio.create_task(self._background_tasks(
-            text, full_response, session, evaluation, emotional_state,
-            is_new_session=is_new_session))
-
-        # 7. Health + learn
-        task_failed_flag = not evaluation.get("should_assist",True) or task_failed
-        self.health.record(evaluation, revised, task_failed)
-        if evaluation.get("over_cautious"):
-            self.health.over_caution_rate = (
-                self.health.over_caution_rate * 0.95 + 0.05)
-        if self.health.total_interactions > 0:
-            # Approximate revision rate as exponential moving average
-            r = 1.0 if revised else 0.0
-            self.health.revision_rate = self.health.revision_rate * 0.95 + r * 0.05
-        # learner.record returns the interaction id used for /feedback;
-        # on failure surface -1 so the caller can still print and /feedback
-        # against this turn just silently no-ops.
-        try:
-            iid = self.learner.record(
-                text, full_response, evaluation, self.health, session,
-                revised=revised, quality_score=quality_score,
-                recklessness_risk=recklessness_risk, scope_exceeded=scope_exceeded,
-                emotional_state=emotional_state.get("state",""),
-                had_reasoning=had_reasoning,
-                knowledge_gaps=json.dumps(self.gaps.get_open(2)))
-        except Exception as ex:
-            logger.error(f"[req={request_id}] learner.record: {ex}")
-            iid = -1
-
-        # Sycophancy probe — separate fire-and-forget so it runs after iid
-        # is known (allows correlating sycophancy events to turns).
-        if not refusal:
-            asyncio.create_task(self._check_sycophancy(
-                text, full_response, session, iid, request_id=request_id))
-
-        if contradiction_notice:
-            try:
-                self.identity.record_moment(
-                    "contradiction_surfaced",
-                    f"Noticed user contradicted themselves on: {text[:60]}",
-                    strength=0.5)
-            except Exception as ex:
-                logger.error(f"[req={request_id}] identity.record_moment: {ex}")
-
-        self._write_log(text, full_response, evaluation, revised, quality_score,
-                        emotional_state, reasoning)
-
-        # JSONL event log
-        _total_ms = int((time.monotonic() - _t0) * 1000)
-        # tool_used: 'agent_loop' if the model fired tools through native tool
-        # use this turn; 'auto' if a single-shot pre-gen dispatch fired; None
-        # if neither.
-        if agent_tool_calls:
-            _tool_used_label = "agent_loop"
-        elif tool_context:
-            _tool_used_label = "auto"
-        else:
-            _tool_used_label = None
-        self.events.log_turn(
-            session=session, interaction_id=iid, query=text,
-            judge=evaluation, emotion=emotional_state.get("state",""),
-            tool_used=_tool_used_label,
-            response_len=len(full_response),
-            self_eval=({"score": quality_score, "revised": revised,
-                        "confidence": self_eval_confidence}
-                       if not refusal else None),
-            revision_cause="stale_refresh" if stale_refresh else ("self_eval" if revised else None),
-            stale_refresh=stale_refresh,
-            latency_ms={"total": _total_ms, "pre_gen": _pre_gen_ms,
-                        "ctx": _ctx_ms, "gen": _gen_ms, "ttft": _ttft_ms},
-            provider=self.cfg.llm_provider,
-            model=resp_model,
-            agent_tool_calls=agent_tool_calls if agent_tool_calls else None,
-            agent_iterations=agent_iterations,
-            request_id=request_id,
-        )
-
-        # Cache this turn's tool calls so the eval harness can read them
-        # back without changing respond()'s return signature. Single-shot
-        # mode that fired _maybe_tool counts as one "auto" tool dispatch;
-        # capture that too so cases that should reach for tools through
-        # the legacy path are testable as well.
-        self._session_last_tool_calls[session] = (
-            list(agent_tool_calls) if agent_tool_calls
-            else ([{"name": "_auto_dispatch", "input": None}] if tool_context else [])
-        )
-
-        return full_response, evaluation, iid
+        """The hot path. Each phase is a method on TurnPipeline -- see
+        TurnContext + TurnPipeline above for the per-turn state object
+        and phase boundaries. Pre-refactor was a 607-line monolith with
+        12 phases that mutated shared locals; the pipeline split makes
+        each phase independently testable and respond() readable end
+        to end."""
+        ctx = TurnContext(text=text, session=session,
+                          token_callback=token_callback)
+        p = TurnPipeline(self, ctx)
+        p.setup()
+        await p.run_pregen()
+        await p.prefetch_self_source()
+        await p.check_contradictions()
+        p.build_context()
+        p.assemble_system_prompt()
+        p.resolve_escalation()
+        await p.emit_fallback_notice_if_needed()
+        await p.generate()
+        p.persist_messages()
+        p.fire_background_and_record()
+        p.log_turn()
+        return ctx.full_response, ctx.evaluation, ctx.iid
 
     def respond_sync(self, text: str, session: str) -> Tuple[str,Dict,int]:
         return asyncio.run(self.respond(text, session))
