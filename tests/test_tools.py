@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 import pytest
 from pathlib import Path
-from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace, _SELF_SOURCE_RE, _SELF_REVIEW_RE
+from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace, _SELF_SOURCE_RE, _SELF_REVIEW_RE, SymbionMemory
 
 
 # === 4.1: AST-based calculator ===
@@ -358,3 +358,120 @@ class TestSelfReviewRegex:
     ])
     def test_review_regex_does_not_match(self, query):
         assert _SELF_REVIEW_RE.search(query) is None, f"should NOT match: {query!r}"
+
+
+# === 4.6: shared_learnings.md import integrity ===
+#
+# Defensive checks on _parse_shared_learnings_file (added 2026-05-24
+# followup). Imported techniques surface in future system prompts via
+# the techniques retrieval block, so anyone who can write the shared
+# file controls a prompt-injection vector.
+
+def _write_block(path: Path, header: str, query: str, move: str,
+                 evidence: str = "") -> None:
+    """Helper: append one ## block to the shared_learnings.md file at path."""
+    parts = [f"## {header}", f"**query:** {query}", f"**move:** {move}"]
+    if evidence:
+        parts.append(f"**evidence:** {evidence}")
+    path.write_text((path.read_text() if path.exists() else "") +
+                    "\n" + "\n\n".join(parts) + "\n---\n",
+                    encoding="utf-8")
+
+
+class TestSharedLearningsImportIntegrity:
+    def test_normal_entry_parses_cleanly(self, tmp_path):
+        """A well-formed entry round-trips: hash matches, fields preserved."""
+        path = tmp_path / "shared.md"
+        user = "aaron"; query = "how to skim a PDF"
+        move = "skim TOC then conclusion to map argument shape"
+        h = SymbionMemory._technique_hash(user, query, move)
+        _write_block(path, f"2026-05-24 · {user} · hash:{h}",
+                     query, move, "evidence text")
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert len(entries) == 1
+        assert entries[0]["user"] == user
+        assert entries[0]["move"] == move
+        assert entries[0]["query"] == query
+        assert entries[0]["hash"] == h
+
+    def test_file_over_size_cap_refuses(self, tmp_path, monkeypatch):
+        """File-size cap kicks in before content parsing -- defends
+        against a giant file stuffing the prompt at import time."""
+        path = tmp_path / "huge.md"
+        # Write a small file but spoof its size via stat override --
+        # cheaper than writing 10MB.
+        path.write_text("## 2026 · aaron · hash:abc\n**move:** test\n",
+                        encoding="utf-8")
+        real_stat = Path.stat
+        def fake_stat(self):
+            r = real_stat(self)
+            class _S:
+                st_size = SymbionMemory._SHARED_MAX_FILE_BYTES + 1
+            return _S()
+        monkeypatch.setattr(Path, "stat", fake_stat)
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert entries == [], "oversized file should be refused entirely"
+
+    def test_hash_mismatch_skipped(self, tmp_path):
+        """Hash in the header that doesn't match recomputed (user, query,
+        move) -- tamper or corruption signature; entry must be dropped."""
+        path = tmp_path / "shared.md"
+        _write_block(path,
+                     "2026-05-24 · aaron · hash:deadbeef0000",  # bogus hash
+                     "original query", "the original move sentence")
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert entries == [], "hash-mismatched entry should be skipped"
+
+    def test_missing_hash_recomputed_not_skipped(self, tmp_path):
+        """Legacy entries without a hash header still parse -- hash is
+        derived from content. Doesn't trigger the mismatch path."""
+        path = tmp_path / "shared.md"
+        _write_block(path, "2026-05-24 · aaron",  # no hash segment
+                     "what is X", "explain X via the simplest case")
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert len(entries) == 1
+        assert entries[0]["hash"] == SymbionMemory._technique_hash(
+            "aaron", "what is X", "explain X via the simplest case")
+
+    @pytest.mark.parametrize("marker_field,marker", [
+        ("move",     "[TOOL_DATA"),
+        ("move",     "[/TOOL_DATA]"),
+        ("move",     "[SYMBION_REVISE]"),
+        ("query",    "[THINKING_START]"),
+        ("evidence", "[THINKING_END]"),
+    ])
+    def test_injection_markers_rejected(self, tmp_path, marker_field, marker):
+        """Entries containing Symbion's own system markers get rejected.
+        A legitimate move/query/evidence never contains [TOOL_DATA etc
+        as content; presence is the obvious prompt-injection signature."""
+        path = tmp_path / "shared.md"
+        fields = {"query": "normal query",
+                  "move":  "normal move sentence describing the technique",
+                  "evidence": "normal evidence"}
+        fields[marker_field] = fields[marker_field] + " " + marker
+        user = "aaron"
+        h = SymbionMemory._technique_hash(user, fields["query"], fields["move"])
+        _write_block(path, f"2026-05-24 · {user} · hash:{h}",
+                     fields["query"], fields["move"], fields["evidence"])
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert entries == [], (
+            f"entry with {marker!r} in {marker_field} should be rejected"
+        )
+
+    def test_oversized_fields_truncated(self, tmp_path):
+        """Fields over the per-field caps get truncated to the cap.
+        Verifies the caps hold (not just by failing -- by landing at
+        exactly the cap length)."""
+        path = tmp_path / "shared.md"
+        long_move = "x" * (SymbionMemory._SHARED_MAX_MOVE + 200)
+        long_query = "q" * (SymbionMemory._SHARED_MAX_QUERY + 200)
+        # Write WITHOUT a hash header so the truncation-vs-hash mismatch
+        # doesn't drop the entry (would do the right thing in production
+        # but obscures what's being tested here).
+        _write_block(path, "2026-05-24 · aaron",
+                     long_query, long_move, "x" * 5000)
+        entries = SymbionMemory._parse_shared_learnings_file(str(path))
+        assert len(entries) == 1
+        assert len(entries[0]["move"]) == SymbionMemory._SHARED_MAX_MOVE
+        assert len(entries[0]["query"]) == SymbionMemory._SHARED_MAX_QUERY
+        assert len(entries[0]["evidence"]) == SymbionMemory._SHARED_MAX_EVIDENCE

@@ -4203,13 +4203,63 @@ class SymbionMemory:
             f"{evidence_line}\n"
         )
 
+    # Caps mirror in-process technique caps from SymbionTools._validate_args
+    # (move<=500, query<=1000) and SymbionMemory._format_technique_block
+    # (evidence sliced to 1500). Imported entries that exceed these get
+    # truncated rather than rejected so a slightly-too-long edit still
+    # lands; the hash recheck below catches anything that diverges.
+    _SHARED_MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB
+    _SHARED_MAX_MOVE     = 500
+    _SHARED_MAX_QUERY    = 1000
+    _SHARED_MAX_EVIDENCE = 1500
+    _SHARED_MAX_USER     = 32
+    # Sentinels Symbion uses elsewhere in the system prompt or token stream.
+    # If any of these appear inside an imported field they're treated as
+    # prompt-injection bait and the entry is rejected. The model would
+    # otherwise see imitation TOOL_DATA / THINKING / REVISE markers in
+    # the techniques block and might honor them.
+    _SHARED_INJECTION_MARKERS = (
+        "[TOOL_DATA", "[/TOOL_DATA]",
+        "[SYMBION_REVISE]",
+        "[THINKING_START]", "[THINKING_END]",
+    )
+
     @staticmethod
     def _parse_shared_learnings_file(path) -> List[Dict]:
         """Parse the markdown file into a list of dicts. Tolerant of
         manual edits — missing fields default to empty strings. Hash is
         extracted from the `## ... hash:XXXX` header when present, or
-        re-derived from (user, query, move) when missing."""
+        re-derived from (user, query, move) when missing.
+
+        Defensive checks (added 2026-05-24 followup):
+          - File-size cap: refuse to parse anything over _SHARED_MAX_FILE_BYTES.
+            Imported content lands in future system prompts via the
+            techniques retrieval block, so an attacker who can write to
+            the shared_learnings.md path could otherwise stuff the prompt.
+          - Per-field length caps: truncate move/query/evidence/user to
+            in-process limits so a single oversized entry can't blow up
+            context downstream.
+          - Hash verification: if the header carries `hash:XXXX`, recompute
+            sha256(user+query+move)[:12] from the parsed fields and SKIP
+            the entry on mismatch (with a warning). Catches both file
+            corruption and post-export tampering.
+          - Prompt-injection marker scrub: reject entries containing
+            Symbion's own system markers ([TOOL_DATA, [SYMBION_REVISE],
+            [THINKING_*]) in any field -- those would never appear in a
+            real promoted move and are the obvious vector for fake-tool-
+            output / fake-thinking injection.
+        """
         import re as _re
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            return []
+        if size > SymbionMemory._SHARED_MAX_FILE_BYTES:
+            logger.warning(
+                f"shared_learnings file too large ({size} bytes > "
+                f"{SymbionMemory._SHARED_MAX_FILE_BYTES}); refusing to parse"
+            )
+            return []
         try:
             text = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -4248,8 +4298,43 @@ class SymbionMemory:
             ev = grab("evidence")
             if not mv:
                 continue
+            # Per-field length caps. Truncate rather than reject so a
+            # slightly-oversized manual edit doesn't drop a legitimate
+            # technique; hash recheck below will catch the divergence
+            # for any entry that was hashed pre-truncation.
+            user = (user or "")[:SymbionMemory._SHARED_MAX_USER]
+            q  = q[:SymbionMemory._SHARED_MAX_QUERY]
+            mv = mv[:SymbionMemory._SHARED_MAX_MOVE]
+            ev = ev[:SymbionMemory._SHARED_MAX_EVIDENCE]
+            # Prompt-injection marker scrub. If any field carries one of
+            # Symbion's own system sentinels, reject the entry -- a
+            # legitimate move would never contain "[TOOL_DATA" or
+            # "[SYMBION_REVISE]" as content.
+            combined = f"{user}\n{q}\n{mv}\n{ev}"
+            hit = next((m for m in SymbionMemory._SHARED_INJECTION_MARKERS
+                        if m in combined), None)
+            if hit:
+                logger.warning(
+                    f"shared_learnings entry rejected: contains injection "
+                    f"marker {hit!r} (hash={hsh or '<absent>'})"
+                )
+                continue
+            # Hash verification. The stored hash is sha256(user+query+move)
+            # [:12]; mismatch means either the file was corrupted post-
+            # export, or a field was edited and the hash wasn't recomputed
+            # (which is a tamper signature even if accidental). Skip
+            # rather than import an entry whose claimed identity doesn't
+            # match its content.
+            recomputed = SymbionMemory._technique_hash(user, q, mv)
+            if hsh and hsh != recomputed:
+                logger.warning(
+                    f"shared_learnings entry rejected: hash mismatch "
+                    f"(stored={hsh!r}, recomputed={recomputed!r}, "
+                    f"user={user!r}, move={mv[:60]!r})"
+                )
+                continue
             if not hsh:
-                hsh = SymbionMemory._technique_hash(user, q, mv)
+                hsh = recomputed
             out.append({"ts": ts, "user": user, "hash": hsh,
                          "query": q, "move": mv, "evidence": ev})
         return out
