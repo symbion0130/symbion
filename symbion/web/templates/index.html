@@ -1111,6 +1111,18 @@ const SYM_MARK_SVG = (
   '</svg>'
 );
 const SYM_LABEL_HTML = '<div class="msg-label">' + SYM_MARK_SVG + 'Symbion</div>';
+
+// Snapshot of the empty-state HTML captured at page load so we can
+// restore it after wiping chatInner (new chat, /new, /quit, switching
+// sessions). Without this, clearing innerHTML removes the breathing
+// mark element entirely and the new chat starts with a dead viewport.
+const EMPTY_STATE_HTML = (() => {
+  const el = document.getElementById('empty-state');
+  return el ? el.outerHTML : '';
+})();
+function resetChatInner(){
+  chatInner.innerHTML = EMPTY_STATE_HTML;
+}
 const inp=document.getElementById('inp');
 const btn=document.getElementById('btn');
 const thinkBtn=document.getElementById('think-btn');
@@ -1565,7 +1577,7 @@ async function switchToSession(id){
   closeSidebar();
   SESSION = id;
   localStorage.setItem(SESSION_STORE, id);
-  chatInner.innerHTML = '';
+  resetChatInner();
   // Hydrate full scrollback via REST before reopening the WS so we get
   // up to 200 messages instead of the WS's default 30. We set
   // skipNextHistory so the WS's history frame doesn't clobber the
@@ -1593,7 +1605,7 @@ async function switchToSession(id){
 function startFreshSession(){
   closeSidebar();
   SESSION = newSessionId();      // also writes to SESSION_STORE
-  chatInner.innerHTML = '';
+  resetChatInner();
   suppressReconnect = false;
   try{ if(ws) ws.close(); }catch(e){}
   setTimeout(connect, 100);
@@ -1811,7 +1823,7 @@ function connect(){
       scrollToBottom(true);
       setTimeout(()=>{
         SESSION=newSessionId();
-        chatInner.innerHTML='';
+        resetChatInner();
         suppressReconnect=false;
         try{ws.close();}catch(e){}
         setTimeout(connect,200);
@@ -1999,7 +2011,7 @@ function addSymStreamingRemote(){
 // in chronological order (memory.get_recent returns them reversed).
 function renderHistory(messages){
   if(!messages||!messages.length) return;
-  chatInner.innerHTML='';
+  resetChatInner();
   for(const m of messages){
     if(m.role==='user')           addYou(m.content);
     else if(m.role==='assistant') addSymStatic(m.content);
