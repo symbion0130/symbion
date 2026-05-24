@@ -328,6 +328,15 @@ class SymbionConfig:
     groq_responder_model:     str = "llama-3.3-70b-versatile"
     groq_judge_model:         str = "llama-3.1-8b-instant"
     groq_base_url:            str = "https://api.groq.com/openai/v1"
+    # Per-request max_tokens cap on Groq. Free-tier TPM (tokens/min) sits
+    # at ~12K for llama-3.3-70b and ~14K for llama-3.1-8b, so any single
+    # request reserving more than that 413s with rate_limit_exceeded.
+    # cfg.max_tokens defaults to 16384 (right for Anthropic Sonnet); when
+    # Groq is the fallback target, GroqClient._eff_max_tokens caps to this
+    # value (0 = use the conservative 8192 default that fits both free-tier
+    # TPMs). Paid-tier users with much higher TPM can raise this — absolute
+    # model output caps are 32K (70b) / 40K (qwen3-32b) / 8K (8b).
+    groq_max_tokens:          int = 0
 
     # DeepSeek direct: bypasses the HF Router middleman, usually cheaper for
     # the same DeepSeek model and lower latency (no router hop).
@@ -2310,6 +2319,23 @@ class GroqClient(OpenAIClient):
             return {"reasoning_effort": "none"}
         return {}
 
+    # Per-model output cap (max_tokens). Bounded by free-tier TPM (tokens
+    # per minute) for the most common case where Groq is the *fallback*
+    # provider with Anthropic primary — Sonnet's 16K cfg.max_tokens
+    # default exceeds free-tier TPM (~12K/min for llama-3.3-70b,
+    # ~14K/min for llama-3.1-8b) and triggers a 413 rate_limit_exceeded.
+    # 8K is the largest one-request reservation that fits both tiers'
+    # TPM comfortably. Paid-tier users with much higher TPM can override
+    # the conservative default by setting cfg.groq_max_tokens > 8192;
+    # absolute model output caps are far higher (32K for the 70b, 40K
+    # for qwen3-32b) but rate-limit dominates output-cap on free tier.
+    _GROQ_DEFAULT_MAX_OUTPUT = 8192
+
+    def _eff_max_tokens(self, model: str, requested: int) -> int:
+        override = getattr(self.cfg, "groq_max_tokens", 0) or 0
+        cap = override if override > 0 else self._GROQ_DEFAULT_MAX_OUTPUT
+        return min(requested, cap)
+
     async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
         async def _call():
             m = model or self.model
@@ -2340,7 +2366,8 @@ class GroqClient(OpenAIClient):
     async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
         m = model or self.model
         body = {"model": m,
-                "max_tokens": cfg.max_tokens, "temperature": cfg.temperature,
+                "max_tokens": self._eff_max_tokens(m, cfg.max_tokens),
+                "temperature": cfg.temperature,
                 "messages": messages, "stream": True,
                 **self._eff_reasoning(m)}
         async with httpx.AsyncClient(timeout=180) as c:
@@ -3451,6 +3478,7 @@ class EventLogger:
                 "benefit": judge.get("human_benefit_score", 0),
                 "confidence": judge.get("confidence", 0),
                 "over_cautious": judge.get("over_cautious", False),
+                "skipped": judge.get("judge_skipped", False),
             },
             "emotion": emotion,
             "tool_used": tool_used,
@@ -6376,7 +6404,14 @@ class SYMBION:
         # back to the provider's judge model (the cheap-classifier default).
         # Anthropic and Kimi are the two providers wired with judge/role
         # model splits; OpenAI / HF Router / DeepSeek use a single model.
-        p = self.cfg.llm_provider
+        #
+        # Provider is derived from the currently-active judge client, not
+        # cfg.llm_provider directly: when the configured primary's breaker
+        # is open, _judge_active() returns a fallback client, and sending
+        # the primary's model name to the fallback endpoint 404s. Falls
+        # back to cfg.llm_provider when the active client isn't one of the
+        # known provider classes (e.g. OfflineJudgeStub).
+        p = self._provider_name_for_client(self._judge_active()) or self.cfg.llm_provider
         if p == "anthropic":
             if role:
                 override = getattr(self.cfg, f"anthropic_{role}_model", "") or ""
@@ -6415,14 +6450,19 @@ class SYMBION:
 
     def _rmodel(self) -> str:
         if self.cfg.use_kimi_responder and self.cfg.kimi_api_key: return self.cfg.kimi_model
-        if self.cfg.llm_provider == "anthropic": return self.cfg.anthropic_model
-        if self.cfg.llm_provider == "kimi":      return self.cfg.kimi_model
-        if self.cfg.llm_provider == "ollama":
+        # Provider derived from _active() so a breaker-driven fallback to
+        # Groq doesn't send "claude-sonnet-4-6" to api.groq.com and 404.
+        # Falls back to cfg.llm_provider when the active client isn't a
+        # known provider (e.g. OfflineJudgeStub heuristic mode).
+        p = self._provider_name_for_client(self._active()) or self.cfg.llm_provider
+        if p == "anthropic": return self.cfg.anthropic_model
+        if p == "kimi":      return self.cfg.kimi_model
+        if p == "ollama":
             return self.cfg.ollama_responder_model or self.cfg.responder_model
-        if self.cfg.llm_provider == "groq":      return self.cfg.groq_responder_model
-        if self.cfg.llm_provider == "openai":    return self.cfg.openai_model
-        if self.cfg.llm_provider == "hf_router": return self.cfg.hf_router_model
-        if self.cfg.llm_provider == "deepseek":  return self.cfg.deepseek_model
+        if p == "groq":      return self.cfg.groq_responder_model
+        if p == "openai":    return self.cfg.openai_model
+        if p == "hf_router": return self.cfg.hf_router_model
+        if p == "deepseek":  return self.cfg.deepseek_model
         return self.cfg.responder_model
 
     def _judge_responder_collide(self) -> bool:
