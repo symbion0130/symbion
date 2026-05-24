@@ -221,7 +221,7 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column;
 }
 main:has(.msg.you) .chat-watermark .wm-baseline-layer{opacity:.06}
 body.typing main:has(.msg.you) .chat-watermark .wm-active-layer{
-  opacity:.45;
+  opacity:.55;
   transition:opacity 1.2s cubic-bezier(.4,0,.6,1);
 }
 .chat-watermark .wm-layer svg{
@@ -257,17 +257,21 @@ body.typing main:has(.msg.you) .chat-watermark .wm-active-layer{
   50%    {stroke-opacity:.95; stroke-width:8.5; transform:scale(1.02)}
 }
 @keyframes wm-breathe-glow-active{
-  0%,100%{filter:drop-shadow(0 0 12px rgba(139, 92,246,.65))}
-  50%    {filter:drop-shadow(0 0 96px rgba( 94,102,255,1.00))}
+  /* Bigger blur radius so the halo radiates well past the baseline
+     ring's outer edge. Peak 180px casts roughly 1.5x the watermark
+     diameter — the pulse clearly extends OUTWARD instead of sitting
+     coincident with the baseline. */
+  0%,100%{filter:drop-shadow(0 0 18px rgba(139, 92,246,.70))}
+  50%    {filter:drop-shadow(0 0 180px rgba( 94,102,255,1.00))}
 }
 @keyframes wm-breathe-ring-active{
-  /* Scale + stroke matched to wm-breathe-ring (baseline) so the active
-     ring stays coincident with baseline at all times — the only thing
-     that varies is the glow halo from the filter. mix-blend-mode:screen
-     means the matching white stroke brightens the baseline stroke
-     instead of stacking as a separate visible ring. */
-  0%,100%{stroke-opacity:.95; stroke-width:6.5; transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:8.5; transform:scale(1.02)}
+  /* Active ring scales BEYOND baseline (1.06 -> 1.18) so it forms a
+     visible aura wrapping the baseline ring rather than competing
+     with it for the same circle. Combined with screen-blend, the
+     space between baseline and active reads as a brightening halo
+     that breathes outward, not two stacked rings. */
+  0%,100%{stroke-opacity:.95; stroke-width:8;  transform:scale(1.06)}
+  50%    {stroke-opacity:1;   stroke-width:14; transform:scale(1.20)}
 }
 @media (prefers-reduced-motion: reduce){
   .wm-baseline-layer svg,.wm-baseline-layer .wm-ring-pulse,
@@ -338,16 +342,18 @@ body.typing .empty-state .es-active-layer{
   opacity:1;
   transition:opacity 1.2s cubic-bezier(.4,0,.6,1);
 }
-/* Empty-state active keyframes: brighter glow peak, ring scale/stroke
-   matched to baseline so the rings stay coincident (screen-blend
-   brightens; mismatched scale would render two distinct circles). */
+/* Empty-state active keyframes: bigger halo + ring scales BEYOND
+   baseline so the pulse radiates outward as an aura rather than
+   stacking on the baseline ring. Peak blur 220px casts roughly
+   the diameter of the mark again outward — very visible plasma
+   radiation when typing. */
 @keyframes es-breathe-glow-active{
-  0%,100%{filter:drop-shadow(0 0 18px rgba(124, 58,237,.60))}
-  50%    {filter:drop-shadow(0 0 140px rgba(94,102,255,1.00))}
+  0%,100%{filter:drop-shadow(0 0  28px rgba(124, 58,237,.65))}
+  50%    {filter:drop-shadow(0 0 220px rgba( 94,102,255,1.00))}
 }
 @keyframes es-breathe-ring-active-es{
-  0%,100%{stroke-opacity:.85; stroke-width:4.3; transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:8;   transform:scale(1.08)}
+  0%,100%{stroke-opacity:.85; stroke-width:6;  transform:scale(1.06)}
+  50%    {stroke-opacity:1;   stroke-width:11; transform:scale(1.22)}
 }
 @keyframes es-breathe-glow{
   /* All-purple plasma cycle, intensified: trough alpha bumped so the
