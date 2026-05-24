@@ -1023,6 +1023,11 @@ from symbion_tools import (
 # claims in actual code instead of fabricating from training memory. Without
 # this, the model produces architecturally plausible but invented class names
 # and file structure (see iid=193 fabrication in symbion_events.jsonl).
+#
+# Self-review patterns added 2026-05-24 after a "self review and tell me
+# what you'd change" prompt slipped past the regex. Symbion then read the
+# file via the agent loop but still confabulated line count + claimed
+# "zero integration test coverage" without ever listing tests/.
 _SELF_SOURCE_RE = re.compile(
     r"(?:"
     r"\bsymbion_v1[34]\.py\b"
@@ -1030,6 +1035,8 @@ _SELF_SOURCE_RE = re.compile(
     r"|\bread\s+symbion\b"
     r"|\brespond\s*\(\s*\)"
     r"|\b(?:respond|symbion)\s+pipeline\b"
+    r"|\bself[\s-]?(?:review|audit|critique|reflect|assessment)\b"
+    r"|\b(?:review|audit|critique|assess)\s+yourself\b"
     r")",
     re.IGNORECASE)
 
@@ -6139,8 +6146,26 @@ class SYMBION:
             try:
                 src = self.tools.read_file("symbion_v14.py")
                 if src and not src.startswith("Error"):
-                    tool_context = src
-                    logger.warning(f"[req={request_id}] Self-source pre-fetch (agent loop): {len(src)} chars")
+                    # Also inject a project-root + tests/ structural manifest.
+                    # 2026-05-24 self-review failure: Symbion was given the
+                    # full source but asserted "zero integration test
+                    # coverage" -- it never thought to list tests/. The
+                    # manifest puts the structural ground-truth in the same
+                    # TOOL_DATA block as the source so absence-claims have
+                    # to confront the actual listing first. Small (~1 KB),
+                    # local fs only, no extra latency.
+                    root_listing = self.tools.list_dir(".")
+                    tests_listing = self.tools.list_dir("tests")
+                    tests_int = self.tools.list_dir("tests/integration")
+                    manifest = (
+                        "[Project structure -- ground-truth listing, "
+                        "do not assert subsystem absence without checking this]\n"
+                        f"{root_listing}\n\n"
+                        f"{tests_listing}\n\n"
+                        f"{tests_int}\n"
+                    )
+                    tool_context = manifest + "\n" + src
+                    logger.warning(f"[req={request_id}] Self-source pre-fetch (agent loop): {len(src)} chars source + {len(manifest)} chars manifest")
                 else:
                     logger.warning(f"[req={request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}")
             except Exception as ex:

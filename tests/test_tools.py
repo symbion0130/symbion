@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 import pytest
 from pathlib import Path
-from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace
+from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace, _SELF_SOURCE_RE
 
 
 # === 4.1: AST-based calculator ===
@@ -277,3 +277,48 @@ class TestParseJson:
     def test_code_fence(self):
         r = _parse_json('```json\n{"a": 1}\n```', {"a": 0})
         assert r == {"a": 1}
+
+
+# === 4.5: Self-source pre-fetch trigger regex ===
+#
+# _SELF_SOURCE_RE gates the agent-loop pre-fetch that injects symbion_v14.py
+# (and now a project-structure manifest) into TOOL_DATA. Locking in the
+# patterns here so future tightening can't silently re-open the gap that
+# slipped on 2026-05-24 — "self review and tell me what you'd change"
+# missed the regex, Symbion read the file manually but still confabulated
+# line count and asserted "zero integration tests" without listing tests/.
+
+class TestSelfSourceRegex:
+    @pytest.mark.parametrize("query", [
+        # Original patterns (should keep matching)
+        "explain symbion_v14.py to me",
+        "walk me through your code",
+        "what's in your codebase?",
+        "show me your architecture",
+        "your pipeline has a bug",
+        "walk me through respond()",
+        "review the symbion pipeline",
+        # New self-review patterns (the 2026-05-24 miss)
+        "self review and tell me what you'd change",
+        "self-review pls",
+        "self audit your decisions",
+        "self critique your last answer",
+        "review yourself",
+        "audit yourself end to end",
+        "critique yourself",
+        "assess yourself honestly",
+    ])
+    def test_matches_self_referential(self, query):
+        assert _SELF_SOURCE_RE.search(query) is not None, f"should match: {query!r}"
+
+    @pytest.mark.parametrize("query", [
+        # Clearly user-directed — not about Symbion's own code
+        "review my code",
+        "audit this PR I'm sending",
+        "what's in this file I attached",
+        "explain how python works",
+        "review the changes I just pushed",
+        "audit my database schema",
+    ])
+    def test_does_not_match_user_directed(self, query):
+        assert _SELF_SOURCE_RE.search(query) is None, f"should NOT match: {query!r}"
