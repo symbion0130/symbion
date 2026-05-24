@@ -174,20 +174,24 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
   animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  /* Color shifts WITH the breath: trough = muted amber (--sym),
-     rising = warm gold (--warn), peak inhale = saturated terra-cotta
-     (--accent), falling = warm gold again, return to amber. Stays
-     inside the existing warm palette — no cold blues / greens — but
-     the saturated peak gives the inhale a distinct color identity
-     instead of just "more of the same warmth." */
-  0%,100%{filter:drop-shadow(0 0  8px rgba(215,175,95,.10))}
-  25%    {filter:drop-shadow(0 0 28px rgba(212,155,63,.32))}
-  50%    {filter:drop-shadow(0 0 56px rgba(200,122,58,.58))}
-  75%    {filter:drop-shadow(0 0 28px rgba(212,155,63,.32))}
+  /* Color shifts WITH the breath: trough = warm amber at rest,
+     rising through warm gold, peak inhale = saturated burnt orange,
+     falling back through gold. Alphas bumped so the palette reads
+     even at a glance — no longer "dim light in dark room." Stays
+     inside Symbion's warm family (amber / gold / terra-cotta) — no
+     cool tones — but the peak is visibly a different color from rest. */
+  0%,100%{filter:drop-shadow(0 0 10px rgba(215,175,95,.28))}
+  25%    {filter:drop-shadow(0 0 36px rgba(220,140,55,.62))}
+  50%    {filter:drop-shadow(0 0 72px rgba(232,120,56,.92))}
+  75%    {filter:drop-shadow(0 0 36px rgba(220,140,55,.62))}
 }
 @keyframes es-breathe-ring{
-  0%,100%{stroke-opacity:.55; transform:scale(1)}
-  50%    {stroke-opacity:1;   transform:scale(1.05)}
+  /* Stroke-width pumps 4.3 -> 6.5 (50% thicker) along with the scale
+     and opacity wave, so the ring visibly swells as it inhales — the
+     "actually breathing" shape Lala wanted, not just a static line
+     floating outward. */
+  0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:6.5; transform:scale(1.05)}
 }
 .es-hint{
   font-size:.82rem;color:var(--muted-2);
