@@ -281,6 +281,14 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
     autoHideMenuBar: false,
+    // Hide until first paint so the user doesn't see a blank window
+    // flash before the in-page boot animation overlay paints. The page
+    // owns the animation timing (1500ms assembly + 1750ms hold + 450ms
+    // fade); Electron just reveals the window once the DOM is ready.
+    show: false,
+  });
+  mainWindow.once('ready-to-show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
   });
 
   // Open external links in the system browser, not in-app.

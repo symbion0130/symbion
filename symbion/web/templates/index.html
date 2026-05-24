@@ -557,9 +557,123 @@ footer{
 }
 .user-choice:hover{border-color:var(--sym);color:var(--text)}
 .user-choice .sub{display:block;color:var(--muted);font-size:.72rem;margin-top:.15rem}
+
+/* Boot animation overlay (2026-05-23). Plays the Symbion split-S
+   assembly on cold page load: pieces slide together over ~1500ms,
+   hold for 1750ms, then fade out over 450ms. Gated by sessionStorage
+   below so reloads-within-window skip it. Respects prefers-reduced-motion. */
+.boot-splash{
+  position:fixed; inset:0;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--bg);
+  z-index:9999;
+  opacity:1;
+  pointer-events:none;
+  transition:opacity .45s ease;
+}
+.boot-splash.fade{opacity:0}
+.boot-splash.done{display:none}
+.boot-mark{filter:drop-shadow(0 0 24px rgba(215,175,95,.15))}
+.bm-disc,.bm-ring{opacity:0; animation:bm-fadein .3s ease forwards}
+.bm-ring{animation-delay:.05s}
+.bm-top{
+  opacity:0; transform:translateX(-32px);
+  animation:bm-slide-l .7s cubic-bezier(.2,.7,.2,1) .2s forwards;
+}
+.bm-bot{
+  opacity:0; transform:translateX(32px);
+  animation:bm-slide-r .7s cubic-bezier(.2,.7,.2,1) .4s forwards;
+}
+.bm-dotL{
+  opacity:0; transform-origin:30px 50px; transform:scale(0);
+  animation:bm-pop .35s cubic-bezier(.2,1.4,.4,1) .8s forwards;
+}
+.bm-rng{
+  opacity:0; transform-origin:50px 50px; transform:scale(0);
+  animation:bm-pop .4s cubic-bezier(.2,1.4,.4,1) .9s forwards;
+}
+.bm-dotR{
+  opacity:0; transform-origin:70px 50px; transform:scale(0);
+  animation:bm-pop .35s cubic-bezier(.2,1.4,.4,1) 1.1s forwards;
+}
+@keyframes bm-fadein{to{opacity:1}}
+@keyframes bm-slide-l{to{opacity:1; transform:translateX(0)}}
+@keyframes bm-slide-r{to{opacity:1; transform:translateX(0)}}
+@keyframes bm-pop{to{opacity:1; transform:scale(1)}}
+@media (prefers-reduced-motion: reduce){
+  .boot-splash{display:none}
+}
 </style>
 </head>
 <body>
+<!-- Boot animation overlay: split-S logo assembles on cold launch.
+     Layered above everything via z-index:9999, removed from layout
+     after the fade-out transitionend. Pieces are inline so no extra
+     network request blocks the first paint. -->
+<div id="boot-splash" class="boot-splash" aria-hidden="true">
+  <svg class="boot-mark" viewBox="0 0 100 100" width="160" height="160">
+    <circle class="bm-disc" cx="50" cy="50" r="49.8" fill="#000000"/>
+    <circle class="bm-ring" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+    <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
+      <path class="bm-top" d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
+      <path class="bm-bot" d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
+      <circle class="bm-dotL" cx="30" cy="50" r="4" fill="#faf0d7"/>
+      <circle class="bm-rng"  cx="50" cy="50" r="6.5" fill="none" stroke="#faf0d7" stroke-width="3.5"/>
+      <circle class="bm-dotR" cx="70" cy="50" r="4" fill="#faf0d7"/>
+    </g>
+  </svg>
+</div>
+<script>
+  // Boot splash: skip on reload-within-window, otherwise hold until
+  // BOTH (a) minimum 3250ms elapsed (1500ms assembly + 1750ms hold)
+  // AND (b) /health responds 200 (backend done initializing). The
+  // health gate matters on cold boot where SYMBION's __init__ runs
+  // DB migrations + embedding probe + MCP start before uvicorn
+  // accepts traffic; a warm backend satisfies it on the first poll
+  // so this is free in the fast case. Maximum wait is 30s — past
+  // that we fade anyway so a stuck backend doesn't trap the UI
+  // (the page itself surfaces connection state via the WS layer).
+  (function(){
+    var splash = document.getElementById('boot-splash');
+    if (!splash) return;
+    try {
+      if (sessionStorage.getItem('symbion_boot_played') === '1') {
+        splash.classList.add('done');
+        return;
+      }
+      sessionStorage.setItem('symbion_boot_played', '1');
+    } catch (_) { /* sessionStorage blocked — still play once */ }
+    var MIN_HOLD_MS = 3250;
+    var MAX_WAIT_MS = 30000;
+    var POLL_MS     = 250;
+    var start = Date.now();
+    function beginFade(reason){
+      splash.dataset.fadeReason = reason;
+      splash.classList.add('fade');
+      splash.addEventListener('transitionend', function once(){
+        splash.removeEventListener('transitionend', once);
+        splash.classList.add('done');
+      });
+    }
+    function waitMin(then){
+      var remaining = Math.max(0, MIN_HOLD_MS - (Date.now() - start));
+      setTimeout(then, remaining);
+    }
+    function poll(){
+      if (Date.now() - start > MAX_WAIT_MS) {
+        waitMin(function(){ beginFade('max-wait'); });
+        return;
+      }
+      fetch('/health', {cache:'no-store'}).then(function(r){
+        if (r.ok) waitMin(function(){ beginFade('health-ok'); });
+        else setTimeout(poll, POLL_MS);
+      }).catch(function(){
+        setTimeout(poll, POLL_MS);
+      });
+    }
+    poll();
+  })();
+</script>
 <div id="conn-banner" class="conn-banner" role="status" aria-live="polite"></div>
 <header>
   <button id="sidebar-btn" class="menu-btn sidebar-btn" type="button" title="Sessions" aria-label="Open session list">&#9776;</button>
