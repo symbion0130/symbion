@@ -584,11 +584,72 @@ async function checkForUpdates() {
     return;
   }
 
-  if (behind === 0) {
+  // Process-vs-disk comparison: even when disk HEAD == origin/main
+  // (behind === 0), the running Python backend may have been started
+  // before recent commits landed locally (e.g. you just pulled, or you
+  // just pushed from this machine and the dev workspace's HEAD now
+  // matches origin while the live process is still on the previous tip).
+  // /health reports "14.0+<short-hash>" — compare to disk HEAD; if they
+  // differ, a backend restart picks up the on-disk code without a pull.
+  let processHash = null;
+  let diskHash = null;
+  try {
+    const health = await fetchHealthJson(2000);
+    const v = (health && health.version) || '';
+    const m = v.match(/^14\.0\+([0-9a-f]+)$/);
+    if (m) processHash = m[1];
+    diskHash = await runGit(['rev-parse', '--short=7', 'HEAD'], REPO_ROOT);
+  } catch (_) {
+    // Comparison best-effort; null on either side falls through to the
+    // pre-existing "behind/up-to-date" semantics.
+  }
+  const processStale = processHash && diskHash && processHash !== diskHash;
+
+  if (behind === 0 && !processStale) {
     await dialog.showMessageBox(mainWindow || null, {
       type: 'info',
       title: 'Symbion is up to date',
       message: "You're on the latest version.",
+      detail: processHash
+        ? `Running build: 14.0+${processHash}`
+        : undefined,
+      buttons: ['OK'],
+    });
+    return;
+  }
+
+  if (behind === 0 && processStale) {
+    // Disk is ahead of the running process — no pull needed, just restart.
+    const confirm = await dialog.showMessageBox(mainWindow || null, {
+      type: 'question',
+      title: 'Restart needed to apply local updates',
+      message: 'Your code is current, but the running backend is on an older build.',
+      detail: `Running build: 14.0+${processHash}\nOn-disk build:  14.0+${diskHash}\n\n` +
+              'Restart the backend now to pick up the on-disk code? Takes 5-10 seconds.',
+      buttons: ['Restart backend', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (confirm.response !== 0) return;
+    if (!backend) {
+      dialog.showMessageBox(mainWindow || null, {
+        type: 'info',
+        title: 'Backend not owned by this app',
+        message: "Symbion's Python process was launched outside this app, so the desktop " +
+                 "shell can't restart it. Stop the running backend and relaunch for the changes to take effect.",
+        buttons: ['OK'],
+      });
+      return;
+    }
+    await restartBackend();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.reload();
+    }
+    await dialog.showMessageBox(mainWindow || null, {
+      type: 'info',
+      title: 'Backend restarted',
+      message: `Symbion is now running 14.0+${diskHash}.`,
+      detail: 'The tray tooltip will reflect the new build hash within 30 seconds (next /health poll).',
       buttons: ['OK'],
     });
     return;
