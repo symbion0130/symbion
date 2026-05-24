@@ -7852,7 +7852,13 @@ class SYMBION:
     # commands (info / state-toggle / forget). Terminal-specific ones (e.g.
     # /paste, /save-config, /provider runtime swap) are intentionally NOT
     # routed here — they don't translate cleanly to a stateless WS request.
-    def web_command(self, cmd: str, session: str) -> List[str]:
+    #
+    # Async since /promote needs to await promote_last_turn — previously
+    # used asyncio.run_coroutine_threadsafe + fut.result(timeout=15) which
+    # blocked the WS event loop for up to 15s and resolved to TimeoutError.
+    # Most command branches are pure-sync work (allowed inside an async
+    # function — they just don't await); only /promote actually awaits.
+    async def web_command(self, cmd: str, session: str) -> List[str]:
         c = (cmd or "").strip()
         if not c: return ["(empty command)"]
         c_low = c.lower()
@@ -7933,23 +7939,7 @@ class SYMBION:
             # /promote <text>   — use the text verbatim as the move
             tail = c[len("/promote"):].strip()
             try:
-                import asyncio as _aio
-                # web_command runs sync from inside FastAPI's async context;
-                # use create_task + wait_for-loop isn't right here. Build a
-                # fresh loop for this one-shot since we're in a sync method.
-                try:
-                    loop = _aio.get_event_loop()
-                    if loop.is_running():
-                        # Re-entrant: schedule on the running loop, block via thread.
-                        import concurrent.futures
-                        fut = _aio.run_coroutine_threadsafe(
-                            self.promote_last_turn(session, tail), loop)
-                        result = fut.result(timeout=15)
-                    else:
-                        result = loop.run_until_complete(
-                            self.promote_last_turn(session, tail))
-                except RuntimeError:
-                    result = _aio.run(self.promote_last_turn(session, tail))
+                result = await self.promote_last_turn(session, tail)
             except Exception as ex:
                 return [f"Promote failed: {type(ex).__name__}: {ex}"]
             if result["ok"]:
@@ -8704,8 +8694,12 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
                     # Generic slash-command dispatcher for web. Runs the
                     # command via symbion.web_command, returns the lines
                     # for the client to render as a Symbion message.
+                    # web_command is async (since 2026-05-24) so /promote
+                    # awaits its coroutine cleanly on the running loop
+                    # instead of the prior cross-loop run_coroutine_threadsafe
+                    # gymnastics that blocked the WS event loop up to 15s.
                     try:
-                        lines = symbion.web_command(payload.get("cmd",""), session_id)
+                        lines = await symbion.web_command(payload.get("cmd",""), session_id)
                     except Exception as ex:
                         logger.error(f"web cmd: {ex}", exc_info=True)
                         lines = [f"Error running command: {type(ex).__name__}: {ex}"]
