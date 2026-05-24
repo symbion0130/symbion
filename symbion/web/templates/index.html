@@ -179,7 +179,7 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column;
 }
 main:has(.msg.you) .chat-watermark{display:flex}
 .chat-watermark svg{
-  width:280px;height:280px;
+  width:420px;height:420px;
   overflow:visible;
 }
 /* Watermark breathing: subtler than the empty-state version (smaller
@@ -199,8 +199,8 @@ main:has(.msg.you) .chat-watermark{display:flex}
   50%    {filter:drop-shadow(0 0 40px rgba( 94,102,255,.78))}
 }
 @keyframes wm-breathe-ring{
-  0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
-  50%    {stroke-opacity:.90; stroke-width:5.5; transform:scale(1.02)}
+  0%,100%{stroke-opacity:.60; stroke-width:6.5; transform:scale(1)}
+  50%    {stroke-opacity:.95; stroke-width:8.5; transform:scale(1.02)}
 }
 /* Typing-active mode: punchier than the prior pass — faster cycle
    (1.2s, was 1.8s), bigger opacity jump (.06 -> .25), bigger scale
@@ -215,8 +215,8 @@ main:has(.msg.you) .chat-watermark{display:flex}
   50%    {filter:drop-shadow(0 0 96px rgba( 94,102,255,1.00))}
 }
 @keyframes wm-breathe-ring-active{
-  0%,100%{stroke-opacity:.90; stroke-width:5.5; transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:10;  transform:scale(1.10)}
+  0%,100%{stroke-opacity:.95; stroke-width:8;  transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:14; transform:scale(1.10)}
 }
 @media (prefers-reduced-motion: reduce){
   .chat-watermark svg,.wm-ring-pulse{animation:none}
