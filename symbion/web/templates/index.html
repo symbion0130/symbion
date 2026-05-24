@@ -113,14 +113,19 @@ header{
    explicitly when a welfare concern is present, since style.display=''
    wouldn't override the CSS-level display:none. */
 
-main{flex:1;overflow:hidden;display:flex;flex-direction:column}
+main{flex:1;overflow:hidden;display:flex;flex-direction:column;
+  /* position:relative anchors .chat-watermark (now its sibling, not
+     #chat's child) so the watermark stays centered in the visible
+     chat area even as #chat scrolls. Pulling it OUT of #chat means
+     the scroll content slides past the watermark instead of carrying
+     it along. */
+  position:relative;
+}
 #chat{
   flex:1;overflow-y:auto;overflow-x:hidden;
   padding:1.5rem 1rem 1rem;
-  /* position:relative anchors the absolutely-positioned watermark below
-     so it sits inside the visible chat viewport (not the full scroll
-     height). */
-  position:relative;
+  /* z-index above the watermark so chat content always wins. */
+  position:relative;z-index:1;
   /* overscroll-behavior:contain stops iOS rubber-band from scrolling
      the BODY when the chat is at its top/bottom edge. Without this,
      overscrolling the chat at the top can pull the whole layout up
@@ -145,26 +150,66 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
      text always wins over the background mark. */
   position:relative;z-index:1;
 }
-/* Background watermark: faint logo mark behind active conversation.
-   Hidden when no .msg.you yet (the empty-state's bright breathing mark
-   carries that moment); revealed once the user has typed at least one
-   message via the :has() rule below. Static — the text streaming and
-   the empty-state already carry the "alive" signal; this is brand
-   presence, not animation. Centered in the visible chat viewport
-   (position:absolute inside #chat which is position:relative), so it
-   doesn't scroll with the conversation. */
+/* Background watermark: subtle breathing logo behind active conversation.
+   Lives as a sibling of #chat inside <main> so it's anchored to the
+   visible chat area (position:absolute relative to <main>) and does
+   NOT scroll with #chat-inner's overflow content. Hidden until the
+   first user message lands (the empty-state's bright breathing mark
+   carries the no-conversation moment); :has below flips it on.
+   The .typing modifier amplifies the breath when the composer detects
+   keystrokes — see "Composer keystroke detection" JS block. */
 .chat-watermark{
   position:absolute;inset:0;
   display:none;
   align-items:center;justify-content:center;
   pointer-events:none;
   z-index:0;
+  opacity:.06;
+  transition:opacity .35s ease;
 }
-#chat:has(.msg.you) .chat-watermark{display:flex}
+main:has(.msg.you) .chat-watermark{display:flex}
 .chat-watermark svg{
   width:280px;height:280px;
-  opacity:.055;
   overflow:visible;
+}
+/* Watermark breathing: subtler than the empty-state version (smaller
+   color swings + tighter scale) so it stays unobtrusive during reading
+   but feels alive on a glance. Same 3.5s cycle as the empty-state
+   watermark so the two states feel like the same heartbeat moved
+   into the background. */
+.wm-ring-pulse{
+  transform-origin:50px 50px;
+  animation:wm-breathe-ring 3.5s ease-in-out infinite;
+}
+.chat-watermark svg{
+  animation:wm-breathe-glow 3.5s ease-in-out infinite;
+}
+@keyframes wm-breathe-glow{
+  0%,100%{filter:drop-shadow(0 0 6px  rgba(215,175,95,.30))}
+  50%    {filter:drop-shadow(0 0 32px rgba(220,140,55,.55))}
+}
+@keyframes wm-breathe-ring{
+  0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
+  50%    {stroke-opacity:.85; stroke-width:5.2; transform:scale(1.015)}
+}
+/* Typing-active mode: when the composer detects keystrokes the
+   watermark steps into a faster, brighter breathing cycle so the
+   ring visibly reacts to the user's interaction. Opacity also bumps
+   so the reaction is felt, not just half-glimpsed. Reverts after
+   ~1.2s of no input via the JS timer below. */
+.chat-watermark.typing{opacity:.16}
+.chat-watermark.typing svg{animation:wm-breathe-glow-active 1.8s ease-in-out infinite}
+.chat-watermark.typing .wm-ring-pulse{animation:wm-breathe-ring-active 1.8s ease-in-out infinite}
+@keyframes wm-breathe-glow-active{
+  0%,100%{filter:drop-shadow(0 0  8px rgba(232,120,56,.45))}
+  50%    {filter:drop-shadow(0 0 56px rgba(232,120,56,.85))}
+}
+@keyframes wm-breathe-ring-active{
+  0%,100%{stroke-opacity:.85; stroke-width:5;   transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:7.5; transform:scale(1.06)}
+}
+@media (prefers-reduced-motion: reduce){
+  .chat-watermark svg,.wm-ring-pulse{animation:none}
 }
 /* Empty state lives inside #chat-inner so it occupies the same column.
    Hidden as soon as the FIRST user message lands — not just any .msg,
@@ -874,14 +919,16 @@ footer::before{
   </div>
 </div>
 <main>
-  <div id="chat">
-  <!-- Background watermark: revealed once the first user message lands
-       (CSS selector #chat:has(.msg.you) flips display:none -> flex).
-       Static, very low opacity so it never competes with message text. -->
+  <!-- Background watermark: lives OUTSIDE #chat (position:absolute
+       relative to <main>) so it's anchored to the visible chat area
+       and doesn't scroll with #chat-inner's overflow content. CSS
+       reveals it via main:has(.msg.you) once the first user message
+       lands. Breathing animation runs continuously; .typing class
+       amplifies it from the JS keystroke detector below. -->
   <div class="chat-watermark" aria-hidden="true">
     <svg viewBox="0 0 100 100" width="280" height="280">
       <circle cx="50" cy="50" r="49.8" fill="#000000"/>
-      <circle cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+      <circle class="wm-ring-pulse" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
       <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
         <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
         <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
@@ -891,6 +938,7 @@ footer::before{
       </g>
     </svg>
   </div>
+  <div id="chat">
   <div id="chat-inner">
     <!-- Empty state: shown until the first message lands in this view.
          Hidden via JS when chatInner gains a .msg child. Restrained on
@@ -2147,6 +2195,29 @@ inp.addEventListener('input',()=>{
   inp.style.height='auto';
   inp.style.height=Math.min(inp.scrollHeight,140)+'px';
 });
+
+// Composer keystroke detection: bumps the chat watermark into its
+// .typing mode (faster, brighter breathing) so the ring visibly reacts
+// while the user is interacting. Reverts ~1.2s after the last keystroke.
+// Pure visual feedback — no network / WS calls, no state to track
+// beyond a debounce timer.
+(function(){
+  const wm = document.querySelector('.chat-watermark');
+  if(!wm) return;
+  let typingTimer = null;
+  const pingTyping = () => {
+    wm.classList.add('typing');
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => wm.classList.remove('typing'), 1200);
+  };
+  inp.addEventListener('input', pingTyping);
+  // 'input' fires for content changes including paste/cut. keydown
+  // catches dead-key sequences (IME, modifier-only presses) that may
+  // not produce an 'input' event but still represent user interaction.
+  inp.addEventListener('keydown', (e) => {
+    if(e.key && e.key.length === 1) pingTyping();
+  });
+})();
 // Show the key modal up-front if we have no stored key. We still kick
 // off connect() in parallel — on a no-auth server the first status
 // frame will auto-dismiss the modal without the user having to do
