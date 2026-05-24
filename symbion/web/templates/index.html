@@ -801,7 +801,27 @@ footer::before{
 }
 .boot-splash.fade{opacity:0}
 .boot-splash.done{display:none}
-.boot-mark{filter:drop-shadow(0 0 28px rgba(139,92,246,.20))}
+.boot-mark{
+  overflow:visible;
+  /* Convergence pulse synced to the 3250ms hold phase: glow starts
+     dim deep-violet while pieces are still sliding in (0-46% =
+     0-1500ms = the assembly window), then PEAKS at the electric
+     indigo-blue (rgb 94,102,255) right as the last piece lands and
+     the shape becomes whole at ~55% (~1790ms). Settles back to a
+     steady electric violet glow for the remaining hold (until the
+     splash fades out and the empty-state takes over with its own
+     breathing cycle). Same color ramp as the breathing watermark
+     so the boot-to-chat transition feels like one continuous vibe. */
+  animation: bm-converge 3.25s ease-out forwards;
+}
+@keyframes bm-converge{
+  0%   {filter:drop-shadow(0 0   4px rgba(124, 58,237,.08))}
+  30%  {filter:drop-shadow(0 0  14px rgba(124, 58,237,.20))}
+  46%  {filter:drop-shadow(0 0  36px rgba(139, 92,246,.50))}
+  55%  {filter:drop-shadow(0 0 120px rgba( 94,102,255,1.00))}
+  70%  {filter:drop-shadow(0 0  72px rgba(139, 92,246,.80))}
+  100% {filter:drop-shadow(0 0  56px rgba(139, 92,246,.65))}
+}
 .bm-disc,.bm-ring{opacity:0; animation:bm-fadein .3s ease forwards}
 .bm-ring{animation-delay:.05s}
 .bm-top{
@@ -839,7 +859,7 @@ footer::before{
      after the fade-out transitionend. Pieces are inline so no extra
      network request blocks the first paint. -->
 <div id="boot-splash" class="boot-splash" aria-hidden="true">
-  <svg class="boot-mark" viewBox="0 0 100 100" width="160" height="160">
+  <svg class="boot-mark" viewBox="0 0 100 100" width="220" height="220">
     <circle class="bm-disc" cx="50" cy="50" r="49.8" fill="#000000"/>
     <circle class="bm-ring" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
     <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
