@@ -277,11 +277,6 @@ main:has(.msg.you) .chat-watermark{display:flex}
   0%,100%{stroke-opacity:.65; stroke-width:4.3; transform:scale(1)}
   50%    {stroke-opacity:1;   stroke-width:8;   transform:scale(1.08)}
 }
-.es-hint{
-  font-size:.95rem;color:var(--muted-2);
-  letter-spacing:.08em;font-weight:500;
-  text-shadow:0 0 12px rgba(139,92,246,.35);
-}
 @media (prefers-reduced-motion: reduce){
   .es-mark,.es-ring-pulse{animation:none}
 }
@@ -1052,7 +1047,6 @@ footer::before{
           <circle cx="70" cy="50" r="4" fill="#faf0d7"/>
         </g>
       </svg>
-      <div class="es-hint">listening</div>
     </div>
   </div>
   </div>
@@ -2308,18 +2302,45 @@ inp.addEventListener('input',()=>{
 });
 
 // Composer keystroke detection: bumps the chat watermark into its
-// .typing mode (faster, brighter breathing) so the ring visibly reacts
-// while the user is interacting. Reverts ~1.2s after the last keystroke.
-// Pure visual feedback — no network / WS calls, no state to track
-// beyond a debounce timer.
+// .typing mode (faster, brighter breathing) while the user types,
+// then SOFTLY degrades back to baseline when they stop. Sequence:
+//   keystroke -> .typing added, opacity .25, fast active anim
+//   1.2s idle -> opacity slow-fades .25 -> .06 over 1.5s while the
+//                .typing animation keeps running (punchy fade-out)
+//   1.5s later -> .typing removed at the already-faint opacity, so
+//                 the swap to the slow baseline animation is masked
+//                 visually (low brightness hides the discontinuity)
+// Pure visual feedback — no network / WS calls.
 (function(){
   const wm = document.querySelector('.chat-watermark');
   if(!wm) return;
   let typingTimer = null;
+  let coolingTimer = null;
   const pingTyping = () => {
+    // Restore the fast entry transition + drop any inline opacity so
+    // the CSS .typing rule's opacity:.25 takes effect cleanly. Cancel
+    // both pending timers — we're back in active-typing territory.
+    wm.style.transition = '';
+    wm.style.opacity = '';
     wm.classList.add('typing');
     clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => wm.classList.remove('typing'), 1200);
+    clearTimeout(coolingTimer);
+    typingTimer = setTimeout(beginCoolDown, 1200);
+  };
+  const beginCoolDown = () => {
+    // Phase 1: fade opacity .25 -> .06 over 1.5s while .typing is
+    // still active (punchy animation keeps running but visibly dims).
+    wm.style.transition = 'opacity 1.5s ease';
+    wm.style.opacity = '.06';
+    coolingTimer = setTimeout(finishCoolDown, 1550);
+  };
+  const finishCoolDown = () => {
+    // Phase 2: at the already-faint opacity, swap to baseline by
+    // removing .typing. Clear the inline overrides so CSS owns
+    // both transition + opacity again.
+    wm.classList.remove('typing');
+    wm.style.opacity = '';
+    wm.style.transition = '';
   };
   inp.addEventListener('input', pingTyping);
   // 'input' fires for content changes including paste/cut. keydown
