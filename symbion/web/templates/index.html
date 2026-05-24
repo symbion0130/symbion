@@ -77,8 +77,15 @@ header{
   background:linear-gradient(180deg,var(--bg) 0%,#050508f2 100%);
   backdrop-filter:blur(6px);
 }
-.dot{width:7px;height:7px;border-radius:50%;background:var(--you);flex-shrink:0;box-shadow:0 0 10px #22d3eeaa}
-.dot.dead{background:var(--danger);box-shadow:0 0 8px #ef444488}
+.dot{
+  /* Connection-alive dot in violet to match the send button's gradient
+     (the brand's "on" signal). When connection drops, swap to --danger
+     so the visual cue stays unambiguous. */
+  width:8px;height:8px;border-radius:50%;
+  background:var(--sym);flex-shrink:0;
+  box-shadow:0 0 12px rgba(139,92,246,.85), 0 0 4px rgba(167,139,250,.6);
+}
+.dot.dead{background:var(--danger);box-shadow:0 0 10px #ef4444aa}
 .brand{font-size:1.2rem;font-weight:700;color:var(--text);letter-spacing:.01em}
 .brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.4rem;vertical-align:.05em}
 .brand .user{
@@ -188,8 +195,8 @@ main:has(.msg.you) .chat-watermark{display:flex}
   animation:wm-breathe-glow 3.5s ease-in-out infinite;
 }
 @keyframes wm-breathe-glow{
-  0%,100%{filter:drop-shadow(0 0  6px rgba(139,92,246,.35))}
-  50%    {filter:drop-shadow(0 0 36px rgba(99,102,241,.65))}
+  0%,100%{filter:drop-shadow(0 0  6px rgba(124, 58,237,.40))}
+  50%    {filter:drop-shadow(0 0 40px rgba( 94,102,255,.78))}
 }
 @keyframes wm-breathe-ring{
   0%,100%{stroke-opacity:.55; stroke-width:4.3; transform:scale(1)}
@@ -204,8 +211,8 @@ main:has(.msg.you) .chat-watermark{display:flex}
 .chat-watermark.typing svg{animation:wm-breathe-glow-active 1.2s ease-in-out infinite}
 .chat-watermark.typing .wm-ring-pulse{animation:wm-breathe-ring-active 1.2s ease-in-out infinite}
 @keyframes wm-breathe-glow-active{
-  0%,100%{filter:drop-shadow(0 0 12px rgba(167,139,250,.55))}
-  50%    {filter:drop-shadow(0 0 88px rgba(167,139,250,.98))}
+  0%,100%{filter:drop-shadow(0 0 12px rgba(139, 92,246,.65))}
+  50%    {filter:drop-shadow(0 0 96px rgba( 94,102,255,1.00))}
 }
 @keyframes wm-breathe-ring-active{
   0%,100%{stroke-opacity:.90; stroke-width:5.5; transform:scale(1)}
@@ -250,16 +257,15 @@ main:has(.msg.you) .chat-watermark{display:flex}
   animation:es-breathe-ring 3.5s ease-in-out infinite;
 }
 @keyframes es-breathe-glow{
-  /* Electric color cycle: trough = soft violet at rest, rising
-     through indigo, peak inhale = saturated bright violet (--accent-
-     bright), falling back through indigo. Stays inside the electric
-     family (violet / indigo) — no warm tones — but the peak is
-     visibly a different hue from rest. Reads as plasma rather than
-     ambient warmth. */
-  0%,100%{filter:drop-shadow(0 0 12px rgba(139, 92,246,.35))}
-  25%    {filter:drop-shadow(0 0 40px rgba( 99,102,241,.65))}
-  50%    {filter:drop-shadow(0 0 80px rgba(167,139,250,.95))}
-  75%    {filter:drop-shadow(0 0 40px rgba( 99,102,241,.65))}
+  /* All-purple plasma cycle: deep-violet trough -> violet rising ->
+     saturated electric indigo-blue at peak inhale (rgb 94,102,255 —
+     right at the violet/electric-blue boundary, max saturation) ->
+     back through violet. Tightens the prior pass which leaned into
+     light pastel violet at peak; this peak reads as ionized plasma. */
+  0%,100%{filter:drop-shadow(0 0 12px rgba(124, 58,237,.40))}
+  25%    {filter:drop-shadow(0 0 44px rgba(139, 92,246,.72))}
+  50%    {filter:drop-shadow(0 0 88px rgba( 94,102,255,1.00))}
+  75%    {filter:drop-shadow(0 0 44px rgba(139, 92,246,.72))}
 }
 @keyframes es-breathe-ring{
   /* Stroke-width pumps 4.3 -> 6.5 (50% thicker) along with the scale
