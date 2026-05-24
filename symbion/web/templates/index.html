@@ -148,16 +148,40 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column}
 #chat-inner:has(.msg.you) .empty-state{display:none}
 .empty-state{
   margin:auto;
-  display:flex;flex-direction:column;align-items:center;gap:.7rem;
-  opacity:.55;
+  display:flex;flex-direction:column;align-items:center;gap:1rem;
+  opacity:.65;
   pointer-events:none;
   animation:fadein .4s ease;
 }
 .empty-state.hidden{display:none}
-.es-mark{filter:drop-shadow(0 0 18px rgba(215,175,95,.12))}
+/* Watermarked mark + breathing ring: the glow's blur-radius pulses
+   12px -> 32px -> 12px on a 4s ease-in-out cycle, and the outer
+   white ring's stroke-opacity wave-matches so the whole thing reads
+   as a soft heartbeat for the idle "listening" state. Animation only
+   while empty-state is visible (CSS selector :has(.msg.you) hides
+   the parent, which stops the running animation per spec). */
+.es-mark{
+  filter:drop-shadow(0 0 12px rgba(215,175,95,.18));
+  animation:es-breathe-glow 4s ease-in-out infinite;
+}
+.es-ring-pulse{
+  transform-origin:50px 50px;
+  animation:es-breathe-ring 4s ease-in-out infinite;
+}
+@keyframes es-breathe-glow{
+  0%,100%{filter:drop-shadow(0 0 12px rgba(215,175,95,.14))}
+  50%    {filter:drop-shadow(0 0 32px rgba(215,175,95,.30))}
+}
+@keyframes es-breathe-ring{
+  0%,100%{stroke-opacity:.78; transform:scale(1)}
+  50%    {stroke-opacity:1;   transform:scale(1.025)}
+}
 .es-hint{
-  font-size:.78rem;color:var(--muted-2);
-  letter-spacing:.04em;font-weight:500;
+  font-size:.82rem;color:var(--muted-2);
+  letter-spacing:.06em;font-weight:500;
+}
+@media (prefers-reduced-motion: reduce){
+  .es-mark,.es-ring-pulse{animation:none}
 }
 
 .msg{animation:fadein .18s ease;word-wrap:break-word}
@@ -803,9 +827,9 @@ footer::before{
          purpose — Symbion is a personal tool, not a consumer chatbot
          that needs a "How can I help you today?" CTA. -->
     <div id="empty-state" class="empty-state" aria-hidden="true">
-      <svg class="es-mark" viewBox="0 0 100 100" width="84" height="84">
+      <svg class="es-mark" viewBox="0 0 100 100" width="144" height="144">
         <circle cx="50" cy="50" r="49.8" fill="#000000"/>
-        <circle cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+        <circle class="es-ring-pulse" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
         <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
           <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
           <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
@@ -1094,12 +1118,15 @@ function hideKeyModal(){keyModal.classList.add('hidden');keyError.textContent=''
 keyBtnSheet.onclick=()=>{ closeSidebar(); showKeyModal(''); };
 
 // --- Location services -------------------------------------------------
-// On WS open we attempt to share the browser's geolocation with Symbion
-// so the server can store it (user_profile), reverse-geocode via
-// Nominatim, and expose it to the model + get_weather / get_local_time
-// tools. We only PROMPT once per browser: LOCATION_OPT_IN stores the
-// user's choice ("granted" / "denied" / "" untouched). Re-prompts are
-// via the status sheet's "Share location" button.
+// Opt-in only. Browser geolocation is shared with Symbion (server stores
+// in user_profile, reverse-geocodes via Nominatim, exposes to the model
+// + get_weather / get_local_time tools) ONLY when the user has clicked
+// Share location in the sidebar's Status tab. First-launch state does
+// NOT pop the OS permission dialog. LOCATION_OPT_IN stores the user's
+// choice across reloads:
+//   'granted' -> auto-share on every WS open
+//   'denied'  -> never share; pill shows 'opted out'
+//   unset     -> never asked; pill shows 'not shared'
 const LOCATION_OPT_IN = 'symbion_location_opt_in';
 const locPill   = document.getElementById('st-location');
 const locShare  = document.getElementById('loc-share-btn');
@@ -1436,12 +1463,19 @@ function connect(){
     if(storedUser && storedUser !== 'aaron'){
       try{ws.send(JSON.stringify({type:'set_user', name:storedUser}));}catch(e){}
     }
-    // Share browser geolocation if previously granted (or not yet
-    // decided). Skips the request when explicitly opted out.
-    if(localStorage.getItem(LOCATION_OPT_IN) !== 'denied'){
+    // Auto-share browser geolocation ONLY when the user has previously
+    // opted in. First-launch state (LOCATION_OPT_IN unset) no longer
+    // pops the OS permission dialog on every connect — users who want
+    // location-aware behavior click Share location in the sidebar's
+    // Status tab to grant it explicitly. Previously denied users stay
+    // denied; the Status tab pill reflects current state.
+    const locOpt = localStorage.getItem(LOCATION_OPT_IN);
+    if(locOpt === 'granted'){
       _requestGeoOnce(false);
-    } else {
+    } else if(locOpt === 'denied'){
       _renderLocationPill('opted out');
+    } else {
+      _renderLocationPill('not shared');
     }
   };
   ws.onclose=()=>{
