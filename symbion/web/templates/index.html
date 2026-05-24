@@ -209,13 +209,19 @@ main{flex:1;overflow:hidden;display:flex;flex-direction:column;
 }
 .chat-watermark .wm-active-layer{
   /* Slow fade-out (3s) so the pulse comes to rest organically rather
-     than snapping off when .typing is removed. The 1.2s typing-entry
-     fade-in below overrides this for the rising edge. */
+     than snapping off when typing stops. The 1.2s typing-entry fade-
+     in below overrides this for the rising edge.
+     mix-blend-mode:screen makes this layer ADDITIVE — the black disc
+     becomes transparent (lets baseline show through), white pixels
+     brighten the baseline beneath them. Result: the active layer
+     looks like the baseline ring "lighting up" during typing rather
+     than a separate ring stacked on top. */
   transition:opacity 3s cubic-bezier(.4,0,.6,1);
+  mix-blend-mode:screen;
 }
 main:has(.msg.you) .chat-watermark .wm-baseline-layer{opacity:.06}
-main:has(.msg.you) .chat-watermark.typing .wm-active-layer{
-  opacity:.25;
+body.typing main:has(.msg.you) .chat-watermark .wm-active-layer{
+  opacity:.45;
   transition:opacity 1.2s cubic-bezier(.4,0,.6,1);
 }
 .chat-watermark .wm-layer svg{
@@ -255,8 +261,13 @@ main:has(.msg.you) .chat-watermark.typing .wm-active-layer{
   50%    {filter:drop-shadow(0 0 96px rgba( 94,102,255,1.00))}
 }
 @keyframes wm-breathe-ring-active{
-  0%,100%{stroke-opacity:.95; stroke-width:8;  transform:scale(1)}
-  50%    {stroke-opacity:1;   stroke-width:14; transform:scale(1.10)}
+  /* Scale + stroke matched to wm-breathe-ring (baseline) so the active
+     ring stays coincident with baseline at all times — the only thing
+     that varies is the glow halo from the filter. mix-blend-mode:screen
+     means the matching white stroke brightens the baseline stroke
+     instead of stacking as a separate visible ring. */
+  0%,100%{stroke-opacity:.95; stroke-width:6.5; transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:8.5; transform:scale(1.02)}
 }
 @media (prefers-reduced-motion: reduce){
   .wm-baseline-layer svg,.wm-baseline-layer .wm-ring-pulse,
@@ -272,7 +283,11 @@ main:has(.msg.you) .chat-watermark.typing .wm-active-layer{
 #chat-inner:has(.msg.you) .empty-state{display:none}
 .empty-state{
   margin:auto;
-  display:flex;flex-direction:column;align-items:center;gap:1.2rem;
+  /* Explicit dimensions because the children are position:absolute
+     (stacked for cross-fade) and no longer contribute to parent
+     intrinsic size. width/height matches the SVGs' 220px. */
+  width:220px;height:220px;
+  position:relative;
   /* Was .65 — dampened the breathing glow's punch. At full opacity
      the saturated keyframes (.40 -> 1.0 alpha) show their actual
      intensity instead of being premultiplied down by the parent. */
@@ -289,16 +304,50 @@ main:has(.msg.you) .chat-watermark.typing .wm-active-layer{
    only while empty-state is visible (CSS selector :has(.msg.you)
    hides the parent, which stops the running animation per spec). */
 .es-mark{
-  /* overflow:visible so the breathing ring (scales 1.05 from a
-     resting position that already touches the viewBox edge at
-     r=47.85+stroke/2=50) doesn't get clipped at peak inhale. */
+  /* overflow:visible so the breathing ring (scales 1.08) doesn't get
+     clipped at peak inhale. position:absolute stacks the two layers
+     so they occupy the same visual slot — only opacity differs. */
+  position:absolute;
   overflow:visible;
+}
+.es-baseline-layer{
   filter:drop-shadow(0 0 8px rgba(139,92,246,.22));
   animation:es-breathe-glow 3.5s ease-in-out infinite;
 }
-.es-ring-pulse{
+.es-baseline-layer .es-ring-pulse{
   transform-origin:50px 50px;
   animation:es-breathe-ring 3.5s ease-in-out infinite;
+}
+.es-active-layer{
+  /* Active layer for the empty-state — same cross-fade architecture
+     as .wm-active-layer. Faster 1.5s pulse + saturated electric-blue
+     glow at peak; mix-blend-mode:screen makes the layer additive so
+     it brightens the baseline rather than stacking visibly. Hidden
+     by default (opacity:0); body.typing fades it in. */
+  filter:drop-shadow(0 0 12px rgba(94,102,255,.55));
+  animation:es-breathe-glow-active 1.5s ease-in-out infinite;
+  opacity:0;
+  mix-blend-mode:screen;
+  transition:opacity 3s cubic-bezier(.4,0,.6,1);
+}
+.es-active-layer .es-ring-pulse{
+  transform-origin:50px 50px;
+  animation:es-breathe-ring-active-es 1.5s ease-in-out infinite;
+}
+body.typing .empty-state .es-active-layer{
+  opacity:1;
+  transition:opacity 1.2s cubic-bezier(.4,0,.6,1);
+}
+/* Empty-state active keyframes: brighter glow peak, ring scale/stroke
+   matched to baseline so the rings stay coincident (screen-blend
+   brightens; mismatched scale would render two distinct circles). */
+@keyframes es-breathe-glow-active{
+  0%,100%{filter:drop-shadow(0 0 18px rgba(124, 58,237,.60))}
+  50%    {filter:drop-shadow(0 0 140px rgba(94,102,255,1.00))}
+}
+@keyframes es-breathe-ring-active-es{
+  0%,100%{stroke-opacity:.85; stroke-width:4.3; transform:scale(1)}
+  50%    {stroke-opacity:1;   stroke-width:8;   transform:scale(1.08)}
 }
 @keyframes es-breathe-glow{
   /* All-purple plasma cycle, intensified: trough alpha bumped so the
@@ -320,7 +369,8 @@ main:has(.msg.you) .chat-watermark.typing .wm-active-layer{
   50%    {stroke-opacity:1;   stroke-width:8;   transform:scale(1.08)}
 }
 @media (prefers-reduced-motion: reduce){
-  .es-mark,.es-ring-pulse{animation:none}
+  .es-baseline-layer,.es-active-layer,
+  .es-baseline-layer .es-ring-pulse,.es-active-layer .es-ring-pulse{animation:none}
 }
 
 .msg{animation:fadein .18s ease;word-wrap:break-word}
@@ -1106,7 +1156,24 @@ footer::before{
          purpose — Symbion is a personal tool, not a consumer chatbot
          that needs a "How can I help you today?" CTA. -->
     <div id="empty-state" class="empty-state" aria-hidden="true">
-      <svg class="es-mark" viewBox="0 0 100 100" width="220" height="220">
+      <!-- Two-layer cross-fade matching the watermark pattern: the
+           baseline layer always pulses calmly; the active layer
+           (mix-blend-mode:screen) brightens it during typing. Both
+           SVGs always animate so the typing reaction is pure
+           opacity cross-fade — no animation-name swaps, no sudden
+           stops when the user pauses. -->
+      <svg class="es-mark es-baseline-layer" viewBox="0 0 100 100" width="220" height="220">
+        <circle cx="50" cy="50" r="49.8" fill="#000000"/>
+        <circle class="es-ring-pulse" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
+        <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
+          <path d="M 18 18 L 78 18 L 78 33 L 35 33 L 35 41 L 18 41 Z" fill="#faf0d7"/>
+          <path d="M 82 82 L 22 82 L 22 67 L 65 67 L 65 59 L 82 59 Z" fill="#faf0d7"/>
+          <circle cx="30" cy="50" r="4" fill="#faf0d7"/>
+          <circle cx="50" cy="50" r="6.5" fill="none" stroke="#faf0d7" stroke-width="3.5"/>
+          <circle cx="70" cy="50" r="4" fill="#faf0d7"/>
+        </g>
+      </svg>
+      <svg class="es-mark es-active-layer" viewBox="0 0 100 100" width="220" height="220">
         <circle cx="50" cy="50" r="49.8" fill="#000000"/>
         <circle class="es-ring-pulse" cx="50" cy="50" r="47.85" fill="none" stroke="#faf0d7" stroke-width="4.3"/>
         <g transform="translate(50 50) scale(0.74) translate(-50 -50)">
@@ -2371,20 +2438,18 @@ inp.addEventListener('input',()=>{
   inp.style.height=Math.min(inp.scrollHeight,140)+'px';
 });
 
-// Composer keystroke detection: toggles .typing on the chat watermark
-// so the .wm-active-layer fades in (1.2s) on first keystroke and fades
-// out (3s) ~1.2s after the last keystroke. The fade-out is organic
-// because the active layer's animation NEVER stops — it just becomes
-// invisible while the underlying baseline layer is still pulsing. No
-// animation-name swaps means no sudden stops. Pure visual feedback.
+// Composer keystroke detection: toggles .typing on document.body so
+// BOTH the chat-watermark AND the empty-state breathing logo can
+// respond. Each element has its own .wm-active-layer / .es-active-layer
+// that cross-fades in via opacity (1.2s) on first keystroke and out
+// (3s) ~1.2s after the last. Animations never stop — only visibility
+// eases, so the pulse comes to rest organically.
 (function(){
-  const wm = document.querySelector('.chat-watermark');
-  if(!wm) return;
   let typingTimer = null;
   const pingTyping = () => {
-    wm.classList.add('typing');
+    document.body.classList.add('typing');
     clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => wm.classList.remove('typing'), 1200);
+    typingTimer = setTimeout(() => document.body.classList.remove('typing'), 1200);
   };
   inp.addEventListener('input', pingTyping);
   // 'input' fires for content changes including paste/cut. keydown
