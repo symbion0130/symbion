@@ -78,6 +78,17 @@ header{
 .dot.dead{background:var(--danger);box-shadow:0 0 8px #ef444488}
 .brand{font-size:.95rem;font-weight:700;color:var(--text);letter-spacing:.01em}
 .brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.35rem}
+.brand .provider{
+  /* Active responder provider, surfaced because auto-fallback can route
+     a turn to a non-primary silently (the in-chat italic notice handles
+     the per-turn case; this is the ambient "what model am I usually
+     getting" indicator). Updated from /health on load + every 30s. */
+  font-size:.7rem;color:var(--muted-2);font-weight:500;
+  margin-left:.5rem;letter-spacing:.02em;
+}
+.brand .provider::before{
+  content:'·';color:var(--muted);margin-right:.5rem;
+}
 #statusbar{
   margin-left:auto;display:flex;gap:.4rem;flex-wrap:nowrap;overflow-x:auto;
   scrollbar-width:none;-ms-overflow-style:none;
@@ -678,7 +689,7 @@ footer{
 <header>
   <button id="sidebar-btn" class="menu-btn sidebar-btn" type="button" title="Sessions" aria-label="Open session list">&#9776;</button>
   <div class="dot" id="dot" aria-label="connection"></div>
-  <div class="brand">Symbion<span class="ver">v14</span></div>
+  <div class="brand">Symbion<span class="ver">v14</span><span class="provider" id="hdr-provider"></span></div>
   <button id="status-btn" class="menu-btn" type="button" title="Status &amp; settings" aria-label="Open status panel">···</button>
 </header>
 
@@ -865,6 +876,24 @@ function newSessionId(){
 }
 let SESSION=localStorage.getItem(SESSION_STORE)||newSessionId();
 let ws, activeMsg=null, activeCursor=null, activeThinking=null, showReasoning=false;
+
+// Header provider indicator: poll /health on load + every 30s so the
+// brand bar reflects the configured responder ("anthropic", "groq",
+// etc.). Per-turn fallback diversions are surfaced via the in-chat
+// italic notice; this is the ambient "what model am I usually getting"
+// indicator. Silent on failure — leaves the field blank rather than
+// flashing an error.
+function refreshHeaderProvider(){
+  fetch('/health',{cache:'no-store'})
+    .then(r=>r.ok?r.json():null)
+    .then(d=>{
+      const el=document.getElementById('hdr-provider');
+      if(el && d && d.provider) el.textContent=d.provider;
+    })
+    .catch(()=>{});
+}
+refreshHeaderProvider();
+setInterval(refreshHeaderProvider, 30000);
 
 // --- API key handling ----------------------------------------------------
 // SYMBION_API_KEY is required when the server has one configured. We store
