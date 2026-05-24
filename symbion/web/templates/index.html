@@ -76,19 +76,23 @@ header{
 }
 .dot{width:7px;height:7px;border-radius:50%;background:var(--you);flex-shrink:0;box-shadow:0 0 8px #afd78788}
 .dot.dead{background:var(--danger);box-shadow:0 0 8px #ef444488}
-.brand{font-size:.95rem;font-weight:700;color:var(--text);letter-spacing:.01em}
-.brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.35rem}
-.brand .provider{
-  /* Active responder provider, surfaced because auto-fallback can route
-     a turn to a non-primary silently (the in-chat italic notice handles
-     the per-turn case; this is the ambient "what model am I usually
-     getting" indicator). Updated from /health on load + every 30s. */
-  font-size:.7rem;color:var(--muted-2);font-weight:500;
-  margin-left:.5rem;letter-spacing:.02em;
+.brand{font-size:1.2rem;font-weight:700;color:var(--text);letter-spacing:.01em}
+.brand .ver{font-size:.7rem;color:var(--muted);font-weight:500;margin-left:.4rem;vertical-align:.05em}
+.brand .user{
+  /* Active user displayed in the slot where v14's "provider" indicator
+     used to live. Surfaced here because Symbion is per-user (memory,
+     identity, cross-user retrieval) — knowing who you're typing AS is
+     more load-bearing than which model is responding (provider moved
+     into the sidebar's Status tab). Updated from localStorage on load
+     and whenever the user changes via the picker / /user command. */
+  font-size:.78rem;color:var(--you);font-weight:500;
+  margin-left:.55rem;letter-spacing:.02em;vertical-align:.1em;
 }
-.brand .provider::before{
-  content:'·';color:var(--muted);margin-right:.5rem;
+.brand .user::before{
+  content:'·';color:var(--muted);margin-right:.55rem;
 }
+.brand .user:empty{display:none}
+.brand .user:empty + *{display:none}
 #statusbar{
   margin-left:auto;display:flex;gap:.4rem;flex-wrap:nowrap;overflow-x:auto;
   scrollbar-width:none;-ms-overflow-style:none;
@@ -104,7 +108,7 @@ header{
 .pill b{color:var(--text);font-weight:600}
 .pill.warn{background:#3a2a0033;border-color:#3a2a00;color:var(--warn)}
 .pill.warn b{color:var(--warn)}
-/* #st-welfare default-hidden rule moved next to the status-sheet CSS
+/* #st-welfare default-hidden rule moved next to the status-rows CSS
    (see further down). updateStatus() now flips it to display:flex
    explicitly when a welfare concern is present, since style.display=''
    wouldn't override the CSS-level display:none. */
@@ -522,41 +526,11 @@ footer::before{
 }
 .session-toggle:hover{border-color:var(--sym);color:var(--sym)}
 
-/* Slide-up status sheet (Claude-style drawer). z-index above the
-   conn-banner (900) and the key/user modals (1000) so it sits on top
-   when both are visible. */
-.status-sheet{
-  position:fixed;inset:0;z-index:1100;
-  background:rgba(0,0,0,.65);
-  display:flex;align-items:flex-end;justify-content:center;
-  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
-  animation:status-fade-bg .2s ease;
-}
-.status-sheet.hidden{display:none}
-.status-sheet-card{
-  background:var(--surface);
-  border-top:1px solid var(--border);
-  border-radius:var(--radius) var(--radius) 0 0;
-  padding:1rem;
-  padding-bottom:max(1rem,env(safe-area-inset-bottom));
-  /* Status sheet stays narrow even when chat/composer go wide --
-     it's a modal panel containing a handful of short rows, not a
-     content surface. Independent of #chat-inner max-width. */
-  width:100%;max-width:600px;
-  display:flex;flex-direction:column;gap:.55rem;
-  animation:status-slide-up .25s cubic-bezier(.2,.8,.2,1);
-  max-height:80vh;overflow-y:auto;
-}
-.status-sheet-header{
-  display:flex;justify-content:space-between;align-items:center;
-  margin-bottom:.2rem;
-}
-.status-sheet-header h2{
-  font-size:1.05rem;font-weight:700;color:var(--text);letter-spacing:.01em;
-}
-.status-sheet-header .icon-btn{
-  width:32px;height:32px;font-size:1.1rem;border:none;background:transparent;
-}
+/* Status rows + action buttons — used in the sidebar's Status tab.
+   Previously housed in a separate slide-up sheet opened by a [···]
+   button in the header; consolidated into the sidebar to reduce header
+   chrome and give the sessions list + status panel a single entry
+   point (the hamburger). */
 .status-rows{display:flex;flex-direction:column;gap:.4rem}
 .status-row{
   display:flex;justify-content:space-between;align-items:center;
@@ -584,14 +558,27 @@ footer::before{
    hidden so it doesn't render before the first status frame arrives. */
 #st-welfare{display:none}
 
-@keyframes status-slide-up{
-  from{transform:translateY(100%)}
-  to{transform:translateY(0)}
+/* Sidebar tab strip — switches between Sessions and Status panels. */
+.sidebar-tabs{
+  display:flex;gap:.4rem;padding:0 1rem;
+  border-bottom:1px solid var(--border);
 }
-@keyframes status-fade-bg{
-  from{background:rgba(0,0,0,0)}
-  to{background:rgba(0,0,0,.65)}
+.sb-tab{
+  background:transparent;border:none;color:var(--muted-2);
+  font-family:inherit;font-size:.88rem;font-weight:500;
+  padding:.65rem .25rem;cursor:pointer;letter-spacing:.02em;
+  border-bottom:2px solid transparent;
+  transition:color .15s,border-color .15s;
+  margin-bottom:-1px;
 }
+.sb-tab:hover{color:var(--text)}
+.sb-tab.active{color:var(--text);border-bottom-color:var(--sym)}
+.sb-panel{display:flex;flex-direction:column;flex:1;min-height:0}
+.sb-panel.hidden{display:none}
+/* Sessions panel keeps the legacy padding pattern from .sidebar-actions
+   and .sidebar-list (each provides its own padding). Status panel wraps
+   its rows + actions with consistent inner padding. */
+.sb-panel[data-panel="status"]{gap:.85rem;padding:.85rem 1rem 1rem;overflow-y:auto}
 
 /* User-picker modal — shown on first connect when no USER_STORE is set.
    Reuses the .key-modal layout so styling stays consistent. */
@@ -725,8 +712,7 @@ footer::before{
 <header>
   <button id="sidebar-btn" class="menu-btn sidebar-btn" type="button" title="Sessions" aria-label="Open session list">&#9776;</button>
   <div class="dot" id="dot" aria-label="connection"></div>
-  <div class="brand">Symbion<span class="ver">v14</span><span class="provider" id="hdr-provider"></span></div>
-  <button id="status-btn" class="menu-btn" type="button" title="Status &amp; settings" aria-label="Open status panel">···</button>
+  <div class="brand">Symbion<span class="ver">v14</span><span class="user" id="hdr-user"></span></div>
 </header>
 
 <!-- Sessions sidebar: backdrop + slide-in panel. Lists past sessions
@@ -737,27 +723,28 @@ footer::before{
 <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
 <aside id="sidebar" class="sidebar" role="dialog" aria-modal="true" aria-labelledby="sidebar-title">
   <div class="sidebar-header">
-    <h2 id="sidebar-title">Sessions</h2>
-    <button id="sidebar-close" class="icon-btn ghost-btn" type="button" aria-label="Close sessions">×</button>
+    <h2 id="sidebar-title">Menu</h2>
+    <button id="sidebar-close" class="icon-btn ghost-btn" type="button" aria-label="Close menu">×</button>
   </div>
-  <div class="sidebar-actions">
-    <button id="sidebar-new" class="sidebar-new" type="button"><span class="plus">+</span> New chat</button>
+  <!-- Tab strip: consolidates the prior Sessions sidebar + the 3-dot
+       status sheet into one menu entry-point. Click switches the
+       visible panel below. -->
+  <div class="sidebar-tabs" role="tablist">
+    <button class="sb-tab active" type="button" role="tab" data-tab="sessions" aria-selected="true">Sessions</button>
+    <button class="sb-tab" type="button" role="tab" data-tab="status" aria-selected="false">Status</button>
   </div>
-  <div id="sidebar-list" class="sidebar-list"></div>
-</aside>
-
-<!-- Slide-up status sheet. Replaces the cluttered header-pill row with a
-     Claude-style drawer: tap [···] in the header to open, tap backdrop
-     or [×] to close. updateStatus() writes into the same #st-mood /
-     #st-sym / #st-dist / #st-welfare / #st-dist-pill IDs the old pills
-     used, so the server-side data flow is unchanged. -->
-<div id="status-sheet" class="status-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="status-sheet-title">
-  <div class="status-sheet-card" role="document">
-    <div class="status-sheet-header">
-      <h2 id="status-sheet-title">Status</h2>
-      <button id="status-close" class="icon-btn ghost-btn" type="button" aria-label="Close status panel">×</button>
+  <div class="sb-panel" data-panel="sessions">
+    <div class="sidebar-actions">
+      <button id="sidebar-new" class="sidebar-new" type="button"><span class="plus">+</span> New chat</button>
     </div>
+    <div id="sidebar-list" class="sidebar-list"></div>
+  </div>
+  <div class="sb-panel hidden" data-panel="status">
     <div class="status-rows">
+      <div class="status-row">
+        <span class="status-label">Provider</span>
+        <span class="status-value" id="st-provider">--</span>
+      </div>
       <div class="status-row">
         <span class="status-label">Mood</span>
         <span class="status-value" id="st-mood">--</span>
@@ -771,7 +758,7 @@ footer::before{
         <span class="status-value" id="st-dist">--</span>
       </div>
       <div class="status-row warn" id="st-welfare">
-        <span class="status-label">⚠ Welfare</span>
+        <span class="status-label">&#9888; Welfare</span>
         <span class="status-value">flagged</span>
       </div>
       <div class="status-row" id="st-location-pill">
@@ -785,7 +772,7 @@ footer::before{
       <button id="key-btn-sheet" class="ghost-btn" type="button">Change API key</button>
     </div>
   </div>
-</div>
+</aside>
 
 <div id="user-modal" class="key-modal hidden" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
   <div class="key-modal-card">
@@ -806,7 +793,7 @@ footer::before{
       <button id="key-clear" class="ghost-btn" type="button">Clear</button>
       <button id="key-submit" class="send-btn" type="button">Connect</button>
     </div>
-    <p class="key-modal-hint">Stored locally in this browser (localStorage). Tap <b>···</b> in the header → <b>Change API key</b> any time to change or clear it.</p>
+    <p class="key-modal-hint">Stored locally in this browser (localStorage). Tap <b>&#9776;</b> in the header → <b>Status</b> tab → <b>Change API key</b> any time to change or clear it.</p>
   </div>
 </div>
 <main>
@@ -932,23 +919,32 @@ function newSessionId(){
 let SESSION=localStorage.getItem(SESSION_STORE)||newSessionId();
 let ws, activeMsg=null, activeCursor=null, activeThinking=null, showReasoning=false;
 
-// Header provider indicator: poll /health on load + every 30s so the
-// brand bar reflects the configured responder ("anthropic", "groq",
-// etc.). Per-turn fallback diversions are surfaced via the in-chat
-// italic notice; this is the ambient "what model am I usually getting"
-// indicator. Silent on failure — leaves the field blank rather than
-// flashing an error.
-function refreshHeaderProvider(){
+// Provider indicator: poll /health on load + every 30s and write into
+// the Sidebar > Status tab's Provider row. Per-turn fallback diversions
+// are surfaced via the in-chat italic notice; this is the ambient "what
+// model am I usually getting" indicator. Silent on failure — leaves
+// the row at "--" rather than flashing an error.
+function refreshProvider(){
   fetch('/health',{cache:'no-store'})
     .then(r=>r.ok?r.json():null)
     .then(d=>{
-      const el=document.getElementById('hdr-provider');
+      const el=document.getElementById('st-provider');
       if(el && d && d.provider) el.textContent=d.provider;
     })
     .catch(()=>{});
 }
-refreshHeaderProvider();
-setInterval(refreshHeaderProvider, 30000);
+refreshProvider();
+setInterval(refreshProvider, 30000);
+
+// Active user displayed in the header subtitle slot. Sourced from
+// localStorage (the same store the user-picker modal writes to) so
+// switching via the modal or /user updates the header on next refresh.
+// Called on load and after every user change.
+function refreshHeaderUser(){
+  const el=document.getElementById('hdr-user');
+  if(el) el.textContent = (localStorage.getItem(USER_STORE) || 'aaron');
+}
+refreshHeaderUser();
 
 // --- API key handling ----------------------------------------------------
 // SYMBION_API_KEY is required when the server has one configured. We store
@@ -1034,21 +1030,27 @@ const keyInput=document.getElementById('key-input');
 const keyError=document.getElementById('key-error');
 const keySubmit=document.getElementById('key-submit');
 const keyClear=document.getElementById('key-clear');
-// Status sheet + the API-key button that moved into it. The legacy
-// #key-btn in the header is gone; the same handler now lives on
-// #key-btn-sheet inside the slide-up panel.
-const statusSheet  = document.getElementById('status-sheet');
-const statusBtn    = document.getElementById('status-btn');
-const statusClose  = document.getElementById('status-close');
-const keyBtnSheet  = document.getElementById('key-btn-sheet');
-function openStatusSheet(){ statusSheet.classList.remove('hidden'); }
-function closeStatusSheet(){ statusSheet.classList.add('hidden'); }
-statusBtn.onclick   = openStatusSheet;
-statusClose.onclick = closeStatusSheet;
-// Tap-backdrop-to-close: only fires on the dim layer itself, not when
-// the tap lands on the card or any of its children.
-statusSheet.addEventListener('click', (e)=>{
-  if(e.target === statusSheet) closeStatusSheet();
+// Status tab actions — the "Change API key" button. Previously lived
+// in the standalone slide-up sheet (opened by [···] in the header);
+// now lives inside the sidebar's Status tab. The handler is identical;
+// only its home moved.
+const keyBtnSheet = document.getElementById('key-btn-sheet');
+
+// Sidebar tab switching. The header used to have TWO entry points
+// (hamburger → sessions, [···] → status); consolidated into one
+// hamburger that opens a tabbed sidebar.
+document.querySelectorAll('.sb-tab').forEach((tabBtn) => {
+  tabBtn.addEventListener('click', () => {
+    const target = tabBtn.dataset.tab;
+    document.querySelectorAll('.sb-tab').forEach((t) => {
+      const active = t.dataset.tab === target;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('.sb-panel').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.panel !== target);
+    });
+  });
 });
 
 // User-picker modal (first-connect prompt). Populated from the `user_init`
@@ -1064,6 +1066,7 @@ function showUserModal(known, current){
     b.innerHTML=`${name}${name===current?' <span class="sub">(current default)</span>':''}`;
     b.onclick=()=>{
       localStorage.setItem(USER_STORE, name);
+      refreshHeaderUser();
       if(ws && ws.readyState===1){
         try{ws.send(JSON.stringify({type:'set_user', name:name}));}catch(e){}
       }
@@ -1086,7 +1089,9 @@ function hideKeyModal(){keyModal.classList.add('hidden');keyError.textContent=''
 // Sheet button: close the panel first so the modal can take focus
 // cleanly, then open the key entry modal. Matches the prior single-tap
 // behaviour of the old header key-btn.
-keyBtnSheet.onclick=()=>{ closeStatusSheet(); showKeyModal(''); };
+// Close the sidebar (which now houses the Status tab) first so the
+// modal can take focus cleanly, then open the key entry modal.
+keyBtnSheet.onclick=()=>{ closeSidebar(); showKeyModal(''); };
 
 // --- Location services -------------------------------------------------
 // On WS open we attempt to share the browser's geolocation with Symbion
@@ -1632,7 +1637,7 @@ function updateStatus(s){
     document.getElementById('st-dist-pill').classList.toggle('warn',parseFloat(s.dist||0)>0.5);
   }
   // The welfare row is default-hidden via #st-welfare{display:none} in
-  // the status-sheet CSS. style.display='' would NOT override that
+  // the status-rows CSS. style.display='' would NOT override that
   // (CSS still wins), so we set an explicit 'flex' to match the
   // .status-row layout when there's a concern, and 'none' otherwise.
   document.getElementById('st-welfare').style.display=
@@ -1948,6 +1953,7 @@ function handleSlashCommand(text){
     }
     const prior = localStorage.getItem(USER_STORE) || 'aaron';
     localStorage.setItem(USER_STORE, name);
+    refreshHeaderUser();
     if(ws && ws.readyState === 1){
       ws.send(JSON.stringify({type:'set_user', name:name}));
     }
