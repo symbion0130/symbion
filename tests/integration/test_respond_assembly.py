@@ -158,25 +158,26 @@ async def test_system_prompt_contains_required_blocks_non_aaron_single_mode(symb
 
 
 # ---------------------------------------------------------------------------
-# 2. Self-source pre-fetch (commit 55e4c52)
+# 2. Self-source pre-fetch (commits 55e4c52 + 7bed724 + split-regex follow-up)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_self_source_prefetch_injects_source_and_manifest(symbion_anthropic):
-    """When a query matches _SELF_SOURCE_RE and agent loop is active, the
-    pre-fetch path must inject BOTH the symbion_v14.py source (via the
-    anchored [file: ... ] header from commit 7bed724) AND the project-
-    structure manifest (commit 55e4c52). Wraps both in [TOOL_DATA] so
-    the persona's 'do not echo' rule applies."""
+    """SOURCE-WANTING query (matches _SELF_SOURCE_RE): the pre-fetch must
+    inject BOTH the symbion_v14.py source (via the anchored [file: ... ]
+    header from commit 7bed724) AND the project-structure manifest. This
+    is the high-cost tier -- justified when the user explicitly wants the
+    code itself ('walk me through respond()', 'your codebase', etc.)."""
     sym, _ = symbion_anthropic
     session = "integ_assembly_self_source"
 
     stub = _CapturingResponderStub(supports_tools=True)
     sym._responder_client = lambda: stub
 
-    # Matches the new self-review pattern added in commit 55e4c52.
-    await sym.respond("self review the codebase", session)
+    # Matches _SELF_SOURCE_RE: 'walk me through respond()' triggers the
+    # full-source path because the source IS what the user asked for.
+    await sym.respond("walk me through respond() and your pipeline", session)
 
     p = stub.system_prompt
     assert p, "responder stub was never called"
@@ -198,6 +199,46 @@ async def test_self_source_prefetch_injects_source_and_manifest(symbion_anthropi
     assert "lines" in p and "chars" in p, (
         "read_file anchored counts missing -- the | N lines | M chars | "
         "format from commit 7bed724 has regressed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_review_prefetch_injects_manifest_only(symbion_anthropic):
+    """SELF-REVIEW query (matches _SELF_REVIEW_RE but NOT _SELF_SOURCE_RE):
+    pre-fetch must inject the manifest BUT NOT the symbion_v14.py source.
+    This is the low-cost tier -- avoids the 450K-input-tokens/min thrash
+    that the always-inject-source version caused when 'self review'
+    triggered a 140K-token source dump on every turn. Model uses tools to
+    pull source on demand via the agent loop."""
+    sym, _ = symbion_anthropic
+    session = "integ_assembly_self_review"
+
+    stub = _CapturingResponderStub(supports_tools=True)
+    sym._responder_client = lambda: stub
+
+    # Matches _SELF_REVIEW_RE only -- no source-wanting words.
+    await sym.respond("self review and tell me what to fix", session)
+
+    p = stub.system_prompt
+    assert p, "responder stub was never called"
+
+    # Manifest IS present.
+    assert "[TOOL_DATA" in p, (
+        "self-review pre-fetch did not produce a TOOL_DATA block -- "
+        "either _SELF_REVIEW_RE didn't match or the manifest branch didn't fire"
+    )
+    assert "[Project structure" in p, (
+        "manifest block missing -- list_dir output for project root + "
+        "tests/ + tests/integration/ did not get prepended to tool_context"
+    )
+    # Source is NOT present -- the manifest-only path skips the 140K-token
+    # read_file('symbion_v14.py'). If this assert fails, the cost-tier
+    # split has regressed and we're back to dumping the full source on
+    # every 'self review' query (= 429 rate-limit risk).
+    assert "[file: symbion_v14.py" not in p, (
+        "symbion_v14.py source leaked into a self-review-only query -- "
+        "cost-tier split has regressed; this will cause 429s on "
+        "extended self-review sessions"
     )
 
 

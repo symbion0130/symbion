@@ -1018,16 +1018,18 @@ from symbion_tools import (
 
 
 
-# Self-referential queries about Symbion's own source/architecture. When this
-# matches, _maybe_tool force-reads symbion_v14.py so the responder grounds
-# claims in actual code instead of fabricating from training memory. Without
-# this, the model produces architecturally plausible but invented class names
-# and file structure (see iid=193 fabrication in symbion_events.jsonl).
+# Two regexes, two cost tiers. Split 2026-05-24 (later) after the manifest
+# extension caused 429s on "self review" queries: pre-fetch was dumping ~140K
+# tokens of symbion_v14.py into the system prompt for every match, then the
+# agent loop's follow-on tool reads multiplied that context across N
+# iterations and tripped Anthropic's 450K input-tokens/min org limit.
 #
-# Self-review patterns added 2026-05-24 after a "self review and tell me
-# what you'd change" prompt slipped past the regex. Symbion then read the
-# file via the agent loop but still confabulated line count + claimed
-# "zero integration test coverage" without ever listing tests/.
+# _SELF_SOURCE_RE -- the original narrow trigger. Matches queries that
+# explicitly want the source code itself ("walk me through respond()",
+# "read symbion_v14.py", "your codebase"). Pre-fetch injects manifest +
+# full source for these because the source IS the answer the model owes
+# the user. Worth the 140K token cost; without it the model confabulates
+# class names from training data (see iid=193 fabrication).
 _SELF_SOURCE_RE = re.compile(
     r"(?:"
     r"\bsymbion_v1[34]\.py\b"
@@ -1035,7 +1037,19 @@ _SELF_SOURCE_RE = re.compile(
     r"|\bread\s+symbion\b"
     r"|\brespond\s*\(\s*\)"
     r"|\b(?:respond|symbion)\s+pipeline\b"
-    r"|\bself[\s-]?(?:review|audit|critique|reflect|assessment)\b"
+    r")",
+    re.IGNORECASE)
+
+# _SELF_REVIEW_RE -- the broader self-evaluation trigger. Matches "self
+# review", "audit yourself", "critique yourself" -- queries where the
+# user wants the model's OPINION on the project, not a code walkthrough.
+# Pre-fetch injects ONLY the manifest (project listing, ~1KB) for these;
+# the agent loop reads source files via tools if it needs them. Trades
+# the always-on grounding for budget safety. Added 2026-05-24 (later)
+# after the source-injection version caused 429s.
+_SELF_REVIEW_RE = re.compile(
+    r"(?:"
+    r"\bself[\s-]?(?:review|audit|critique|reflect|assessment)\b"
     r"|\b(?:review|audit|critique|assess)\s+yourself\b"
     r")",
     re.IGNORECASE)
@@ -4851,32 +4865,58 @@ class TurnPipeline:
     # -- Phase 3 ----------------------------------------------------------
 
     async def prefetch_self_source(self) -> None:
-        """Agent-loop-only: when query matches _SELF_SOURCE_RE, inject
-        symbion_v14.py + project-structure manifest into tool_context."""
+        """Agent-loop-only. Two cost tiers:
+
+          _SELF_SOURCE_RE  -- inject manifest + full symbion_v14.py source
+                              (~140K tokens). Justified for queries that
+                              EXPLICITLY want the code itself.
+          _SELF_REVIEW_RE  -- inject manifest ONLY (~1KB). Lets the model
+                              decide what to read via the agent loop's tool
+                              calls instead of front-loading 140K tokens
+                              that may not be relevant. Avoids the 450K-
+                              input-tokens/min org-limit thrash that the
+                              always-inject-source version caused on broad
+                              "self review" queries.
+        """
         ctx = self.ctx
         sym = self.sym
-        if not (ctx.agent_loop_active and ctx.tool_context is None
-                and _SELF_SOURCE_RE.search(ctx.text)):
+        if not (ctx.agent_loop_active and ctx.tool_context is None):
+            if ctx._pre_gen_ms > 2000:
+                logger.warning(f"Pre-gen slow: {ctx._pre_gen_ms}ms")
+            return
+        want_source = bool(_SELF_SOURCE_RE.search(ctx.text))
+        want_review = bool(_SELF_REVIEW_RE.search(ctx.text))
+        if not (want_source or want_review):
             if ctx._pre_gen_ms > 2000:
                 logger.warning(f"Pre-gen slow: {ctx._pre_gen_ms}ms")
             return
         try:
-            src = sym.tools.read_file("symbion_v14.py")
-            if src and not src.startswith("Error"):
-                root_listing = sym.tools.list_dir(".")
-                tests_listing = sym.tools.list_dir("tests")
-                tests_int = sym.tools.list_dir("tests/integration")
-                manifest = (
-                    "[Project structure -- ground-truth listing, "
-                    "do not assert subsystem absence without checking this]\n"
-                    f"{root_listing}\n\n"
-                    f"{tests_listing}\n\n"
-                    f"{tests_int}\n"
-                )
-                ctx.tool_context = manifest + "\n" + src
-                logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch (agent loop): {len(src)} chars source + {len(manifest)} chars manifest")
-            else:
-                logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}")
+            # Manifest is always cheap and always useful -- gives the model
+            # ground-truth file/dir listings so it can't assert absence
+            # without confronting the actual structure.
+            root_listing = sym.tools.list_dir(".")
+            tests_listing = sym.tools.list_dir("tests")
+            tests_int = sym.tools.list_dir("tests/integration")
+            manifest = (
+                "[Project structure -- ground-truth listing, "
+                "do not assert subsystem absence without checking this. "
+                "Use read_file via the agent loop to pull source on demand.]\n"
+                f"{root_listing}\n\n"
+                f"{tests_listing}\n\n"
+                f"{tests_int}\n"
+            )
+            if want_source:
+                src = sym.tools.read_file("symbion_v14.py")
+                if src and not src.startswith("Error"):
+                    ctx.tool_context = manifest + "\n" + src
+                    logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch (full source): {len(src)} chars source + {len(manifest)} chars manifest")
+                    return
+                # Source read failed -- fall through to manifest-only so the
+                # model still has the directory listing to ground on.
+                logger.warning(f"[req={ctx.request_id}] Self-source pre-fetch failed: {(src or '')[:120]!r}; falling back to manifest only")
+            ctx.tool_context = manifest
+            logger.warning(f"[req={ctx.request_id}] Self-review pre-fetch (manifest only): {len(manifest)} chars")
+            return
         except Exception as ex:
             logger.error(f"[req={ctx.request_id}] Self-source pre-fetch: {ex}")
 

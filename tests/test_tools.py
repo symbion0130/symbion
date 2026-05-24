@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 import pytest
 from pathlib import Path
-from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace, _SELF_SOURCE_RE
+from symbion_v14 import SymbionTools, _safe_calc, _is_safe_url, _parse_json, _resolve_in_workspace, _SELF_SOURCE_RE, _SELF_REVIEW_RE
 
 
 # === 4.1: AST-based calculator ===
@@ -279,18 +279,24 @@ class TestParseJson:
         assert r == {"a": 1}
 
 
-# === 4.5: Self-source pre-fetch trigger regex ===
+# === 4.5: Self-source and self-review pre-fetch trigger regexes ===
 #
-# _SELF_SOURCE_RE gates the agent-loop pre-fetch that injects symbion_v14.py
-# (and now a project-structure manifest) into TOOL_DATA. Locking in the
-# patterns here so future tightening can't silently re-open the gap that
-# slipped on 2026-05-24 — "self review and tell me what you'd change"
-# missed the regex, Symbion read the file manually but still confabulated
-# line count and asserted "zero integration tests" without listing tests/.
+# Two regexes, two cost tiers (split 2026-05-24 after the unified version
+# caused 429s):
+#   _SELF_SOURCE_RE  -- narrow trigger for queries that explicitly want the
+#                       source code. Pre-fetch injects manifest + full
+#                       symbion_v14.py (~140K tokens). Cost justified by
+#                       grounding need.
+#   _SELF_REVIEW_RE  -- broader trigger for "self review" / "audit yourself"
+#                       style queries. Pre-fetch injects ONLY the manifest
+#                       (~1KB); model uses tools to pull source if needed.
+#                       Avoids the 450K-input-tokens/min org-limit thrash.
 
 class TestSelfSourceRegex:
+    """Source-wanting queries -- always trigger _SELF_SOURCE_RE. The
+    pre-fetch will inject manifest + full source on these."""
+
     @pytest.mark.parametrize("query", [
-        # Original patterns (should keep matching)
         "explain symbion_v14.py to me",
         "walk me through your code",
         "what's in your codebase?",
@@ -298,27 +304,57 @@ class TestSelfSourceRegex:
         "your pipeline has a bug",
         "walk me through respond()",
         "review the symbion pipeline",
-        # New self-review patterns (the 2026-05-24 miss)
-        "self review and tell me what you'd change",
-        "self-review pls",
-        "self audit your decisions",
-        "self critique your last answer",
-        "review yourself",
-        "audit yourself end to end",
-        "critique yourself",
-        "assess yourself honestly",
     ])
-    def test_matches_self_referential(self, query):
+    def test_source_wanting_queries_match(self, query):
         assert _SELF_SOURCE_RE.search(query) is not None, f"should match: {query!r}"
 
     @pytest.mark.parametrize("query", [
-        # Clearly user-directed — not about Symbion's own code
+        # Clearly user-directed -- not about Symbion's own code.
         "review my code",
         "audit this PR I'm sending",
         "what's in this file I attached",
         "explain how python works",
         "review the changes I just pushed",
         "audit my database schema",
+        # Self-review patterns -- these belong to _SELF_REVIEW_RE,
+        # NOT _SELF_SOURCE_RE. Verify they DON'T trigger source injection.
+        "self review and tell me what you'd change",
+        "review yourself",
+        "audit yourself end to end",
     ])
-    def test_does_not_match_user_directed(self, query):
+    def test_source_regex_does_not_match(self, query):
         assert _SELF_SOURCE_RE.search(query) is None, f"should NOT match: {query!r}"
+
+
+class TestSelfReviewRegex:
+    """Self-evaluation queries -- trigger _SELF_REVIEW_RE only. Pre-fetch
+    will inject manifest-only (cheap, ~1KB) and let the agent loop pull
+    source on demand if needed."""
+
+    @pytest.mark.parametrize("query", [
+        "self review and tell me what you'd change",
+        "self-review pls",
+        "self audit your decisions",
+        "self critique your last answer",
+        "self reflect on the last hour",
+        "self assessment please",
+        "review yourself",
+        "audit yourself end to end",
+        "critique yourself",
+        "assess yourself honestly",
+    ])
+    def test_review_queries_match(self, query):
+        assert _SELF_REVIEW_RE.search(query) is not None, f"should match: {query!r}"
+
+    @pytest.mark.parametrize("query", [
+        # User-directed -- review of user's own work, not Symbion's.
+        "review my code",
+        "audit this PR I'm sending",
+        "review the changes I just pushed",
+        # Source-wanting -- these belong to _SELF_SOURCE_RE, not review.
+        "walk me through respond()",
+        "what's in your codebase?",
+        "explain symbion_v14.py",
+    ])
+    def test_review_regex_does_not_match(self, query):
+        assert _SELF_REVIEW_RE.search(query) is None, f"should NOT match: {query!r}"
