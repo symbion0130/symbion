@@ -303,7 +303,7 @@ TOOL_SCHEMAS = [
             "properties": {
                 "path":      {"type": "string"},
                 "offset":    {"type": "integer"},
-                "max_chars": {"type": "integer", "default": 2_000_000},
+                "max_chars": {"type": "integer", "default": 5_000_000},
             },
             "required": ["path", "offset"],
         },
@@ -504,7 +504,7 @@ class SymbionTools:
         except Exception as ex:
             return f"Error reading image {self._safe_name(path)}: {type(ex).__name__}"
 
-    def read_file(self, path: str, offset: int = 0, max_chars: int = 2_000_000) -> str:
+    def read_file(self, path: str, offset: int = 0, max_chars: int = 5_000_000) -> str:
         try:
             if not path.strip(): return "Error: no path given"
             p = _resolve_in_workspace(path.strip(), self._workspace, machine_wide=True)
@@ -542,7 +542,7 @@ class SymbionTools:
         except Exception as ex:
             return f"Error reading {self._safe_name(path)}: {type(ex).__name__}"
 
-    def read_file_chunk(self, path: str, offset: int, max_chars: int = 2_000_000) -> str:
+    def read_file_chunk(self, path: str, offset: int, max_chars: int = 5_000_000) -> str:
         return self.read_file(path, offset=offset, max_chars=max_chars)
 
     def list_dir(self, path: str = ".", max_entries: int = 200) -> str:
@@ -1087,7 +1087,7 @@ class SymbionTools:
     _MAX_URL_LEN = 2048
     _MAX_QUERY_LEN = 2000
     _MAX_EXPR_LEN = 500
-    _MAX_CONTENT_LEN = 5_000_000
+    _MAX_CONTENT_LEN = 10_000_000
     _MAX_PROMPT_LEN = 1000
     _PATH_BAD_CHARS = re.compile(r'[\x00-\x1f]')
 
@@ -1150,7 +1150,7 @@ class SymbionTools:
             if offset is None: return False, "offset must be a non-negative integer", {}
             out["offset"] = offset
             if tool == "read_file_chunk":
-                mc = _int("max_chars", default=2_000_000, lo=1, hi=cls._MAX_CONTENT_LEN)
+                mc = _int("max_chars", default=5_000_000, lo=1, hi=cls._MAX_CONTENT_LEN)
                 if mc is None: return False, "max_chars must be a positive integer", {}
                 out["max_chars"] = mc
             if tool == "read_image":
@@ -1258,7 +1258,7 @@ class SymbionTools:
         if tool=="calculate":       return self.calculate(a["expression"])
         if tool=="datetime":        return self.datetime_now()
         if tool=="read_file":       return self.read_file(a["path"], a.get("offset",0))
-        if tool=="read_file_chunk": return self.read_file_chunk(a["path"], a.get("offset",0), a.get("max_chars",2_000_000))
+        if tool=="read_file_chunk": return self.read_file_chunk(a["path"], a.get("offset",0), a.get("max_chars",5_000_000))
         if tool=="read_image":      return await self.read_image(a["path"], a.get("prompt",""), responder, responder_model)
         if tool=="read_pdf":        return self.read_pdf(a["path"], a.get("max_chars",50_000))
         if tool=="list_dir":        return self.list_dir(a.get("path","."), a.get("max_entries",200))
