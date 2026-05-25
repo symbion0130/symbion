@@ -1404,6 +1404,17 @@ class BaseClient:
     # Subclasses set this to True when they implement stream_with_tools(...)
     # for native tool use. The agent loop in respond() branches on it.
     supports_tools: bool = False
+    # Set True on subclasses that can't actually fire an LLM call (e.g.
+    # OfflineJudgeStub). Call sites that would otherwise fire chat_json
+    # check `client.is_degraded` to skip the call and either fail open
+    # or return a sentinel. Refactored 2026-05-24 from
+    # `getattr(client, 'is_degraded', False)` checks scattered across
+    # 20 call sites -- the attribute-based dispatch makes the contract
+    # explicit ("this client can't serve real responses") instead of
+    # coupling to a specific class. Future degraded clients (rate-
+    # limited stub, offline-cached stub) get the same handling for
+    # free by setting is_degraded=True.
+    is_degraded: bool = False
 
     async def _retry(self, fn, retries: int = 2, backoff: float = 1.5):
         if self.cb and not self.cb.allow():
@@ -2244,10 +2255,16 @@ class OfflineJudgeStub(BaseClient):
 
     This is NOT a safety layer and does not pretend to be one. When active it
     returns a transparent degraded-mode verdict with low confidence — every
-    judge call path in SYMBION already early-exits on `isinstance(_, OfflineJudgeStub)`,
-    so this class never drives refusals, revisions, or gap/contradiction flags.
-    The earlier regex-keyword version was theatre: easily fooled by obfuscation,
-    context-blind, and gave false confidence to anyone reading the logs.
+    judge call path in SYMBION early-exits on `client.is_degraded` (set True
+    on this class, False on BaseClient), so this class never drives refusals,
+    revisions, or gap/contradiction flags. The earlier regex-keyword version
+    was theatre: easily fooled by obfuscation, context-blind, and gave false
+    confidence to anyone reading the logs.
+
+    Refactored 2026-05-24: 22 `isinstance(_, OfflineJudgeStub)` call sites
+    were replaced with `getattr(_, 'is_degraded', False)` so future
+    degraded clients (rate-limited stub, offline-cached stub) get the same
+    handling automatically.
     """
     is_degraded = True
 
@@ -4889,7 +4906,7 @@ class TurnPipeline:
             sym.cfg.tools_enabled
             and sym.cfg.agent_loop_enabled
             and getattr(_resp_for_mode, "supports_tools", False)
-            and not isinstance(_resp_for_mode, OfflineJudgeStub)
+            and not getattr(_resp_for_mode, 'is_degraded', False)
         )
 
     # -- Phase 2 ----------------------------------------------------------
@@ -5155,7 +5172,7 @@ class TurnPipeline:
         ctx.primary_provider = (sym.cfg.llm_provider or "").lower()
         ctx.evaluation["actual_provider"] = ctx.actual_provider
         if (not ctx.escalated
-                and not isinstance(ctx.resp_client, OfflineJudgeStub)
+                and not getattr(ctx.resp_client, 'is_degraded', False)
                 and not sym.cfg.use_kimi_responder
                 and ctx.actual_provider
                 and ctx.actual_provider != ctx.primary_provider):
@@ -5194,7 +5211,7 @@ class TurnPipeline:
         sym = self.sym
         ctx._ctx_ms = int((time.monotonic() - ctx._ctx_t0) * 1000)
         ctx._gen_t0 = time.monotonic()
-        if not isinstance(ctx.resp_client, OfflineJudgeStub):
+        if not getattr(ctx.resp_client, 'is_degraded', False):
             if ctx.agent_loop_active and not ctx.refusal:
                 try:
                     async for ev in ctx.resp_client.stream_with_tools(
@@ -5550,7 +5567,7 @@ class SYMBION:
         # the OFFLINE-STUB fallback prints since that's an actionable
         # degraded state the user needs to know about. /info exposes
         # the provider on demand for anyone who wants confirmation.
-        if not (self.client and not isinstance(self.client, OfflineJudgeStub)):
+        if not (self.client and not getattr(self.client, 'is_degraded', False)):
             print(yellow("  Provider  :  OFFLINE-STUB (no LLM — judge disabled)"))
 
         # Same-model judge/responder warning: self-eval becomes circular when
@@ -6077,7 +6094,7 @@ class SYMBION:
         """True if the judge and responder resolve to identical client type AND model."""
         jc = self._judge_active()
         rc = self._responder_client()
-        if isinstance(jc, OfflineJudgeStub) or isinstance(rc, OfflineJudgeStub):
+        if getattr(jc, 'is_degraded', False) or getattr(rc, 'is_degraded', False):
             return False
         return type(jc) is type(rc) and self._jmodel() == self._rmodel()
 
@@ -6122,7 +6139,7 @@ class SYMBION:
     async def _pre_gen_analysis(self, text: str) -> Tuple[Dict, Dict]:
         """Fused judge + emotion detection in one LLM call. Returns (evaluation, emotional_state)."""
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub):
+        if getattr(client, 'is_degraded', False):
             ev = await client.judge(text)
             return ev, {"state":"neutral","confidence":0.5,"signals":[],"suggested_response_mode":"normal"}
 
@@ -6328,7 +6345,7 @@ class SYMBION:
     async def _maybe_tool(self, query: str, active_user: str = "", session: str = ""):
         if not self.cfg.tools_enabled: return None
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return None
+        if getattr(client, 'is_degraded', False): return None
 
         q_low = query.lower()
 
@@ -6426,7 +6443,7 @@ class SYMBION:
         # the quality review. Self-eval still fails closed when the breaker
         # is open or when only the offline stub is available.
         client = self._self_eval_client or self._judge_active()
-        if isinstance(client, OfflineJudgeStub) or not self._self_eval_breaker.allow():
+        if getattr(client, 'is_degraded', False) or not self._self_eval_breaker.allow():
             self.health.self_eval_skipped += 1
             return 1.0, False, "", False, False, None
         try:
@@ -6553,7 +6570,7 @@ class SYMBION:
         move = (user_text or "").strip()
         if not move:
             client = self._judge_active()
-            if isinstance(client, OfflineJudgeStub):
+            if getattr(client, 'is_degraded', False):
                 return {"ok": False, "id": 0, "move": "",
                         "reason": "no LLM available to extract the move; pass explicit text after /promote"}
             try:
@@ -6592,7 +6609,7 @@ class SYMBION:
 
     async def _check_knowledge_gaps(self, query: str, response: str, session: str):
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return
+        if getattr(client, 'is_degraded', False): return
         try:
             raw = await client.chat_json(
                 self._jmodel(), KNOWLEDGE_GAP_SYSTEM,
@@ -6608,7 +6625,7 @@ class SYMBION:
 
     async def _check_contradictions(self, query: str, session: str):
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return None
+        if getattr(client, 'is_degraded', False): return None
         try:
             with sqlite3.connect(_anchor(self.cfg.db_path)) as c:
                 rows = c.execute(
@@ -6645,7 +6662,7 @@ class SYMBION:
         and the /quit flush so short sessions don't lose context.
         """
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return 0
+        if getattr(client, 'is_degraded', False): return 0
         msgs = self.memory.get_unsummarised(session)
         if len(msgs) < min_msgs:
             return 0
@@ -6680,7 +6697,7 @@ class SYMBION:
         out = {"clusters_found": 0, "clusters_merged": 0,
                "summaries_replaced": 0, "summaries_created": 0}
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub):
+        if getattr(client, 'is_degraded', False):
             return out
         clusters = self.memory.find_consolidation_clusters(
             similarity_threshold=similarity_threshold,
@@ -6742,7 +6759,7 @@ class SYMBION:
                                  ev: Dict, emotional_state: Dict,
                                  is_new_session: bool = False):
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return
+        if getattr(client, 'is_degraded', False): return
 
         # Summarise
         if self.memory.unsummarised_count(session) >= self.cfg.memory_summary_every:
@@ -6787,7 +6804,7 @@ class SYMBION:
         if not response or len(response.strip()) < 12:
             return  # too short to score meaningfully
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub):
+        if getattr(client, 'is_degraded', False):
             return
         try:
             payload = (f"USER: {query[:2000]}\n\n"
@@ -7027,7 +7044,7 @@ class SYMBION:
 
     async def generate_proactive(self, session: str):
         client = self._judge_active()
-        if isinstance(client, OfflineJudgeStub): return None
+        if getattr(client, 'is_degraded', False): return None
         try:
             profile = self.memory.get_profile(user=self._active_user(session))
             tasks   = self.tasks.get_active(session)
@@ -7317,8 +7334,7 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         # app lifetime, not just one turn. Terminal mode can't do this cleanly
         # because each respond() spins up its own asyncio.run().
         await symbion.start_mcp()
-        if symbion.cfg.proactive_interval_minutes > 0 and not isinstance(
-                symbion._judge_active(), OfflineJudgeStub):
+        if symbion.cfg.proactive_interval_minutes > 0 and not getattr(symbion._judge_active(), 'is_degraded', False):
             import threading
             def _runner():
                 try: asyncio.run(symbion.proactive_loop("web_global"))
@@ -8354,8 +8370,7 @@ def run_terminal(symbion: "SYMBION"):
     # generator on a daemon thread so the main loop stays sync. Messages
     # land in proactive_queue and are drained before each prompt below.
     proactive_thread = None
-    if symbion.cfg.proactive_interval_minutes > 0 and not isinstance(
-            symbion._judge_active(), OfflineJudgeStub):
+    if symbion.cfg.proactive_interval_minutes > 0 and not getattr(symbion._judge_active(), 'is_degraded', False):
         import threading
         def _proactive_runner():
             try:
@@ -8888,7 +8903,7 @@ def run_terminal(symbion: "SYMBION"):
             print()
             _info_row("Version", warm_white(f"v14.0+{_resolve_build_hash()}"),
                       gray("git commit; shifts after each update"))
-            if symbion.client and not isinstance(symbion.client, OfflineJudgeStub):
+            if symbion.client and not getattr(symbion.client, 'is_degraded', False):
                 prov = symbion.cfg.llm_provider.upper()
                 if symbion.cfg.use_kimi_responder and symbion.cfg.kimi_api_key:
                     resp_label = f"Kimi ({symbion.cfg.kimi_model})"
@@ -8933,7 +8948,7 @@ def run_terminal(symbion: "SYMBION"):
         elif raw=="/voice-test":
             print(dim("\n  Voice test (5 queries)...\n"))
             jclient=symbion._judge_active()
-            if isinstance(jclient,OfflineJudgeStub):
+            if getattr(jclient, 'is_degraded', False):
                 print(red("  No LLM available.")); print()
             else:
                 for i,q in enumerate(VOICE_TEST_QUERIES,1):
