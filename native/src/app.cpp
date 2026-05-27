@@ -150,8 +150,11 @@ HttpResponse App::HandleForget(const HttpRequest& request) {
     const auto maybe_message = ExtractJsonStringSimple(request.body, "message");
     const std::string message = maybe_message.value_or("");
     const std::string session_id = SessionFromRequest(request);
+    const Intent intent = ClassifyIntent(message);
     int deleted = 0;
-    if (message.empty() || IsGeneralForget(message)) {
+    if (intent.wipe_all) {
+        deleted = memory_.WipeAll();
+    } else if (message.empty() || IsGeneralForget(message)) {
         deleted = memory_.DeleteSession(session_id);
     } else {
         deleted = memory_.DeleteMatching(message);
@@ -159,11 +162,13 @@ HttpResponse App::HandleForget(const HttpRequest& request) {
             deleted = memory_.DeleteSession(session_id);
         }
     }
-    const std::string reply = IsGeneralForget(message)
+    const std::string reply = intent.wipe_all
+        ? "I wiped all stored memory and emotion history."
+        : (IsGeneralForget(message)
         ? "I cleared this chat from stored history."
         : (deleted > 0
             ? "I deleted that from memory and cleared it from the stored chat history."
-            : "I did not find a matching memory, but I will not bring that topic forward from this chat.");
+            : "I did not find a matching memory, but I will not bring that topic forward from this chat."));
     return JsonResponse("{\"reply\":\"" + EscapeJson(reply) + "\","
                         "\"deleted\":" + std::to_string(deleted) + ","
                         "\"intent\":\"forget\"}");

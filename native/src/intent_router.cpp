@@ -54,6 +54,14 @@ bool LooksLikeForget(const std::string& text) {
     });
 }
 
+bool LooksLikeWipeAll(const std::string& text) {
+    return ContainsAny(text, {
+        "wipe all memory", "delete all memory", "erase all memory", "clear all memory",
+        "reset memory", "factory reset memory", "forget everything", "delete everything you remember",
+        "clear every memory", "wipe memories", "reset all memories"
+    });
+}
+
 bool LooksLikeCreative(const std::string& text) {
     return ContainsAny(text, {
         "write a poem", "write a story", "draft", "brainstorm", "ideas for",
@@ -67,7 +75,8 @@ Intent ClassifyIntent(std::string_view message) {
     const std::string text = Lower(message);
     Intent intent;
 
-    intent.forget = LooksLikeForget(text);
+    intent.wipe_all = LooksLikeWipeAll(text);
+    intent.forget = intent.wipe_all || LooksLikeForget(text);
     intent.asks_for_list = ContainsAny(text, {"list", "what are the", "name the", "give me the"});
     intent.emotional = ContainsAny(text, {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",

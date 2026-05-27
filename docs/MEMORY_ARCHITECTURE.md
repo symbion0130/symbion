@@ -14,6 +14,7 @@ The previous Python memory implementation was removed from the active runtime on
 - The current turn is stored after retrieval so the memory layer does not simply echo the sentence the user just typed.
 - Old memories should be reopened softly, only when they reduce stress or increase clarity.
 - Natural forget requests such as "forget this", "delete that memory", and "clear this chat" remove stored chat history and matching emotion signals.
+- Full resets such as "wipe all memory", "forget everything", and "reset memory" remove all native messages and emotion history.
 
 ## Current SQLite Memory Surface
 

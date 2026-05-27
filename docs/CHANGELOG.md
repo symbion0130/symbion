@@ -14,3 +14,4 @@
 - Tuned native counseling prompts around rooted calm, stress reduction, and delicate memory reopening.
 - Adjusted memory retrieval to prefer user-authored memories and avoid treating the current turn as old memory.
 - Added native forget/delete-memory flow for natural language memory removal.
+- Added wipe-all memory reset flow and UI control.

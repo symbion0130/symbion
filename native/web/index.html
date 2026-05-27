@@ -183,6 +183,7 @@
       <div class="header-actions">
         <div id="status">Starting native runtime...</div>
         <button class="icon-button" id="new-chat" type="button" title="New chat" aria-label="New chat">+</button>
+        <button class="icon-button" id="wipe-memory" type="button" title="Wipe all memory" aria-label="Wipe all memory">x</button>
       </div>
     </header>
     <section id="messages">
@@ -204,6 +205,7 @@
     const send = document.getElementById("send");
     const status = document.getElementById("status");
     const newChat = document.getElementById("new-chat");
+    const wipeMemory = document.getElementById("wipe-memory");
     let sessionId = createSessionId();
 
     function createSessionId() {
@@ -295,6 +297,19 @@
     });
 
     newChat.addEventListener("click", startNewChat);
+    wipeMemory.addEventListener("click", async () => {
+      if (!confirm("Wipe all stored Symbion memory and emotion history?")) return;
+      const result = await fetch("/api/forget", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Symbion-Session": sessionId
+        },
+        body: JSON.stringify({ message: "wipe all memory" })
+      }).then((r) => r.json());
+      startNewChat();
+      addMessage("assistant", result.reply || "I wiped all stored memory.");
+    });
     refreshHealth();
     startNewChat();
     input.focus();

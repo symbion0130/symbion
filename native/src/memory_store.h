@@ -42,6 +42,7 @@ public:
     std::vector<EmotionSignal> RecentEmotionSignals(int limit) const;
     int DeleteSession(const std::string& session_id);
     int DeleteMatching(const std::string& query);
+    int WipeAll();
     int MessageCount() const;
 
 private:

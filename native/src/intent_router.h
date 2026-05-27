@@ -22,6 +22,7 @@ struct Intent {
     bool intense = false;
     bool crisis = false;
     bool forget = false;
+    bool wipe_all = false;
     bool asks_for_list = false;
 };
 

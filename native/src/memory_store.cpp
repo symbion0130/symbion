@@ -243,6 +243,18 @@ int MemoryStore::DeleteMatching(const std::string& query) {
     return changed;
 }
 
+int MemoryStore::WipeAll() {
+    if (!db_) return 0;
+    int changed = 0;
+    if (Exec(db_, "DELETE FROM native_messages;")) {
+        changed += sqlite3_changes(db_);
+    }
+    if (Exec(db_, "DELETE FROM native_emotion_signals;")) {
+        changed += sqlite3_changes(db_);
+    }
+    return changed;
+}
+
 int MemoryStore::MessageCount() const {
     if (!db_) return 0;
     sqlite3_stmt* stmt = nullptr;
