@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <unordered_set>
 
 namespace symbion {
 
@@ -31,6 +32,7 @@ private:
     Config config_;
     MemoryStore memory_;
     GemmaClient gemma_;
+    std::unordered_set<std::string> pending_wipe_sessions_;
 };
 
 }  // namespace symbion

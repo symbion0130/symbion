@@ -60,6 +60,26 @@ std::string RoutePath(const std::string& path) {
     return question == std::string::npos ? path : path.substr(0, question);
 }
 
+std::string Lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool IsConfirmWipe(const std::string& message) {
+    const std::string lower = Lower(message);
+    return lower == "yes" || lower == "confirm" || lower == "yes wipe all memory" ||
+           lower == "yes wipe it" || lower == "wipe it" || lower == "do it" ||
+           lower == "i am sure" || lower == "yes i am sure";
+}
+
+bool IsCancelWipe(const std::string& message) {
+    const std::string lower = Lower(message);
+    return lower == "no" || lower == "cancel" || lower == "stop" || lower == "never mind" ||
+           lower == "nevermind" || lower == "do not wipe" || lower == "dont wipe";
+}
+
 bool IsGeneralForget(const std::string& text) {
     std::string lower = text;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
@@ -128,6 +148,20 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const std::string user_message = *maybe_message;
     const Intent intent = ClassifyIntent(user_message);
     const EmotionSignal signal = DetectEmotion(user_message);
+    if (pending_wipe_sessions_.contains(session_id)) {
+        if (IsConfirmWipe(user_message)) {
+            return HandleForget(request);
+        }
+        if (IsCancelWipe(user_message)) {
+            pending_wipe_sessions_.erase(session_id);
+            return JsonResponse("{\"reply\":\"Okay. I did not wipe memory.\","
+                                "\"emotion\":{\"label\":\"\",\"intensity\":0},"
+                                "\"intent\":\"forget\"}");
+        }
+        return JsonResponse("{\"reply\":\"Please answer yes to wipe all memory, or no to cancel.\","
+                            "\"emotion\":{\"label\":\"\",\"intensity\":0},"
+                            "\"intent\":\"forget\"}");
+    }
     if (intent.forget) {
         return HandleForget(request);
     }
@@ -150,10 +184,20 @@ HttpResponse App::HandleForget(const HttpRequest& request) {
     const auto maybe_message = ExtractJsonStringSimple(request.body, "message");
     const std::string message = maybe_message.value_or("");
     const std::string session_id = SessionFromRequest(request);
+    const bool pending_wipe = pending_wipe_sessions_.contains(session_id);
+    bool wiped_all = false;
     const Intent intent = ClassifyIntent(message);
     int deleted = 0;
     if (intent.wipe_all) {
+        pending_wipe_sessions_.insert(session_id);
+        return JsonResponse("{\"reply\":\"Are you sure you want to wipe all stored memory and emotion history? Reply yes to confirm, or no to cancel.\","
+                            "\"deleted\":0,"
+                            "\"intent\":\"forget\"}");
+    }
+    if (pending_wipe && IsConfirmWipe(message)) {
+        pending_wipe_sessions_.erase(session_id);
         deleted = memory_.WipeAll();
+        wiped_all = true;
     } else if (message.empty() || IsGeneralForget(message)) {
         deleted = memory_.DeleteSession(session_id);
     } else {
@@ -162,7 +206,7 @@ HttpResponse App::HandleForget(const HttpRequest& request) {
             deleted = memory_.DeleteSession(session_id);
         }
     }
-    const std::string reply = intent.wipe_all
+    const std::string reply = intent.wipe_all || wiped_all
         ? "I wiped all stored memory and emotion history."
         : (IsGeneralForget(message)
         ? "I cleared this chat from stored history."

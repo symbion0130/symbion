@@ -15,6 +15,7 @@ The previous Python memory implementation was removed from the active runtime on
 - Old memories should be reopened softly, only when they reduce stress or increase clarity.
 - Natural forget requests such as "forget this", "delete that memory", and "clear this chat" remove stored chat history and matching emotion signals.
 - Full resets such as "wipe all memory", "forget everything", and "reset memory" remove all native messages and emotion history.
+- Full resets require a second confirmation message, such as "yes", before any data is wiped.
 
 ## Current SQLite Memory Surface
 
