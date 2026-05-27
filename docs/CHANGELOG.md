@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Emotional analytics signal storage in SQLite: stress, peace, hope, trigger/event markers, practices that helped, and positive/negative change markers are now captured through check-ins, API calls, and tools for future graph/export work.
+- On-demand memory tools for related sessions, exact profile facts, and source-labeled memory reads.
+- Non-destructive memory correction/suppression records, plus terminal/tool flows for "that memory is wrong" and "do not bring this up unless I ask."
+- Runtime `MasterDocument.docx` ingestion into SQLite counseling chunks with tags, gentle-practical retrieval bias, high-intensity filtering, and crisis non-retrieval.
+- Native WebView2 shell parity scaffold: tray behavior, single-instance lock, backend/Gemma lifecycle hooks, provider switching, local auth injection, and analytics navigation.
+- Emotional check-in edit/delete API and sidebar controls for local privacy cleanup.
+
+### Changed
+- Episode summaries and consolidation prompts now preserve people, projects, decisions, emotional context, open loops, freshness, confidence, sensitive flags, source sessions, and user scope.
+
 ## v14.0.0 — 2026-04-22
 
 ### Removed

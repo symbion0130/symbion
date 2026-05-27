@@ -18,8 +18,8 @@ Gemma is now the default local-first responder. Cloud providers remain configure
 
 ## Startup And Status
 
-The current implementation health-checks `GET /v1/models` and gives a clear warning when the server is offline. Full lifecycle ownership remains future work: detect `c:\projects\codecat\runtime`, read CodeCat configuration when present, and optionally start Gemma with `runtime\scripts\start-gemma.ps1`. User-visible status should distinguish warm, cold, offline, and model-path-missing states.
+The current implementation health-checks `GET /v1/models`, reads `c:\projects\codecat\runtime\config\codecat.server.json`, checks whether the configured model path exists, and exposes `/api/local-gemma/status`. If `local_gemma_autostart` is enabled, Symbion can launch `runtime\scripts\start-gemma.ps1` and wait briefly for the server to warm. Status distinguishes warm, cold, offline/unhealthy, and model-path-missing states.
 
 ## Prompt Budget
 
-Assume a 4096-token context until the runtime config proves otherwise. Normal responses are capped with `local_gemma_max_tokens` and JSON/classifier calls with `local_gemma_json_max_tokens`. Deeper prompt-budget work remains open.
+Assume a 4096-token context until the runtime config proves otherwise. Normal responses are capped with `local_gemma_max_tokens`, JSON/classifier calls with `local_gemma_json_max_tokens`, recent raw turns with `local_gemma_recent_turns`, and ambient preamble memory with `local_gemma_context_char_budget`. Deep recall should use memory tools rather than preloading everything.

@@ -6,7 +6,7 @@
 
 ## What Symbion is (in one paragraph)
 
-Symbion is a **single-file async Python AI assistant** that wraps a frontier LLM (Anthropic by default; Kimi K2.6, OpenAI, and Ollama as alternate providers) in a behavioral safety and welfare scaffold. It is not a chatbot wrapper. It's a research harness that tries to reproduce, from *outside* the model, alignment and welfare properties that Anthropic verifies from *inside* the model on Claude Mythos. Symbion has no white-box access to its underlying model's activations — every probe is a **behavioral proxy** for internal state, and that framing is load-bearing. Never blur it.
+Symbion is a **local-first async AI assistant** that defaults to local Gemma through CodeCat's llama.cpp server, with Anthropic, Groq, Kimi, OpenAI, DeepSeek, HF Router, and Ollama retained as optional fallback/escalation providers. It keeps SQLite-backed memory, emotional check-ins with analytics-ready signal rows, on-demand recall tools, and a counsel-like but non-clinical support posture around the model. It is not a chatbot wrapper: the orchestration layer, memory, tools, judge/self-eval loop, and persona are what make it Symbion.
 
 ---
 
@@ -54,10 +54,10 @@ A single `SYMBION` core object composes these subsystems (see lines ~1587+ of `s
 | Subsystem | Class | Role |
 |---|---|---|
 | Config | `SymbionConfig` | Dataclass; loads from `symbion.json` + env vars; saves without secrets |
-| Providers | `OllamaClient`, `AnthropicClient`, `OpenAIClient`, `KimiClient` | Multi-provider with fallback chain |
+| Providers | `LocalGemmaClient`, `OllamaClient`, `AnthropicClient`, `OpenAIClient`, `KimiClient`, `GroqClient`, `DeepSeekClient`, `HFRouterClient` | Multi-provider with fallback chain |
 | Fallback judge | `HeuristicJudge` | Degraded-mode judge when no provider is reachable |
 | Telemetry | `HealthMetrics` | Mood, symbiosis, distress, revision rate — observation only |
-| Memory | `SymbionMemory` | SQLite-backed conversation + profile memory |
+| Memory | `SymbionMemory` | SQLite-backed conversation, profile, check-in, and emotional signal memory |
 | Learning | `SymbionLearner` | Pattern accumulation across sessions |
 | Identity | `LongitudinalIdentity` | Formative moments carried across sessions |
 | Tasks | `TaskEngine` | Multi-step task tracking |
@@ -70,7 +70,8 @@ A single `SYMBION` core object composes these subsystems (see lines ~1587+ of `s
 
 ### Defaults worth knowing
 
-- **Default provider:** Ollama (`llama3.2` judge, `mistral` responder). Anthropic is opt-in via config.
+- **Default provider:** `local_gemma` at `http://127.0.0.1:8088/v1`, model id `local-gemma`.
+- **Local runtime:** CodeCat llama.cpp, config at `c:\projects\codecat\runtime\config\codecat.server.json`.
 - **Anthropic responder model:** `claude-sonnet-4-6`. Judge model: `claude-haiku-4-5-20251001`.
 - **Kimi:** `kimi-k2.6` via `https://api.moonshot.ai/v1` (OpenAI-compatible, reuses OpenAI client path with a different base URL).
 - **Self-eval threshold:** 0.40 (triggers revision if draft scores below this).

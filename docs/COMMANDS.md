@@ -39,6 +39,8 @@ Full list lives in `/help`. The ones you'll actually use:
 | `/summarize` | Flush the current session to long-term memory without quitting |
 | `/forget` / `/forget <topic>` | Wipe session memory, or selectively wipe by topic |
 | `/tasks`, `/identity`, `/gaps` | Show internal state slices |
+| `/checkin <emotion> [0-100] [note]` | Record an emotional check-in; SQLite also stores graph-ready analytics signals |
+| `/emotions [emotion]` | Show recent emotional check-ins and tracked stress/peace/hope signals |
 | `/tool-stats` | Per-tool reliability counters this session |
 | `/escalate` | Force the **next** turn through the stronger model (Opus 4.7) |
 | `/whoami` | Symbion's self-description |

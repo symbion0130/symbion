@@ -379,6 +379,107 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "search_memory",
+        "description": "Search the ACTIVE user's long-term Symbion memory on demand. Use when the user asks what you remember, asks about an older topic, or you need deeper recall than the current prompt provides. This is for the active user's own memory only; use get_user_recent_activity for another household user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search terms from the current user request."},
+                "scope": {"type": "string", "description": "Memory tier to search: all, summaries, messages, techniques, checkins, profile, or counseling.", "default": "all"},
+                "k": {"type": "integer", "description": "Maximum results to return (1-20).", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_memory_item",
+        "description": "Read one ACTIVE-user memory item returned by search_memory. Use for exact details after search_memory gives a promising source/id. Source must be summary, message, technique, checkin, or counseling_source.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "summary, message, technique, checkin, or counseling_source."},
+                "id": {"type": "integer", "description": "The row id returned by search_memory."},
+            },
+            "required": ["source", "id"],
+        },
+    },
+    {
+        "name": "list_related_sessions",
+        "description": "List ACTIVE-user sessions related to a query, with source labels. Use when you need to choose a session before calling read_session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search terms from the current user request."},
+                "k": {"type": "integer", "description": "Maximum sessions to return (1-20).", "default": 6},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_profile_fact",
+        "description": "Read one ACTIVE-user profile fact by key with source/freshness metadata. Use for exact profile details such as name, current_situation, preferences, current_projects, or emotional_context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Profile key to read, e.g. current_situation or communication_style."},
+            },
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "correct_memory",
+        "description": "Record an ACTIVE-user correction or suppression for a memory item returned by search_memory/get_memory_item. Use when the user says a memory is wrong, stale, should not be brought up, or should be hidden without wiping unrelated memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "summary, message, technique, or checkin."},
+                "id": {"type": "integer", "description": "The row id being corrected."},
+                "correction": {"type": "string", "description": "Brief correction in the user's words."},
+                "delete": {"type": "boolean", "description": "If true, suppress this item from future memory search/read results.", "default": False},
+            },
+            "required": ["source", "id", "correction"],
+        },
+    },
+    {
+        "name": "read_session",
+        "description": "Read a bounded slice of the ACTIVE user's messages from a known session id. Use after search_memory returns a relevant session and the surrounding conversation matters.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Session id returned by search_memory or the UI."},
+                "limit": {"type": "integer", "description": "Maximum recent messages to return (1-200).", "default": 80},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "record_memory_correction",
+        "description": "Record a non-destructive correction or sensitivity note about a memory. Use when the user says a memory is wrong, asks you to remember something, or says not to bring something up unless asked.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string", "description": "The user's correction/preference in their words."},
+                "target_source": {"type": "string", "description": "Optional source being corrected: summary, message, checkin, profile, or counseling_source.", "default": ""},
+                "target_id": {"type": "integer", "description": "Optional id of the target item.", "default": 0},
+                "correction_type": {"type": "string", "description": "wrong, remember, sensitive, or note.", "default": "note"},
+            },
+            "required": ["note"],
+        },
+    },
+    {
+        "name": "search_counseling_sources",
+        "description": "Search the imported counseling north-star source. Retrieve only when relevant; default excludes high-intensity chunks so source text never overrides crisis safety.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Current counseling/support topic."},
+                "k": {"type": "integer", "description": "Maximum chunks (1-10).", "default": 4},
+                "include_high_intensity": {"type": "boolean", "description": "Only true for explicit high-intensity/spiritual source review.", "default": False},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "get_user_recent_activity",
         "description": "CROSS-USER ONLY. Return ANOTHER household user's recent activity (summaries + message snippets within the last `hours`). NEVER use this for the ACTIVE user — the active user's own recent history is already in your context via build_context. Calling it on yourself is redundant and explicitly wrong; the persona's 'Currently talking to: <name>' line names the active user, and the `user` arg MUST be a different name. Use ONLY when the active user explicitly asks about another known household user by name — 'what was lala working on?', 'is lala still up?', 'did lala mention X?'. Valid names: see the 'Other household users with recent Symbion activity' line in your system prompt. If that line isn't present, no other users have recent activity — don't fabricate names.",
         "input_schema": {
@@ -437,6 +538,25 @@ TOOL_SCHEMAS = [
                 "note": {"type": "string", "description": "Brief source note in the user's words.", "default": ""},
             },
             "required": ["emotion"],
+        },
+    },
+    {
+        "name": "record_emotional_analytics",
+        "description": "Record graph-ready emotional signals: stress, peace, hope, trigger/event, practices that helped, and positive/negative change markers. Use only from user-stated or strongly implied data.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emotion": {"type": "string", "description": "Optional emotion label.", "default": ""},
+                "intensity": {"type": "integer", "description": "Optional 0-100 emotion intensity.", "default": 0},
+                "stress": {"type": "integer", "description": "Optional 0-100 stress.", "default": 0},
+                "peace": {"type": "integer", "description": "Optional 0-100 peace/calm.", "default": 0},
+                "hope": {"type": "integer", "description": "Optional 0-100 hope.", "default": 0},
+                "trigger_event": {"type": "string", "description": "Trigger/event marker.", "default": ""},
+                "practices_helped": {"type": "array", "items": {"type": "string"}, "description": "Practices the user said helped.", "default": []},
+                "positive_marker": {"type": "string", "description": "Positive change marker.", "default": ""},
+                "negative_marker": {"type": "string", "description": "Negative change marker.", "default": ""},
+                "note": {"type": "string", "description": "Brief source note.", "default": ""},
+            },
         },
     },
     {
@@ -1105,9 +1225,14 @@ class SymbionTools:
         "read_image","read_pdf","list_dir",
         "write_file","web_search","fetch_url",
         "get_weather","get_local_time",
+        "search_memory","get_memory_item","list_related_sessions",
+        "get_profile_fact","correct_memory","read_session",
+        "record_memory_correction",
+        "search_counseling_sources",
         "get_user_recent_activity",
         "promote_technique",
-        "record_emotional_checkin","search_emotional_history",
+        "record_emotional_checkin","record_emotional_analytics",
+        "search_emotional_history",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -1229,6 +1354,76 @@ class SymbionTools:
             tz = _str("timezone", 64)
             if tz is None: return False, "get_local_time requires IANA timezone string", {}
             out["timezone"] = tz
+        elif tool == "search_memory":
+            q = _str("query", cls._MAX_QUERY_LEN)
+            if q is None: return False, "search_memory requires string query", {}
+            scope = (_str("scope", 32, required=False) or "all").lower()
+            if scope not in {"all", "summaries", "messages", "techniques", "checkins", "profile", "counseling"}:
+                return False, "search_memory scope must be all, summaries, messages, techniques, checkins, profile, or counseling", {}
+            k = _int("k", default=5, lo=1, hi=20)
+            out["query"] = q
+            out["scope"] = scope
+            out["k"] = k if k is not None else 5
+        elif tool == "get_memory_item":
+            src = (_str("source", 32) or "").lower().rstrip("s")
+            if src not in {"summary", "message", "technique", "checkin", "emotional_checkin", "counseling_source", "counseling"}:
+                return False, "get_memory_item source must be summary, message, technique, checkin, or counseling_source", {}
+            item_id = _int("id", default=0, lo=1, hi=10**12)
+            if item_id is None:
+                return False, "get_memory_item requires positive integer id", {}
+            out["source"] = src
+            out["id"] = item_id
+        elif tool == "list_related_sessions":
+            q = _str("query", cls._MAX_QUERY_LEN)
+            if q is None: return False, "list_related_sessions requires string query", {}
+            k = _int("k", default=6, lo=1, hi=20)
+            out["query"] = q
+            out["k"] = k if k is not None else 6
+        elif tool == "get_profile_fact":
+            key = _str("key", 128)
+            if key is None: return False, "get_profile_fact requires key string", {}
+            out["key"] = key
+        elif tool == "correct_memory":
+            src = (_str("source", 32) or "").lower().rstrip("s")
+            if src not in {"summary", "message", "technique", "checkin", "emotional_checkin", "counseling_source", "counseling"}:
+                return False, "correct_memory source must be summary, message, technique, checkin, or counseling_source", {}
+            item_id = _int("id", default=0, lo=1, hi=10**12)
+            if item_id is None:
+                return False, "correct_memory requires positive integer id", {}
+            correction = _str("correction", 2000)
+            if correction is None:
+                return False, "correct_memory requires correction string", {}
+            delete = args.get("delete", False)
+            if not isinstance(delete, bool):
+                return False, "correct_memory delete must be boolean", {}
+            out["source"] = src
+            out["id"] = item_id
+            out["correction"] = correction
+            out["delete"] = delete
+        elif tool == "read_session":
+            sid = _str("session_id", 128)
+            if sid is None: return False, "read_session requires session_id string", {}
+            limit = _int("limit", default=80, lo=1, hi=200)
+            out["session_id"] = sid
+            out["limit"] = limit if limit is not None else 80
+        elif tool == "record_memory_correction":
+            note = _str("note", 1000)
+            if note is None: return False, "record_memory_correction requires note", {}
+            out["note"] = note
+            out["target_source"] = _str("target_source", 40, required=False) or ""
+            tid = _int("target_id", default=0, lo=0, hi=10**12)
+            out["target_id"] = tid if tid is not None else 0
+            ctype = (_str("correction_type", 40, required=False) or "note").lower()
+            if ctype not in {"wrong", "remember", "sensitive", "note"}:
+                ctype = "note"
+            out["correction_type"] = ctype
+        elif tool == "search_counseling_sources":
+            q = _str("query", cls._MAX_QUERY_LEN)
+            if q is None: return False, "search_counseling_sources requires string query", {}
+            out["query"] = q
+            kk = _int("k", default=4, lo=1, hi=10)
+            out["k"] = kk if kk is not None else 4
+            out["include_high_intensity"] = bool(args.get("include_high_intensity", False))
         elif tool == "get_user_recent_activity":
             target = _str("user", 32)
             if target is None: return False, "get_user_recent_activity requires 'user' string", {}
@@ -1253,6 +1448,21 @@ class SymbionTools:
             inten = _int("intensity", default=0, lo=0, hi=100)
             out["intensity"] = inten if inten is not None else 0
             out["note"] = _str("note", 500, required=False) or ""
+        elif tool == "record_emotional_analytics":
+            out["emotion"] = (_str("emotion", 64, required=False) or "").lower()
+            for key in ("intensity", "stress", "peace", "hope"):
+                val = _int(key, default=0, lo=0, hi=100)
+                out[key] = val if val is not None and val > 0 else None
+            out["trigger_event"] = _str("trigger_event", 240, required=False) or ""
+            raw_practices = args.get("practices_helped", [])
+            if isinstance(raw_practices, str):
+                raw_practices = re.split(r"[,;\n]+", raw_practices)
+            if not isinstance(raw_practices, list):
+                raw_practices = []
+            out["practices_helped"] = [str(x)[:80] for x in raw_practices[:10] if str(x).strip()]
+            out["positive_marker"] = _str("positive_marker", 240, required=False) or ""
+            out["negative_marker"] = _str("negative_marker", 240, required=False) or ""
+            out["note"] = _str("note", 500, required=False) or ""
         elif tool == "search_emotional_history":
             out["emotion"] = _str("emotion", 64, required=False) or ""
             days = _int("days", default=30, lo=1, hi=3650)
@@ -1261,6 +1471,264 @@ class SymbionTools:
             out["limit"] = limit if limit is not None else 10
 
         return True, "", out
+
+    @staticmethod
+    def _memory_source_label(source: str, item_id="", *, user: str = "",
+                             timestamp: str = "", session: str = "",
+                             score=None, role: str = "", key: str = "") -> str:
+        bits = [f"memory:{source}"]
+        if key:
+            bits[0] += f":{key}"
+        elif item_id not in ("", None):
+            bits[0] += f"#{item_id}"
+        if user:
+            bits.append(f"user={user}")
+        if session:
+            bits.append(f"session={session}")
+        if timestamp:
+            bits.append(f"ts={timestamp[:16].replace('T', ' ')}")
+        if role:
+            bits.append(f"role={role}")
+        if score is not None:
+            bits.append(f"score={score}")
+        return "[" + " ".join(bits) + "]"
+
+    def search_memory(self, query: str, scope: str = "all", k: int = 5,
+                      user: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: search_memory needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            rows = self._memory.search_memory(
+                query=query, scope=scope or "all", k=k, user=active)
+        except Exception as ex:
+            return f"Error: memory search failed: {type(ex).__name__}: {ex}"
+        if not rows:
+            return f"(No memory results for scope={scope or 'all'}.)"
+        out = [f"Memory search results (user={active}, scope={scope or 'all'}):"]
+        for r in rows:
+            score = r.get("score", 0)
+            label = self._memory_source_label(
+                r.get("source") or "memory", r.get("id"), user=active,
+                timestamp=r.get("timestamp") or "", session=r.get("session") or "",
+                score=score, role=r.get("role") or "", key=r.get("key") or "")
+            tech_src = f" technique_source={r.get('technique_source')}" if r.get("technique_source") else ""
+            correction = f" correction={r.get('correction')}" if r.get("correction") else ""
+            out.append(
+                f"- {label}{tech_src}{correction} {r.get('preview','')}")
+        return "\n".join(out)
+
+    def get_memory_item(self, source: str, item_id: int, user: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: get_memory_item needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            item = self._memory.get_memory_item(source, item_id, user=active)
+        except Exception as ex:
+            return f"Error: memory item read failed: {type(ex).__name__}: {ex}"
+        if not item:
+            return "(Memory item not found for the active user.)"
+
+        src = item.get("source", source)
+        ts = (item.get("timestamp") or "")[:16].replace("T", " ")
+        session = item.get("session") or ""
+        header = self._memory_source_label(
+            src, item.get("id"), user=active, timestamp=ts,
+            session=session, role=item.get("role") or "")
+        if item.get("correction"):
+            header += f"\nCorrection: {item.get('correction')}"
+
+        if src == "summary":
+            return f"{header}\n{item.get('content','')}"
+        if src == "technique":
+            parts = [header, f"query: {item.get('query','')}",
+                     f"move: {item.get('move','')}"]
+            if item.get("evidence"):
+                parts.append(f"evidence: {item.get('evidence')}")
+            parts.append(f"technique_source: {item.get('technique_source','local')}")
+            return "\n".join(parts)
+        if src == "checkin":
+            inten = item.get("intensity")
+            level = f" intensity={inten}" if inten is not None else ""
+            note = item.get("note") or item.get("trigger") or ""
+            signals = []
+            for key in ("stress", "peace", "hope"):
+                if item.get(key) is not None:
+                    signals.append(f"{key}: {item.get(key)}")
+            if item.get("trigger_event"):
+                signals.append(f"event: {item.get('trigger_event')}")
+            if item.get("practices_helped"):
+                signals.append("practices: " + ", ".join(item.get("practices_helped") or []))
+            if item.get("positive_marker"):
+                signals.append(f"positive: {item.get('positive_marker')}")
+            if item.get("negative_marker"):
+                signals.append(f"negative: {item.get('negative_marker')}")
+            suffix = "\n" + "\n".join(signals) if signals else ""
+            return f"{header}\nemotion: {item.get('emotion','')}{level}\nnote: {note}{suffix}"
+        if src == "counseling_source":
+            tags = ",".join(item.get("tags") or [])
+            return (
+                f"{header} | source={item.get('source_name','')} "
+                f"chunk={item.get('chunk_index')} | intensity={item.get('intensity','normal')} "
+                f"| safety={item.get('safety_class','support')} | tags={tags}\n"
+                f"{item.get('content','')}\n\n"
+                "Use as guidance only; it never overrides crisis safety."
+            )
+        if src == "message":
+            lines = [header, item.get("content", "")]
+            ctx = item.get("context") or []
+            if len(ctx) > 1:
+                lines.append("\nContext window:")
+                for r in ctx:
+                    mark = " <TARGET>" if r.get("id") == item.get("id") else ""
+                    ts2 = (r.get("timestamp") or "")[:16].replace("T", " ")
+                    text = (r.get("content") or "").replace("\n", " ")
+                    lines.append(f"- #{r.get('id')} [{ts2}] {r.get('role','')}{mark}: {text}")
+            return "\n".join(lines)
+        return str(item)
+
+    def list_related_sessions(self, query: str, k: int = 6,
+                              user: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: list_related_sessions needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            rows = self._memory.list_related_sessions(query=query, user=active, limit=k)
+        except Exception as ex:
+            return f"Error: related session search failed: {type(ex).__name__}: {ex}"
+        if not rows:
+            return "(No related sessions found.)"
+        out = [f"Related sessions (user={active}):"]
+        for r in rows:
+            label = self._memory_source_label(
+                "session", r.get("session") or "", user=active,
+                timestamp=r.get("timestamp") or "", session=r.get("session") or "",
+                score=r.get("score", 0))
+            sources = ", ".join((r.get("source_labels") or [])[:6])
+            counts = r.get("source_counts") or {}
+            count_note = " ".join(f"{k}={v}" for k, v in counts.items())
+            out.append(
+                f"- {label} session {r.get('session')} "
+                f"sources={sources} {count_note} {r.get('preview','')}")
+        return "\n".join(out)
+
+    def get_profile_fact(self, key: str, user: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: get_profile_fact needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            item = self._memory.get_profile_fact(key, user=active)
+        except Exception as ex:
+            return f"Error: profile fact read failed: {type(ex).__name__}: {ex}"
+        if not item:
+            return "(Profile fact not found for the active user.)"
+        label = self._memory_source_label(
+            "profile", key=item.get("key") or key, user=active,
+            timestamp=item.get("updated_at") or "")
+        age = item.get("age_hours")
+        age_note = f" age_hours={age:.2f}" if isinstance(age, (int, float)) else ""
+        return f"{label}{age_note}\nprofile.{item.get('key')}: {item.get('value')}"
+
+    def correct_memory(self, source: str, item_id: int, correction: str,
+                       delete: bool = False, user: str = "",
+                       session: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: correct_memory needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            res = self._memory.correct_memory(
+                source, item_id, correction, user=active,
+                session=session, delete_original=delete)
+        except Exception as ex:
+            return f"Error: memory correction failed: {type(ex).__name__}: {ex}"
+        if not res.get("ok"):
+            return f"(Memory correction not saved: {res.get('reason', 'unknown')})"
+        action = "suppressed" if res.get("suppressed") else "corrected"
+        label = self._memory_source_label(
+            res.get("source") or source, res.get("target_id") or item_id,
+            user=active, session=session)
+        return f"Memory {action}: {label}\nCorrection: {res.get('note','')}"
+
+    def read_session(self, session_id: str, limit: int = 80,
+                     user: str = "") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        active = (user or "").strip().lower()
+        if not active:
+            return ("Error: read_session needs session context. Caller must "
+                    "thread the per-session active user into tools.dispatch.")
+        try:
+            data = self._memory.read_session(
+                session_id=session_id, user=active, limit=limit)
+        except Exception as ex:
+            return f"Error: session read failed: {type(ex).__name__}: {ex}"
+        msgs = data.get("messages") or []
+        if not msgs:
+            return "(No session messages found for the active user.)"
+        trunc = " (truncated to recent messages)" if data.get("truncated") else ""
+        session_label = self._memory_source_label(
+            "session", data.get("session") or session_id, user=active,
+            session=data.get("session") or session_id)
+        out = [
+            f"{session_label}: "
+            f"{data.get('returned_messages')}/{data.get('total_messages')} messages{trunc}"
+        ]
+        for m in msgs:
+            ts = (m.get("timestamp") or "")[:16].replace("T", " ")
+            text = (m.get("content") or "").replace("\n", " ")
+            out.append(f"- #{m.get('id')} [{ts}] {m.get('role','')}: {text}")
+        return "\n".join(out)
+
+    def record_memory_correction(self, note: str, target_source: str = "",
+                                 target_id: int = 0,
+                                 correction_type: str = "note",
+                                 session: str = "",
+                                 user: str = "aaron") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            cid = self._memory.record_memory_correction(
+                user=user or "aaron", session=session,
+                target_source=target_source, target_id=target_id or None,
+                correction_type=correction_type or "note", note=note)
+        except Exception as ex:
+            return f"Error: memory correction save failed: {type(ex).__name__}: {ex}"
+        return f"Memory correction #{cid} recorded." if cid else "No correction recorded."
+
+    def search_counseling_sources(self, query: str, k: int = 4,
+                                  include_high_intensity: bool = False) -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            rows = self._memory.search_counseling_sources(
+                query, k=k, include_high_intensity=include_high_intensity)
+        except Exception as ex:
+            return f"Error: counseling source search failed: {type(ex).__name__}: {ex}"
+        if not rows:
+            return "(No counseling source chunks found.)"
+        out = ["Counseling source chunks (guidance only; never overrides safety):"]
+        for r in rows:
+            tags = ",".join(r.get("tags") or [])
+            out.append(
+                f"- [counseling_source #{r.get('id')} | {r.get('source_name')} "
+                f"chunk={r.get('chunk_index')} | intensity={r.get('intensity')} "
+                f"| tags={tags} | score={r.get('score',0)}] {r.get('preview','')}")
+        return "\n".join(out)
 
     def promote_technique(self, move: str, query: str,
                             session: str = "",
@@ -1301,6 +1769,31 @@ class SymbionTools:
             return f"Error: emotional check-in save failed: {type(ex).__name__}: {ex}"
         return f"Emotional check-in #{cid} recorded." if cid else "No check-in recorded."
 
+    def record_emotional_analytics(self, emotion: str = "",
+                                    intensity: Optional[int] = None,
+                                    stress: Optional[int] = None,
+                                    peace: Optional[int] = None,
+                                    hope: Optional[int] = None,
+                                    trigger_event: str = "",
+                                    practices_helped: Optional[List[str]] = None,
+                                    positive_marker: str = "",
+                                    negative_marker: str = "",
+                                    note: str = "",
+                                    session: str = "",
+                                    user: str = "aaron") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            aid = self._memory.save_emotional_analytics(
+                session=session, user=user or "aaron", emotion=emotion,
+                intensity=intensity, stress=stress, peace=peace, hope=hope,
+                trigger_event=trigger_event, practices_helped=practices_helped or [],
+                positive_marker=positive_marker, negative_marker=negative_marker,
+                note=note)
+        except Exception as ex:
+            return f"Error: emotional analytics save failed: {type(ex).__name__}: {ex}"
+        return f"Emotional analytics #{aid} recorded." if aid else "No analytics recorded."
+
     def search_emotional_history(self, emotion: str = "", days: int = 30,
                                   limit: int = 10, user: str = "aaron") -> str:
         if self._memory is None:
@@ -1317,8 +1810,13 @@ class SymbionTools:
             ts = (r.get("timestamp") or "")[:16].replace("T", " ")
             inten = r.get("intensity")
             level = f" intensity={inten}" if inten is not None else ""
+            signals = []
+            for key in ("stress", "peace", "hope"):
+                if r.get(key) is not None:
+                    signals.append(f"{key}={r.get(key)}")
+            signal_text = f" ({', '.join(signals)})" if signals else ""
             note = (r.get("note") or r.get("trigger") or "").replace("\n", " ")[:160]
-            out.append(f"- [{ts}] {r.get('emotion','')}{level}: {note}")
+            out.append(f"- [{ts}] {r.get('emotion','')}{level}{signal_text}: {note}")
         return "\n".join(out)
 
     async def dispatch(self, tool: str, args: Dict, cfg: "SymbionConfig",
@@ -1341,6 +1839,31 @@ class SymbionTools:
         if tool=="fetch_url":       return await self.fetch_url(a["url"], cfg.search_max_chars)
         if tool=="get_weather":     return await self.get_weather(a["lat"], a["lon"])
         if tool=="get_local_time":  return self.get_local_time(a["timezone"])
+        if tool=="search_memory":
+            return self.search_memory(a["query"], a.get("scope", "all"), a.get("k", 5),
+                                      user=active_user)
+        if tool=="get_memory_item":
+            return self.get_memory_item(a["source"], a["id"], user=active_user)
+        if tool=="list_related_sessions":
+            return self.list_related_sessions(a["query"], a.get("k", 6),
+                                              user=active_user)
+        if tool=="get_profile_fact":
+            return self.get_profile_fact(a["key"], user=active_user)
+        if tool=="correct_memory":
+            return self.correct_memory(
+                a["source"], a["id"], a["correction"], a.get("delete", False),
+                user=active_user, session=session)
+        if tool=="read_session":
+            return self.read_session(a["session_id"], a.get("limit", 80),
+                                     user=active_user)
+        if tool=="record_memory_correction":
+            return self.record_memory_correction(
+                a["note"], a.get("target_source", ""), a.get("target_id", 0),
+                a.get("correction_type", "note"),
+                session=session, user=active_user or "aaron")
+        if tool=="search_counseling_sources":
+            return self.search_counseling_sources(
+                a["query"], a.get("k", 4), a.get("include_high_intensity", False))
         if tool=="get_user_recent_activity":
             return self.get_user_recent_activity(a["user"], cfg, a.get("hours", 24.0),
                                                   active_user=active_user)
@@ -1350,6 +1873,17 @@ class SymbionTools:
         if tool=="record_emotional_checkin":
             return self.record_emotional_checkin(
                 a["emotion"], a.get("intensity", 0), a.get("note", ""),
+                session=session, user=active_user or "aaron")
+        if tool=="record_emotional_analytics":
+            return self.record_emotional_analytics(
+                emotion=a.get("emotion", ""),
+                intensity=a.get("intensity"), stress=a.get("stress"),
+                peace=a.get("peace"), hope=a.get("hope"),
+                trigger_event=a.get("trigger_event", ""),
+                practices_helped=a.get("practices_helped", []),
+                positive_marker=a.get("positive_marker", ""),
+                negative_marker=a.get("negative_marker", ""),
+                note=a.get("note", ""),
                 session=session, user=active_user or "aaron")
         if tool=="search_emotional_history":
             return self.search_emotional_history(

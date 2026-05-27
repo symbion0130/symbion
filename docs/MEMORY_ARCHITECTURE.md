@@ -26,6 +26,7 @@ Current memory-bearing tables:
 | `learning_metrics` | Global adaptive metrics. | Global. |
 | `techniques` | Promoted moves worth replicating, with optional embedding and sync source. | User-scoped retrieval. |
 | `emotional_checkins` | First-class emotional events with emotion, intensity, valence, note, confidence, and capture source. | User-scoped and retrieved on demand. |
+| `counseling_sources` | Chunked/tagged material imported from `MasterDocument.docx` for counsel-like retrieval. | Global source corpus; high-intensity and crisis chunks are excluded from default runtime retrieval. |
 | `embedding_meta` | Lazily created embedding model marker. | Global. |
 | `summaries_vec` | Optional sqlite-vec virtual table for summary vectors. | Mirrors `summaries.embedding`; user filtering happens after ID fetch. |
 
@@ -37,6 +38,7 @@ Current memory-bearing tables:
 4. Same-session recent messages and the latest same-session summary.
 5. Query-relevant cross-session summaries and message snippets scoped to the active user.
 6. Query-relevant user positions, identity summary, promoted techniques, task summary, and knowledge gaps.
+7. Query-relevant counseling source chunks only for counsel-like turns, capped to a tiny gentle/practical block.
 
 The design already protects household-user confusion by keeping same-session
 collaboration shared while scoping cross-session memory to the active user.
@@ -89,14 +91,57 @@ Current retrieval behavior:
 - Never use check-ins for cross-user retrieval unless the active user explicitly
   asks about another known user and the check-in visibility allows it.
 
+Privacy posture:
+
+- Emotional check-ins are local SQLite records.
+- Manual check-ins are explicit user actions from `/checkin`, `/emotions`, or
+  the sidebar Emotions tab.
+- Sidebar check-ins can be edited or deleted by the active user; deletion also
+  removes analytics rows linked to that check-in.
+- Detector-created check-ins are low-confidence local telemetry used for trend
+  review, not diagnosis.
+- Do not dump the emotional archive into every prompt. Retrieve it only when it
+  is relevant or the user asks to review patterns.
+- Future graph/export/delete features must make the local-only nature and
+  sensitivity of the data visible in the UI.
+
+## Counseling Source Corpus
+
+`MasterDocument.docx` is imported into SQLite as `counseling_sources` chunks.
+The importer uses standard-library DOCX XML extraction, chunks paragraphs,
+tags each chunk, and records:
+
+- `tags`: grounding, grief, forgiveness, boundaries, repair, Christian framing,
+  anxiety, shame, trauma, and related support labels.
+- `intensity`: `normal` or `high`; high-intensity chunks include demon/enemy,
+  spiritual warfare, narcissist-labeling, or similar voltage.
+- `safety_class`: `support` or `crisis`.
+- `preference`: currently `gentle_practical`, used as the retrieval bias.
+
+Runtime rules:
+
+- Default context retrieval excludes `intensity='high'`.
+- Crisis/self-harm/violence/immediate-danger queries retrieve no source chunks;
+  the crisis safety prompt stays authoritative.
+- High-intensity chunks are only available through explicit source review
+  (`search_counseling_sources(..., include_high_intensity=true)`) or direct
+  high-intensity search scope, not ordinary support mode.
+- Retrieved chunks are guidance, not output text to mirror verbatim.
+
 ## On-demand Memory Tools
 
 Current runtime tools include cross-user recent activity, promoted techniques,
-explicit emotional check-in capture, and on-demand emotional history search.
-There is no general active-user `search_memory` tool yet, so deep recall is
-still mostly limited to what `build_context()` preloads.
+explicit emotional check-in capture, on-demand emotional history search,
+active-user `search_memory`, exact `get_memory_item`, `list_related_sessions`,
+`get_profile_fact`, `correct_memory`, and bounded `read_session`.
 
-Recommended tool additions:
+Every memory tool result uses an explicit source label such as
+`[memory:summary#42 user=aaron session=s1 ts=2026-05-27 09:15 score=1.23]`
+or `[memory:profile:current_projects user=aaron ts=...]`. These labels are
+for attribution and follow-up tool calls; the assistant should not expose them
+to the user unless the user is asking about memory/debugging.
+
+Implemented tool surface:
 
 ### `search_memory`
 
@@ -146,6 +191,26 @@ Behavior:
 - Return full text for summaries/techniques/check-ins and a bounded window for
   messages.
 
+### `list_related_sessions`
+
+Purpose: choose the right older conversation before reading a transcript.
+
+Behavior:
+
+- Accept `query` and `k`.
+- Return active-user sessions ranked from source-labeled summary/message hits.
+- Include source counts and source labels so `read_session` can be used next.
+
+### `get_profile_fact`
+
+Purpose: read one exact active-user profile value without loading the entire
+profile.
+
+Behavior:
+
+- Accept `key`.
+- Return source, key, value, updated timestamp, and age in hours when known.
+
 ### `correct_memory`
 
 Purpose: handle "that memory is wrong" without requiring users to know tables.
@@ -153,10 +218,11 @@ Purpose: handle "that memory is wrong" without requiring users to know tables.
 Behavior:
 
 - Accept `source`, `id`, `correction`, and optional `delete`.
-- Mark or update the relevant row additively where possible.
-- For summaries/messages that should not be edited destructively, add a
-  correction record or profile override and exclude corrected rows from future
-  retrieval if marked deleted.
+- Store a row in `memory_corrections`; do not rewrite the original memory row.
+- Non-delete corrections are attached to future exact reads and searchable by
+  the correction text.
+- Delete/suppress corrections hide the item from future `search_memory()` and
+  `get_memory_item()` results without wiping unrelated rows.
 
 ## Prompt Budget Rules
 
@@ -168,8 +234,8 @@ The next version should keep memory prompt cost predictable:
 - Cross-session raw message quotes: fixed `k` and per-snippet char cap.
 - Techniques: fixed `k`.
 - Emotional check-ins: max one ambient item; older items require tool use.
-- Source-label every injected memory block so the model can distinguish profile,
-  summary, quote, technique, task, and check-in evidence.
+- Source-label every injected memory/tool block so the model can distinguish
+  profile, summary, quote, technique, task, and check-in evidence.
 
 ## Additive Migration Plan
 
@@ -181,10 +247,36 @@ The next version should keep memory prompt cost predictable:
    `SymbionTools`.
 4. Done: thread `active_user` and `session` through dispatch, matching
    `promote_technique` and `get_user_recent_activity`.
-5. Future: add general `search_memory` and `get_memory_item` to `SymbionTools`.
+5. Done: add general `search_memory`, `get_memory_item`, `read_session`,
+   `list_related_sessions`, `get_profile_fact`, and `correct_memory` to
+   `SymbionTools`.
 6. Future: add a small `build_context()` ambient check-in block only after tests verify
    prompt budget and non-mention instructions.
-7. Future: add `correct_memory` only after the search/fetch flow is stable.
+7. Done: preserve source sessions/user scope during consolidation and require
+   episode summaries to carry people/projects/decisions/emotional context/open
+   loops/freshness/confidence/sensitive flags.
 
 Keep all migrations additive. Do not rewrite existing rows except for bounded,
 explicit backfills with clear defaults.
+
+## Machine-Wide File Write Threat Notes
+
+Symbion's built-in file tools currently run with machine-wide workspace access
+from the local backend process, because this is a personal local assistant and
+the developer workflow needs real project files. That power is intentionally
+not exposed through the browser UI as a generic upload/write surface, but any
+LLM tool call that reaches `write_file` can still affect local files.
+
+Current guardrails:
+
+- Tool calls are schema-validated and path-normalized before execution.
+- Web/API routes are gated by `SYMBION_API_KEY` when configured.
+- Native WebView2 injects the same local API key for protected local routes.
+- Memory corrections and emotional deletes are scoped to the active user.
+
+Operational guidance:
+
+- Use an API key when exposing the web UI beyond localhost.
+- Treat cloud-provider tool mode as capable of proposing local file writes.
+- Keep destructive file operations out of automatic background tasks.
+- Prefer additive migrations and non-destructive correction records for memory.

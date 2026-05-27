@@ -1,0 +1,4 @@
+!CMakeLists.txt
+build/
+.deps/
+dist/

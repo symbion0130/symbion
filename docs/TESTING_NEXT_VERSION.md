@@ -9,6 +9,7 @@ The existing suite has three useful tiers:
 | Tier | Command | What it covers | External dependency |
 |---|---|---|---|
 | Pure/unit tests | `python -m pytest tests/test_tools.py tests/test_retrieval.py -q` | Calculator safety, URL safety, JSON parsing, source/self-review regexes, shared-learning import integrity, BM25 ranking, path extraction | Python + pytest only |
+| Next-version unit tests | `python -m pytest tests/test_local_gemma_and_emotions.py -q` | Local Gemma OpenAI-compatible payloads and CodeCat config parsing, local context-budget trimming, emotional check-in storage/tooling/detector persistence, and prompt-level emotional mode constraints | Python + pytest only; no live LLM |
 | Stubbed integration tests | `python -m pytest tests/integration/test_respond_assembly.py tests/integration/test_routing.py -q` | Prompt assembly, self-source/self-review prefetch tiers, escalation routing, stale-draft refresh, degraded provider handling | Python + pytest; some fixtures currently skip without provider keys even when calls are stubbed |
 | Live integration tests | `python -m pytest tests/integration/ -q` | Real provider turn completion, agent-loop tool call, fallback chain, judge skip/risk plumbing, web command async path, boot splash | Python deps; provider keys for Groq/Anthropic cases; Playwright for boot splash; uvicorn/websockets for web tests |
 
@@ -26,12 +27,17 @@ The harness isolates its SQLite DB per run and saves JSON summaries under `evals
 
 Next-version target: local Gemma is the default responder, with cloud models retained as escalation/fallback. The provider now exists as `local_gemma` with model id `local-gemma`.
 
-Add these unit tests when the client lands:
+Current deterministic coverage:
 
-- `LocalGemmaClient` request construction: OpenAI-compatible `/v1/chat/completions` payload shape, model name, temperature, max tokens, streaming flag, messages order, timeout behavior.
+- `LocalGemmaClient` request construction: OpenAI-compatible `/v1/chat/completions` payload shape, model name, temperature, max-token caps, streaming flag, messages order, and no `response_format` dependency for llama.cpp.
+- CodeCat runtime config parsing, including relative model paths and context size.
+- Context budget guard: local Gemma gets a smaller prompt budget than cloud models and trims ambient context while preserving the time anchor.
+
+Still add or broaden:
+
 - Health check: successful `/v1/models`, offline server, model missing, malformed response, and clear error text for "Gemma server is not running".
 - Startup/status mapping: warm, cold, offline, model path missing, restart attempted, restart failed.
-- Context budget guard: local Gemma gets a smaller prompt budget than cloud models; response-token caps are lower for normal emotional chat.
+- Timeout and retry behavior around the local server.
 
 Add these integration/eval checks:
 
@@ -79,6 +85,8 @@ Pass criteria:
 - No arguing with emotion.
 - No medical, psychiatric, or spiritual certainty where the evidence is only a user vent.
 
+Prompt-level pytest coverage now pins the emotional-processing instruction block to "one brief mirror" plus "exactly one simple follow-up question", with "No bullet lists" and "no multi-step plans"; it also verifies code/error-style structural tasks do not get forced into that emotional-processing shape.
+
 ## Memory Retrieval Evals
 
 Current coverage protects BM25 primitives and shared-learning import safety, but next-version needs end-to-end memory behavior. Add tests around the new memory tools and prompt assembly before relying on evals.
@@ -86,9 +94,9 @@ Current coverage protects BM25 primitives and shared-learning import safety, but
 Unit/integration tests to add:
 
 - Memory budget assembly: tier order, character/token caps, source labels, sensitive-memory exclusion, profile fact relevance.
-- Emotional check-in storage: explicit vs inferred capture, intensity/valence/body fields, edit/delete behavior, and "skip numbers" flow.
-- On-demand memory tools: `search_memory`, `read_session`, `list_related_sessions`, `get_profile_fact`, `search_emotional_history`.
-- Correction flows: "That memory is wrong", "Remember this", "Do not bring this up unless I ask", and existing "Forget this".
+- Emotional check-in storage: storage, user scoping, neutral skip, intensity/valence clamping, analytics fields, tool dispatch, detector persistence, API edit/delete, and skip-number prompt behavior are covered.
+- On-demand memory tools: `search_memory`, `read_session`, `list_related_sessions`, `get_profile_fact`, `search_emotional_history`, and `correct_memory` are covered.
+- Correction flows: "That memory is wrong", "Remember this", "Do not bring this up unless I ask", suppression, and existing "Forget this" are covered by unit tests.
 
 Eval bucket `evals/golden_next_memory.jsonl` should include multi-turn seeded cases:
 

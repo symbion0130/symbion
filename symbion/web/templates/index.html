@@ -880,6 +880,81 @@ footer::before{
    and .sidebar-list (each provides its own padding). Status panel wraps
    its rows + actions with consistent inner padding. */
 .sb-panel[data-panel="status"]{gap:.85rem;padding:.85rem 1rem 1rem;overflow-y:auto}
+.sb-panel[data-panel="emotions"]{gap:.75rem;padding:.85rem 1rem 1rem;overflow-y:auto}
+
+.emotion-form{
+  display:flex;flex-direction:column;gap:.65rem;
+  padding-bottom:.75rem;border-bottom:1px solid var(--border);
+}
+.emotion-row{display:flex;flex-direction:column;gap:.35rem}
+.emotion-row label{
+  color:var(--muted-2);font-size:.78rem;font-weight:600;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.emotion-row select,.emotion-note,.emotion-field{
+  width:100%;
+  background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text);font:inherit;font-size:.9rem;
+  border-radius:8px;padding:.6rem .7rem;
+}
+.emotion-row select:focus,.emotion-note:focus,.emotion-field:focus{
+  outline:none;border-color:var(--sym);
+  box-shadow:0 0 0 3px rgba(139,92,246,.14);
+}
+.emotion-row input[type="range"]{width:100%;accent-color:var(--sym)}
+.emotion-signal-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.45rem}
+.emotion-field.mini{padding:.5rem .55rem;font-size:.82rem}
+.emotion-marker-grid{display:grid;grid-template-columns:1fr 1fr;gap:.45rem}
+.emotion-actions{display:grid;grid-template-columns:1fr 1.2fr;gap:.5rem}
+.emotion-actions .ghost-btn{
+  background:transparent;border:1px solid var(--border);color:var(--muted-2);
+  border-radius:8px;font:inherit;font-size:.85rem;cursor:pointer;
+}
+.emotion-actions .ghost-btn:hover{color:var(--text);border-color:var(--muted)}
+.emotion-actions .sidebar-new{justify-content:center;text-align:center}
+.emotion-error{min-height:1rem;color:var(--danger);font-size:.75rem;line-height:1.35}
+.emotion-history-head{
+  display:flex;justify-content:space-between;align-items:center;
+  color:var(--muted-2);font-size:.78rem;font-weight:600;
+}
+#emotion-summary{
+  color:var(--muted);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  font-weight:500;
+}
+.emotion-list{display:flex;flex-direction:column;gap:.35rem}
+.emotion-item{
+  padding:.55rem .65rem;border:1px solid var(--border);
+  border-radius:8px;background:var(--surface-2);
+}
+.emotion-item-main{
+  display:flex;justify-content:space-between;gap:.6rem;align-items:center;
+}
+.emotion-name{color:var(--text);font-size:.88rem;font-weight:600}
+.emotion-intensity{
+  color:var(--you);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  font-size:.78rem;white-space:nowrap;
+}
+.emotion-meta{
+  margin-top:.15rem;color:var(--muted);font-size:.7rem;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+.emotion-note-line{
+  margin-top:.25rem;color:var(--muted-2);font-size:.78rem;line-height:1.4;
+  word-break:break-word;
+}
+.emotion-signal-line{
+  margin-top:.25rem;color:var(--muted);font-size:.72rem;line-height:1.35;
+  word-break:break-word;
+}
+.emotion-item-actions{
+  display:flex;gap:.35rem;margin-top:.45rem;justify-content:flex-end;
+}
+.emotion-item-actions button{
+  background:transparent;border:1px solid var(--border);color:var(--muted-2);
+  border-radius:8px;font:inherit;font-size:.72rem;padding:.28rem .45rem;
+  cursor:pointer;
+}
+.emotion-item-actions button:hover{color:var(--text);border-color:var(--muted)}
 
 /* User-picker modal — shown on first connect when no USER_STORE is set.
    Reuses the .key-modal layout so styling stays consistent. */
@@ -1058,6 +1133,7 @@ footer::before{
   <div class="sidebar-tabs" role="tablist">
     <button class="sb-tab active" type="button" role="tab" data-tab="sessions" aria-selected="true">Sessions</button>
     <button class="sb-tab" type="button" role="tab" data-tab="status" aria-selected="false">Status</button>
+    <button class="sb-tab" type="button" role="tab" data-tab="emotions" aria-selected="false">Emotions</button>
   </div>
   <div class="sb-panel" data-panel="sessions">
     <div class="sidebar-actions">
@@ -1101,6 +1177,52 @@ footer::before{
       <button id="loc-clear-btn" class="ghost-btn" type="button">Clear location</button>
       <button id="key-btn-sheet" class="ghost-btn" type="button">Change API key</button>
     </div>
+  </div>
+  <div class="sb-panel hidden" data-panel="emotions">
+    <form id="emotion-form" class="emotion-form">
+      <div class="emotion-row">
+        <label for="emotion-name">Check-in</label>
+        <select id="emotion-name">
+          <option value="anxious">anxious</option>
+          <option value="frustrated">frustrated</option>
+          <option value="excited">excited</option>
+          <option value="sad">sad</option>
+          <option value="grieving">grieving</option>
+          <option value="confused">confused</option>
+          <option value="calm">calm</option>
+          <option value="tender">tender</option>
+        </select>
+      </div>
+      <div class="emotion-row">
+        <label for="emotion-intensity">Intensity <span id="emotion-intensity-value">50</span></label>
+        <input id="emotion-intensity" type="range" min="0" max="100" value="50">
+      </div>
+      <div class="emotion-row">
+        <label>Signals</label>
+        <div class="emotion-signal-grid">
+          <input id="emotion-stress" class="emotion-field mini" type="number" min="0" max="100" inputmode="numeric" placeholder="stress">
+          <input id="emotion-peace" class="emotion-field mini" type="number" min="0" max="100" inputmode="numeric" placeholder="peace">
+          <input id="emotion-hope" class="emotion-field mini" type="number" min="0" max="100" inputmode="numeric" placeholder="hope">
+        </div>
+      </div>
+      <input id="emotion-trigger" class="emotion-field" type="text" maxlength="240" placeholder="trigger or event">
+      <input id="emotion-practices" class="emotion-field" type="text" maxlength="240" placeholder="practices that helped">
+      <div class="emotion-marker-grid">
+        <input id="emotion-positive" class="emotion-field mini" type="text" maxlength="160" placeholder="positive change">
+        <input id="emotion-negative" class="emotion-field mini" type="text" maxlength="160" placeholder="negative change">
+      </div>
+      <input id="emotion-note" class="emotion-note" type="text" maxlength="220" placeholder="optional note">
+      <div class="emotion-actions">
+        <button id="emotion-refresh" class="ghost-btn" type="button">Refresh</button>
+        <button id="emotion-save" class="sidebar-new" type="submit"><span class="plus">+</span> Save</button>
+      </div>
+      <div id="emotion-error" class="emotion-error" role="status" aria-live="polite"></div>
+    </form>
+    <div class="emotion-history-head">
+      <span>History</span>
+      <span id="emotion-summary">--</span>
+    </div>
+    <div id="emotion-list" class="emotion-list"></div>
   </div>
 </aside>
 
@@ -1460,17 +1582,20 @@ const keyBtnSheet = document.getElementById('key-btn-sheet');
 // Sidebar tab switching. The header used to have TWO entry points
 // (hamburger → sessions, [···] → status); consolidated into one
 // hamburger that opens a tabbed sidebar.
+function activateSidebarTab(target){
+  document.querySelectorAll('.sb-tab').forEach((t) => {
+    const active = t.dataset.tab === target;
+    t.classList.toggle('active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('.sb-panel').forEach((p) => {
+    p.classList.toggle('hidden', p.dataset.panel !== target);
+  });
+  if(target === 'emotions') fetchEmotionHistory().catch(()=>{});
+}
 document.querySelectorAll('.sb-tab').forEach((tabBtn) => {
   tabBtn.addEventListener('click', () => {
-    const target = tabBtn.dataset.tab;
-    document.querySelectorAll('.sb-tab').forEach((t) => {
-      const active = t.dataset.tab === target;
-      t.classList.toggle('active', active);
-      t.setAttribute('aria-selected', active ? 'true' : 'false');
-    });
-    document.querySelectorAll('.sb-panel').forEach((p) => {
-      p.classList.toggle('hidden', p.dataset.panel !== target);
-    });
+    activateSidebarTab(tabBtn.dataset.tab);
   });
 });
 
@@ -1488,6 +1613,7 @@ function showUserModal(known, current){
     b.onclick=()=>{
       localStorage.setItem(USER_STORE, name);
       refreshHeaderUser();
+      fetchEmotionHistory().catch(()=>{});
       if(ws && ws.readyState===1){
         try{ws.send(JSON.stringify({type:'set_user', name:name}));}catch(e){}
       }
@@ -1683,6 +1809,229 @@ function relTime(iso){
   return Math.floor(secs/86400) + 'd ago';
 }
 
+const emotionForm = document.getElementById('emotion-form');
+const emotionName = document.getElementById('emotion-name');
+const emotionIntensity = document.getElementById('emotion-intensity');
+const emotionIntensityValue = document.getElementById('emotion-intensity-value');
+const emotionStress = document.getElementById('emotion-stress');
+const emotionPeace = document.getElementById('emotion-peace');
+const emotionHope = document.getElementById('emotion-hope');
+const emotionTrigger = document.getElementById('emotion-trigger');
+const emotionPractices = document.getElementById('emotion-practices');
+const emotionPositive = document.getElementById('emotion-positive');
+const emotionNegative = document.getElementById('emotion-negative');
+const emotionNote = document.getElementById('emotion-note');
+const emotionRefresh = document.getElementById('emotion-refresh');
+const emotionError = document.getElementById('emotion-error');
+const emotionList = document.getElementById('emotion-list');
+const emotionSummary = document.getElementById('emotion-summary');
+
+function setEmotionError(text){
+  if(emotionError) emotionError.textContent = text || '';
+}
+
+function optionalPercent(el){
+  if(!el || el.value === '') return null;
+  const n = Number(el.value);
+  if(!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function splitPractices(text){
+  return (text || '').split(/[,;\n]+/).map(x => x.trim()).filter(Boolean).slice(0, 12);
+}
+
+function renderEmotionHistory(data){
+  if(!emotionList) return;
+  const rows = (data && data.checkins) || [];
+  emotionList.innerHTML = '';
+  const summary = data && data.summary ? data.summary : {};
+  if(emotionSummary){
+    const avg = summary.avg_intensity == null ? '--' : `${summary.avg_intensity}%`;
+    emotionSummary.textContent = `${summary.count || 0} / avg ${avg}`;
+  }
+  if(!rows.length){
+    const empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.textContent = 'No check-ins yet.';
+    emotionList.appendChild(empty);
+    return;
+  }
+  rows.forEach((row) => {
+    const item = document.createElement('div');
+    item.className = 'emotion-item';
+    const main = document.createElement('div');
+    main.className = 'emotion-item-main';
+    const name = document.createElement('span');
+    name.className = 'emotion-name';
+    name.textContent = row.emotion || 'emotion';
+    const intensity = document.createElement('span');
+    intensity.className = 'emotion-intensity';
+    intensity.textContent = row.intensity == null ? '--' : `${row.intensity}%`;
+    main.appendChild(name);
+    main.appendChild(intensity);
+    item.appendChild(main);
+    const meta = document.createElement('div');
+    meta.className = 'emotion-meta';
+    meta.textContent = relTime(row.timestamp);
+    item.appendChild(meta);
+    if(row.note){
+      const note = document.createElement('div');
+      note.className = 'emotion-note-line';
+      note.textContent = row.note;
+      item.appendChild(note);
+    }
+    const bits = [];
+    if(row.stress != null) bits.push(`stress ${row.stress}%`);
+    if(row.peace != null) bits.push(`peace ${row.peace}%`);
+    if(row.hope != null) bits.push(`hope ${row.hope}%`);
+    if(row.trigger_event) bits.push(row.trigger_event);
+    if(row.practices_helped && row.practices_helped.length) bits.push(row.practices_helped.join(', '));
+    if(row.positive_marker) bits.push(`+ ${row.positive_marker}`);
+    if(row.negative_marker) bits.push(`- ${row.negative_marker}`);
+    if(bits.length){
+      const signals = document.createElement('div');
+      signals.className = 'emotion-signal-line';
+      signals.textContent = bits.join(' · ');
+      item.appendChild(signals);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'emotion-item-actions';
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.textContent = 'Edit';
+    edit.onclick = () => editEmotionCheckin(row);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.onclick = () => deleteEmotionCheckin(row.id);
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    item.appendChild(actions);
+    emotionList.appendChild(item);
+  });
+}
+
+async function deleteEmotionCheckin(id){
+  if(!id) return;
+  setEmotionError('');
+  try{
+    const r = await fetch(`/api/emotions/${encodeURIComponent(id)}?user=${encodeURIComponent(currentUser())}`, {
+      method: 'DELETE',
+      headers: apiHeaders(),
+    });
+    if(!r.ok){
+      if(r.status === 401) showKeyModal('Wrong or missing API key.');
+      setEmotionError('Could not delete check-in.');
+      return;
+    }
+    await fetchEmotionHistory();
+  }catch(err){
+    setEmotionError('Could not delete check-in.');
+  }
+}
+
+async function editEmotionCheckin(row){
+  if(!row || !row.id) return;
+  const emotion = prompt('Emotion', row.emotion || '');
+  if(emotion === null) return;
+  const intensityRaw = prompt('Intensity 0-100', row.intensity == null ? '' : String(row.intensity));
+  if(intensityRaw === null) return;
+  const note = prompt('Note', row.note || '');
+  if(note === null) return;
+  const intensity = intensityRaw.trim() === '' ? null : Number(intensityRaw);
+  setEmotionError('');
+  try{
+    const r = await fetch(`/api/emotions/${encodeURIComponent(row.id)}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json', ...apiHeaders()},
+      body: JSON.stringify({
+        user: currentUser(),
+        emotion,
+        intensity,
+        stress: row.stress,
+        peace: row.peace,
+        hope: row.hope,
+        trigger_event: row.trigger_event || row.trigger || '',
+        practices_helped: row.practices_helped || [],
+        positive_marker: row.positive_marker || '',
+        negative_marker: row.negative_marker || '',
+        note,
+      }),
+    });
+    if(!r.ok){
+      if(r.status === 401) showKeyModal('Wrong or missing API key.');
+      setEmotionError('Could not edit check-in.');
+      return;
+    }
+    await fetchEmotionHistory();
+  }catch(err){
+    setEmotionError('Could not edit check-in.');
+  }
+}
+
+async function fetchEmotionHistory(){
+  if(!emotionList) return null;
+  setEmotionError('');
+  const r = await fetch(`/api/emotions?user=${encodeURIComponent(currentUser())}&limit=12&days=60`,
+                        { headers: apiHeaders() });
+  if(!r.ok){
+    if(r.status === 401) showKeyModal('Wrong or missing API key.');
+    throw new Error(`emotion history failed: ${r.status}`);
+  }
+  const data = await r.json();
+  renderEmotionHistory(data);
+  return data;
+}
+
+if(emotionIntensity && emotionIntensityValue){
+  emotionIntensity.addEventListener('input', () => {
+    emotionIntensityValue.textContent = emotionIntensity.value;
+  });
+}
+if(emotionRefresh){
+  emotionRefresh.onclick = () => fetchEmotionHistory().catch(() => {
+    setEmotionError('Could not refresh history.');
+  });
+}
+if(emotionForm){
+  emotionForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setEmotionError('');
+    try{
+      const r = await fetch('/api/emotions', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', ...apiHeaders()},
+        body: JSON.stringify({
+          session: SESSION,
+          user: currentUser(),
+          emotion: emotionName ? emotionName.value : '',
+          intensity: emotionIntensity ? Number(emotionIntensity.value) : null,
+          stress: optionalPercent(emotionStress),
+          peace: optionalPercent(emotionPeace),
+          hope: optionalPercent(emotionHope),
+          trigger_event: emotionTrigger ? emotionTrigger.value.trim() : '',
+          practices_helped: emotionPractices ? splitPractices(emotionPractices.value) : [],
+          positive_marker: emotionPositive ? emotionPositive.value.trim() : '',
+          negative_marker: emotionNegative ? emotionNegative.value.trim() : '',
+          note: emotionNote ? emotionNote.value.trim() : '',
+        }),
+      });
+      if(!r.ok){
+        if(r.status === 401) showKeyModal('Wrong or missing API key.');
+        setEmotionError('Could not save check-in.');
+        return;
+      }
+      [emotionStress, emotionPeace, emotionHope, emotionTrigger, emotionPractices,
+       emotionPositive, emotionNegative].forEach(el => { if(el) el.value = ''; });
+      if(emotionNote) emotionNote.value = '';
+      await fetchEmotionHistory();
+    }catch(err){
+      setEmotionError('Could not save check-in.');
+    }
+  });
+}
+
 async function fetchSessions(){
   // Returns the parsed payload or null on auth/network failure. On null
   // the caller falls back to whatever it already had (localStorage or
@@ -1758,6 +2107,10 @@ async function openSidebar(){
   // Refresh on every open so a turn just-committed shows the right
   // ordering + turn count. Cheap; one DB GROUP BY query.
   await fetchSessions();
+  const activeTab = document.querySelector('.sb-tab.active');
+  if(activeTab && activeTab.dataset.tab === 'emotions'){
+    fetchEmotionHistory().catch(()=>{});
+  }
   renderSidebar();
   sidebar.classList.add('open');
   sidebarBackdrop.classList.add('open');
@@ -2333,6 +2686,12 @@ function handleSlashCommand(text){
     return true;
   }
   if(cmd==='/sessions'){
+    activateSidebarTab('sessions');
+    openSidebar();
+    return true;
+  }
+  if(cmd==='/emotions'){
+    activateSidebarTab('emotions');
     openSidebar();
     return true;
   }
@@ -2385,6 +2744,7 @@ function handleSlashCommand(text){
     const prior = localStorage.getItem(USER_STORE) || 'aaron';
     localStorage.setItem(USER_STORE, name);
     refreshHeaderUser();
+    fetchEmotionHistory().catch(()=>{});
     if(ws && ws.readyState === 1){
       ws.send(JSON.stringify({type:'set_user', name:name}));
     }
@@ -2397,6 +2757,7 @@ function handleSlashCommand(text){
       '  /quit, /end          save & end session, start fresh',
       '  /new                 start fresh session (no save)',
       '  /sessions            open the session sidebar (tap ☰ in header)',
+      '  /emotions            open emotional check-ins',
       '  /user [<name>]       show or switch active user (e.g. /user lala)',
       '  /key                 open API key modal',
       '  /think               toggle chain-of-thought display',

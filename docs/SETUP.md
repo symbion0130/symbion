@@ -16,6 +16,27 @@ After install, **one-time per machine**: run `scripts\install-git-hooks.ps1` to 
 
 ---
 
+## Local Gemma default
+
+New installs default to `llm_provider="local_gemma"`. Symbion expects the
+CodeCat llama.cpp runtime at:
+
+- API base: `http://127.0.0.1:8088/v1`
+- Model id: `local-gemma`
+- Config: `c:\projects\codecat\runtime\config\codecat.server.json`
+- Start script: `c:\projects\codecat\runtime\scripts\start-gemma.ps1`
+
+If the server is warm, `/health` and `/api/local-gemma/status` report it as
+available. If it is cold/offline, start it with:
+
+```powershell
+c:\projects\codecat\runtime\scripts\start-gemma.ps1
+```
+
+Cloud providers still work as fallback/escalation when configured.
+
+---
+
 ## Cross-machine sync: how your history travels
 
 Symbion has **two parallel sync mechanisms** — both are usually on at once. You don't have to think about either; they handle themselves. But knowing what's happening helps when something goes wrong.

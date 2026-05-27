@@ -1,7 +1,9 @@
 # Symbion v14
 
 import os, sys, re, json, time, math, asyncio, sqlite3, hashlib, urllib.parse, uuid
-import logging, argparse
+import logging, argparse, subprocess
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional, AsyncIterator, Callable, Any
@@ -365,9 +367,11 @@ class SymbionConfig:
     local_gemma_max_tokens:    int = 768
     local_gemma_json_max_tokens: int = 350
     local_gemma_context_tokens: int = 4096
+    local_gemma_context_char_budget: int = 12000
+    local_gemma_recent_turns: int = 8
+    local_gemma_codecat_config: str = r"c:\projects\codecat\runtime\config\codecat.server.json"
     local_gemma_start_script:  str = r"c:\projects\codecat\runtime\scripts\start-gemma.ps1"
     local_gemma_autostart:     bool = False
-
     temperature:   float = 0.82
     max_tokens:    int   = 16384  # responder output cap. 1400 (v13/early-v14) truncated
                                   # ~5-6K chars; 8192 still cliff-edged on dense multi-file
@@ -543,6 +547,13 @@ class SymbionConfig:
     # memory. Set False to opt out (and use `/save-learnings` manually).
     shared_learnings_auto_import:     bool  = True
 
+    # Counseling source ingestion. MasterDocument.docx is treated as a
+    # source corpus, not prompt bulk: chunks are tagged into SQLite and only
+    # small gentle/practical excerpts are retrieved on counsel-like turns.
+    counseling_source_path:           str   = "MasterDocument.docx"
+    counseling_source_auto_import:    bool  = True
+    counseling_source_context_enabled: bool = True
+
     @classmethod
     def load(cls) -> "SymbionConfig":
         cfg = cls()
@@ -669,6 +680,44 @@ Examples of what to do in ONE turn (don't ask the user to drive it):
 Don't re-call a tool you've already gotten a result for. Don't call write_file unless the user explicitly asked you to create or modify a file. If a tool returns an error, decide whether to retry with a corrected argument or surface the error to the user — don't loop blindly."""
 
 CAPABILITIES_SINGLE_MODE = """Tool-use mode: SINGLE-SHOT. Tools fire ONCE before your turn (a dispatcher decides which one) and the result, if any, is provided to you. You cannot call tools yourself in this mode. If you need data you weren't given, ask the user to rephrase or paste it."""
+
+PROMPT_LINE_BUDGET_TARGET = 200
+
+
+def always_on_prompt_modules(agent_loop_active: bool = True) -> "OrderedDict[str, str]":
+    """Return the static modules injected into every normal response turn.
+
+    This measures the prompt-slimming baseline only: persona, tool/capability
+    blocks, and the active tool-mode rider. Runtime context such as active-user
+    attribution, memory preamble, mood, tool data, and emotional-mode nudges is
+    assembled later because those blocks vary by turn.
+    """
+    mode_block = CAPABILITIES_AGENT_MODE if agent_loop_active else CAPABILITIES_SINGLE_MODE
+    return OrderedDict([
+        ("SYMBION_PERSONA", SYMBION_PERSONA),
+        ("CAPABILITIES_BASE", CAPABILITIES_BASE),
+        ("CAPABILITIES_META", CAPABILITIES_META),
+        ("CAPABILITIES_AGENT_MODE" if agent_loop_active else "CAPABILITIES_SINGLE_MODE", mode_block),
+    ])
+
+
+def _prompt_line_count(text: str) -> int:
+    return len((text or "").splitlines())
+
+
+def always_on_prompt_line_count(agent_loop_active: bool = True) -> int:
+    """Physical line count for the static always-on prompt baseline."""
+    return _prompt_line_count("\n\n".join(always_on_prompt_modules(agent_loop_active).values()))
+
+
+def always_on_prompt_line_counts(agent_loop_active: bool = True) -> "OrderedDict[str, int]":
+    """Per-module line counts plus the joined static baseline total."""
+    counts = OrderedDict(
+        (name, _prompt_line_count(text))
+        for name, text in always_on_prompt_modules(agent_loop_active).items()
+    )
+    counts["TOTAL"] = always_on_prompt_line_count(agent_loop_active)
+    return counts
 
 VOICE_LOOSEN = """The tone of this conversation is casual. Match it.
 Don't treat small questions as opportunities for structured analysis.
@@ -901,6 +950,45 @@ sentences). Lead with what's stable (people, places, ongoing projects, decisions
 the trajectory across time if meaningful. If summaries conflict, keep the most recent claim
 and note the change ("initially X, later corrected to Y"). Do NOT invent connective tissue.
 Do NOT add interpretation that isn't supported by at least one source summary."""
+
+SUMMARISE_SYSTEM = """Summarise this conversation as one compact episode memory.
+
+Return plain text with these labels, omitting only labels that truly have no
+evidence:
+
+People: named people and their relationship to the user.
+Projects: active projects, files, systems, or goals discussed.
+Decisions: concrete choices, commitments, conclusions, or corrected facts.
+Move that worked: the reframe, question, tool use, or pivot that changed the
+conversation. If there was no special move, say "none".
+Emotional context: mood, tension, relief, grief, anxiety, motivation, or the
+relational dynamic only when it materially matters.
+Open loops: follow-ups, unresolved questions, promised next steps, or "none".
+Freshness: whether the memory is time-sensitive, ongoing, likely stale soon,
+or durable.
+Confidence: high/medium/low plus why.
+Sensitive: yes/no, and what category if yes (health, family, identity,
+finances, credentials, conflict, grief, location, private project, etc.).
+Summary: 2-4 concise third-person sentences preserving the useful arc.
+
+Do not invent connective tissue. Preserve corrections over older claims. The
+point is future recall: facts, people/projects, decisions, emotional color,
+open loops, freshness, confidence, and sensitivity flags should survive
+compression."""
+
+CONSOLIDATE_SYSTEM = """Merge these N episode memories into ONE consolidated memory.
+They were grouped because they are semantically similar: likely the same
+recurring topic, project, relationship arc, or emotional thread across sessions.
+
+Preserve source sessions, source ids, named people, projects, decisions,
+corrections, emotional context, open loops, freshness, confidence, and sensitive
+flags. Drop verbatim duplication. If summaries conflict, keep the most recent
+claim and note the change ("initially X, later corrected to Y"). Do NOT invent
+connective tissue or add interpretation that is not supported by a source.
+
+Return the same labeled format used by episode summaries when possible:
+Source sessions, People, Projects, Decisions, Emotional context, Open loops,
+Freshness, Confidence, Sensitive, Summary."""
 
 PROFILE_SYSTEM = """Extract user profile. Return ONLY JSON:
 {"name":null,"interests":[],"communication_style":"","expertise_areas":[],
@@ -1258,6 +1346,38 @@ def init_db(db_path: str):
                 source_message_id INTEGER,
                 confidence REAL,
                 captured_by TEXT DEFAULT 'system');
+            CREATE TABLE IF NOT EXISTS emotional_analytics (
+                id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                session TEXT, user TEXT,
+                emotion TEXT,
+                intensity INTEGER,
+                stress INTEGER,
+                peace INTEGER,
+                hope INTEGER,
+                trigger_event TEXT,
+                practices_helped TEXT,
+                positive_marker TEXT,
+                negative_marker TEXT,
+                source_checkin_id INTEGER,
+                note TEXT);
+            CREATE TABLE IF NOT EXISTS counseling_sources (
+                id INTEGER PRIMARY KEY, source_name TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                title TEXT,
+                content TEXT NOT NULL,
+                tags TEXT,
+                intensity TEXT DEFAULT 'normal',
+                safety_class TEXT DEFAULT 'support',
+                preference TEXT DEFAULT 'gentle_practical',
+                created_at TEXT NOT NULL,
+                UNIQUE(source_hash, chunk_index));
+            CREATE TABLE IF NOT EXISTS memory_corrections (
+                id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                user TEXT, session TEXT,
+                target_source TEXT, target_id INTEGER,
+                correction_type TEXT,
+                note TEXT NOT NULL);
 
             CREATE INDEX IF NOT EXISTS idx_msg_session  ON messages(session);
             CREATE INDEX IF NOT EXISTS idx_sum_session  ON summaries(session);
@@ -1268,6 +1388,13 @@ def init_db(db_path: str):
             CREATE INDEX IF NOT EXISTS idx_tech_source  ON techniques(source);
             CREATE INDEX IF NOT EXISTS idx_emotion_user_ts ON emotional_checkins(user,timestamp);
             CREATE INDEX IF NOT EXISTS idx_emotion_name    ON emotional_checkins(emotion);
+            CREATE INDEX IF NOT EXISTS idx_analytics_user_ts ON emotional_analytics(user,timestamp);
+            CREATE INDEX IF NOT EXISTS idx_analytics_checkin ON emotional_analytics(source_checkin_id);
+            CREATE INDEX IF NOT EXISTS idx_counseling_hash ON counseling_sources(source_hash);
+            CREATE INDEX IF NOT EXISTS idx_counseling_intensity ON counseling_sources(intensity);
+            CREATE INDEX IF NOT EXISTS idx_counseling_safety ON counseling_sources(safety_class);
+            CREATE INDEX IF NOT EXISTS idx_corrections_user ON memory_corrections(user,timestamp);
+            CREATE INDEX IF NOT EXISTS idx_corrections_target ON memory_corrections(user,target_source,target_id);
         """)
         # Additive migration: older DBs (created before semantic retrieval
         # landed) won't have summaries.embedding. ALTER ADD is a no-op on
@@ -1296,7 +1423,128 @@ def init_db(db_path: str):
                     logger.warning(f"Migrated {table} table: added {col} column, backfilled legacy rows to 'aaron'")
             except sqlite3.OperationalError as ex:
                 logger.warning(f"{table} {col} migration skipped: {ex}")
+
+        analytics_cols = [
+            ("stress", "INTEGER"),
+            ("peace", "INTEGER"),
+            ("hope", "INTEGER"),
+            ("trigger_event", "TEXT"),
+            ("practices_helped", "TEXT"),
+            ("positive_marker", "TEXT"),
+            ("negative_marker", "TEXT"),
+            ("source_checkin_id", "INTEGER"),
+            ("note", "TEXT"),
+        ]
+        try:
+            existing_cols = {row[1] for row in c.execute("PRAGMA table_info(emotional_analytics)").fetchall()}
+            for col, decl in analytics_cols:
+                if col not in existing_cols:
+                    c.execute(f"ALTER TABLE emotional_analytics ADD COLUMN {col} {decl}")
+                    logger.warning(f"Migrated emotional_analytics table: added {col} column")
+        except sqlite3.OperationalError as ex:
+            logger.warning(f"emotional_analytics migration skipped: {ex}")
+
+        counseling_cols = [
+            ("safety_class", "TEXT DEFAULT 'support'"),
+            ("preference", "TEXT DEFAULT 'gentle_practical'"),
+        ]
+        try:
+            existing_cols = {row[1] for row in c.execute("PRAGMA table_info(counseling_sources)").fetchall()}
+            for col, decl in counseling_cols:
+                if col not in existing_cols:
+                    c.execute(f"ALTER TABLE counseling_sources ADD COLUMN {col} {decl}")
+                    logger.warning(f"Migrated counseling_sources table: added {col} column")
+        except sqlite3.OperationalError as ex:
+            logger.warning(f"counseling_sources migration skipped: {ex}")
         c.commit()
+
+
+# ==============================================================================
+#  LOCAL GEMMA RUNTIME
+# ==============================================================================
+
+def _load_local_gemma_runtime_config(cfg: SymbionConfig) -> Dict[str, Any]:
+    """Read CodeCat's llama.cpp runtime config when present.
+
+    Symbion treats this as advisory: the live endpoint remains the source of
+    truth for availability, but the config gives us context size, model path,
+    and a better status reason before the server is warm.
+    """
+    path = Path(getattr(cfg, "local_gemma_codecat_config", "") or "")
+    if not path.exists():
+        return {"ok": False, "reason": "config_missing", "path": str(path)}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as ex:
+        return {"ok": False, "reason": f"config_invalid: {type(ex).__name__}: {ex}",
+                "path": str(path)}
+    model_path = Path(str(data.get("model", "")))
+    if model_path and not model_path.is_absolute():
+        base = path.parents[2] if str(model_path).replace("\\", "/").startswith("runtime/") and len(path.parents) > 2 else path.parents[1]
+        model_path = base / model_path
+    return {
+        "ok": True,
+        "path": str(path),
+        "host": data.get("host", "127.0.0.1"),
+        "port": data.get("port", 8088),
+        "model_path": str(model_path) if str(model_path) else "",
+        "model_exists": bool(model_path and model_path.exists()),
+        "context_tokens": int(data.get("contextSize") or getattr(cfg, "local_gemma_context_tokens", 4096)),
+        "raw": data,
+    }
+
+
+def _local_gemma_status(cfg: SymbionConfig, timeout: float = 1.5) -> Dict[str, Any]:
+    runtime = _load_local_gemma_runtime_config(cfg)
+    base = cfg.local_gemma_base_url.rstrip("/")
+    status: Dict[str, Any] = {
+        "provider": "local_gemma",
+        "base_url": base,
+        "model": cfg.local_gemma_model,
+        "runtime": runtime,
+        "state": "offline",
+        "http_status": 0,
+        "error": "",
+    }
+    try:
+        r = httpx.get(base + "/models", timeout=timeout)
+        status["http_status"] = r.status_code
+        if r.status_code == 200:
+            status["state"] = "warm"
+            try:
+                status["models"] = r.json()
+            except Exception:
+                status["models"] = {}
+        else:
+            status["state"] = "unhealthy"
+            status["error"] = f"HTTP {r.status_code}"
+    except Exception as ex:
+        status["error"] = f"{type(ex).__name__}: {ex}"
+        if runtime.get("ok") and not runtime.get("model_exists", True):
+            status["state"] = "model_path_missing"
+        elif runtime.get("ok"):
+            status["state"] = "cold"
+    return status
+
+
+def _try_start_local_gemma(cfg: SymbionConfig) -> bool:
+    script = Path(getattr(cfg, "local_gemma_start_script", "") or "")
+    if not script.exists():
+        logger.warning(f"local_gemma autostart skipped; script missing: {script}")
+        return False
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(script)],
+            cwd=str(script.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return True
+    except Exception as ex:
+        logger.warning(f"local_gemma autostart failed: {type(ex).__name__}: {ex}")
+        return False
 
 
 # ==============================================================================
@@ -3060,8 +3308,8 @@ def _retrieval_tokenize(text: str) -> List[str]:
 
     Returns a flat list (with duplicates) so BM25 can compute term frequency.
     """
-    toks = _RETRIEVAL_TOKEN_RE.findall(text.lower())
-    return [t for t in toks if t not in _STOP_WORDS and not t.isdigit()]
+    toks = [t.strip(".") for t in _RETRIEVAL_TOKEN_RE.findall(text.lower())]
+    return [t for t in toks if t and t not in _STOP_WORDS and not t.isdigit()]
 
 
 def _bm25_rank(query: str, docs: List[str], k: int = 2,
@@ -3128,7 +3376,14 @@ class SymbionMemory:
                                 body_location: str = "", trigger: str = "",
                                 note: str = "", source_message_id: Optional[int] = None,
                                 confidence: Optional[float] = None,
-                                captured_by: str = "system") -> int:
+                                captured_by: str = "system",
+                                stress: Optional[int] = None,
+                                peace: Optional[int] = None,
+                                hope: Optional[int] = None,
+                                trigger_event: str = "",
+                                practices_helped: Optional[List[str]] = None,
+                                positive_marker: str = "",
+                                negative_marker: str = "") -> int:
         emotion = (emotion or "").strip().lower()
         if not emotion or emotion == "neutral":
             return 0
@@ -3146,7 +3401,122 @@ class SymbionMemory:
                  intensity, valence, body_location or "", trigger or "",
                  note or "", source_message_id, confidence, captured_by or "system"))
             c.commit()
+            cid = cur.lastrowid or 0
+        if cid:
+            if stress is None and emotion in {"anxious", "panic", "angry", "stressed", "overwhelmed"}:
+                stress = intensity
+            if peace is None and emotion in {"calm", "peaceful", "settled", "relieved"}:
+                peace = intensity
+            if hope is None and emotion in {"hopeful", "encouraged", "grateful"}:
+                hope = intensity
+            self.save_emotional_analytics(
+                session=session, user=user or "aaron", emotion=emotion,
+                intensity=intensity, stress=stress, peace=peace, hope=hope,
+                trigger_event=trigger_event or trigger or "",
+                practices_helped=practices_helped,
+                positive_marker=positive_marker,
+                negative_marker=negative_marker,
+                source_checkin_id=cid, note=note or "")
+        return cid
+
+    @staticmethod
+    def _clamp_percent(value: Optional[Any]) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        return max(0, min(100, int(value)))
+
+    @staticmethod
+    def _normalize_practices(value: Optional[Any]) -> List[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            try:
+                decoded = json.loads(raw)
+                items = decoded if isinstance(decoded, list) else re.split(r"[,;\n]+", raw)
+            except Exception:
+                items = re.split(r"[,;\n]+", raw)
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = [value]
+        out: List[str] = []
+        seen = set()
+        for item in items:
+            text = str(item or "").strip()[:80]
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                out.append(text)
+            if len(out) >= 12:
+                break
+        return out
+
+    def save_emotional_analytics(self, *, session: str, user: str,
+                                  emotion: str = "",
+                                  intensity: Optional[int] = None,
+                                  stress: Optional[int] = None,
+                                  peace: Optional[int] = None,
+                                  hope: Optional[int] = None,
+                                  trigger_event: str = "",
+                                  practices_helped: Optional[Any] = None,
+                                  positive_marker: str = "",
+                                  negative_marker: str = "",
+                                  source_checkin_id: Optional[int] = None,
+                                  note: str = "") -> int:
+        """Store graph-ready emotional signals now, without building graphs yet."""
+        practices = self._normalize_practices(practices_helped)
+        payload = {
+            "emotion": (emotion or "").strip().lower()[:64],
+            "intensity": self._clamp_percent(intensity),
+            "stress": self._clamp_percent(stress),
+            "peace": self._clamp_percent(peace),
+            "hope": self._clamp_percent(hope),
+            "trigger_event": (trigger_event or "").strip()[:240],
+            "practices_helped": json.dumps(practices, ensure_ascii=False),
+            "positive_marker": (positive_marker or "").strip()[:240],
+            "negative_marker": (negative_marker or "").strip()[:240],
+            "note": (note or "").strip()[:500],
+        }
+        if not any(v not in (None, "", "[]") for v in payload.values()):
+            return 0
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "INSERT INTO emotional_analytics "
+                "(timestamp,session,user,emotion,intensity,stress,peace,hope,"
+                "trigger_event,practices_helped,positive_marker,negative_marker,"
+                "source_checkin_id,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(), (session or "")[:128], user or "aaron",
+                 payload["emotion"], payload["intensity"], payload["stress"],
+                 payload["peace"], payload["hope"], payload["trigger_event"],
+                 payload["practices_helped"], payload["positive_marker"],
+                 payload["negative_marker"], source_checkin_id, payload["note"]))
+            c.commit()
             return cur.lastrowid or 0
+
+    def get_emotional_analytics(self, user: str = "aaron", limit: int = 50,
+                                 days: int = 30) -> List[Dict]:
+        cutoff = (datetime.now() - timedelta(days=max(1, int(days)))).isoformat()
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id,timestamp,session,emotion,intensity,stress,peace,hope,"
+                "trigger_event,practices_helped,positive_marker,negative_marker,"
+                "source_checkin_id,note FROM emotional_analytics "
+                "WHERE user=? AND timestamp>=? ORDER BY timestamp DESC LIMIT ?",
+                (user or "aaron", cutoff, max(1, min(int(limit), 200)))).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r[0], "timestamp": r[1], "session": r[2],
+                "emotion": r[3], "intensity": r[4], "stress": r[5],
+                "peace": r[6], "hope": r[7], "trigger_event": r[8],
+                "practices_helped": self._normalize_practices(r[9]),
+                "positive_marker": r[10], "negative_marker": r[11],
+                "source_checkin_id": r[12], "note": r[13],
+            })
+        return out
 
     def get_recent_emotional_checkins(self, user: str = "aaron",
                                        limit: int = 20,
@@ -3166,12 +3536,85 @@ class SymbionMemory:
                 f"FROM emotional_checkins {where} "
                 "ORDER BY timestamp DESC LIMIT ?",
                 params).fetchall()
-        return [{
+            analytics_rows = []
+            ids = [r[0] for r in rows]
+            if ids:
+                ph = ",".join("?" for _ in ids)
+                analytics_rows = c.execute(
+                    "SELECT source_checkin_id,stress,peace,hope,trigger_event,"
+                    "practices_helped,positive_marker,negative_marker "
+                    f"FROM emotional_analytics WHERE source_checkin_id IN ({ph}) "
+                    "ORDER BY id DESC",
+                    ids).fetchall()
+        analytics_by_checkin: Dict[int, Tuple] = {}
+        for ar in analytics_rows:
+            if ar[0] not in analytics_by_checkin:
+                analytics_by_checkin[ar[0]] = ar
+        out = [{
             "id": r[0], "timestamp": r[1], "session": r[2],
             "emotion": r[3], "intensity": r[4], "valence": r[5],
             "body_location": r[6], "trigger": r[7], "note": r[8],
             "confidence": r[9], "captured_by": r[10],
         } for r in rows]
+        for row in out:
+            ar = analytics_by_checkin.get(row["id"])
+            if not ar:
+                continue
+            row.update({
+                "stress": ar[1], "peace": ar[2], "hope": ar[3],
+                "trigger_event": ar[4] or "",
+                "practices_helped": self._normalize_practices(ar[5]),
+                "positive_marker": ar[6] or "",
+                "negative_marker": ar[7] or "",
+            })
+        return out
+
+    def update_emotional_checkin(self, checkin_id: int, *, user: str = "aaron",
+                                  emotion: str, intensity: Optional[int] = None,
+                                  stress: Optional[int] = None,
+                                  peace: Optional[int] = None,
+                                  hope: Optional[int] = None,
+                                  trigger_event: str = "",
+                                  practices_helped: Optional[Any] = None,
+                                  positive_marker: str = "",
+                                  negative_marker: str = "",
+                                  note: str = "") -> bool:
+        emotion = (emotion or "").strip().lower()
+        if not emotion or emotion == "neutral":
+            return False
+        intensity = self._clamp_percent(intensity)
+        with sqlite3.connect(self.db) as c:
+            row = c.execute(
+                "SELECT id,session FROM emotional_checkins WHERE id=? AND user=?",
+                (int(checkin_id), user or "aaron")).fetchone()
+            if not row:
+                return False
+            c.execute(
+                "UPDATE emotional_checkins SET emotion=?, intensity=?, note=? "
+                "WHERE id=? AND user=?",
+                (emotion, intensity, (note or "")[:500], int(checkin_id), user or "aaron"))
+            c.execute("DELETE FROM emotional_analytics WHERE source_checkin_id=?",
+                      (int(checkin_id),))
+            c.commit()
+        self.save_emotional_analytics(
+            session=row[1] or "", user=user or "aaron", emotion=emotion,
+            intensity=intensity, stress=stress, peace=peace, hope=hope,
+            trigger_event=trigger_event, practices_helped=practices_helped,
+            positive_marker=positive_marker, negative_marker=negative_marker,
+            source_checkin_id=int(checkin_id), note=note)
+        return True
+
+    def delete_emotional_checkin(self, checkin_id: int,
+                                  user: str = "aaron") -> bool:
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "DELETE FROM emotional_checkins WHERE id=? AND user=?",
+                (int(checkin_id), user or "aaron"))
+            if cur.rowcount:
+                c.execute("DELETE FROM emotional_analytics WHERE source_checkin_id=?",
+                          (int(checkin_id),))
+            c.commit()
+            return bool(cur.rowcount)
 
     def save_summary(self, session: str, summary: str, count: int,
                       embedding: Optional[List[float]] = None,
@@ -3631,6 +4074,664 @@ class SymbionMemory:
             "messages":  [{"ts": r[0], "role": r[1], "content": r[2]} for r in reversed(msg_rows)],
         }
 
+    _MEMORY_SEARCH_SCOPES = {"all", "summaries", "messages", "techniques", "checkins", "profile", "counseling"}
+
+    @staticmethod
+    def _preview(text: str, limit: int = 220) -> str:
+        text = (text or "").replace("\n", " ").strip()
+        return text[:limit] + ("..." if len(text) > limit else "")
+
+    @staticmethod
+    def _rank_memory_rows(query: str, rows: List[Dict], k: int) -> List[Dict]:
+        if not query or not rows:
+            return []
+        docs = [r.get("_search_text") or r.get("preview") or "" for r in rows]
+        ranked = _bm25_rank(query, docs, k=len(docs))
+        score_by_doc: Dict[str, float] = {}
+        for score, doc in ranked:
+            score_by_doc.setdefault(doc, score)
+        out: List[Dict] = []
+        for r in rows:
+            doc = r.get("_search_text") or r.get("preview") or ""
+            score = score_by_doc.get(doc, 0.0)
+            if score <= 0:
+                continue
+            item = {kk: vv for kk, vv in r.items() if kk != "_search_text"}
+            item["score"] = round(float(score), 4)
+            out.append(item)
+        out.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return out[:k]
+
+    @staticmethod
+    def _normalise_memory_source(source: str) -> str:
+        src = (source or "").strip().lower().rstrip("s")
+        if src == "emotional_checkin":
+            return "checkin"
+        if src in {"counseling_source", "counseling_sources", "counsel"}:
+            return "counseling"
+        return src
+
+    def _memory_corrections_for_user(self, c: sqlite3.Connection,
+                                      user: str) -> Dict[Tuple[str, int], List[Dict]]:
+        rows = c.execute(
+            "SELECT id,timestamp,target_source,target_id,correction_type,note "
+            "FROM memory_corrections WHERE user=? ORDER BY id ASC",
+            (user or "aaron",)).fetchall()
+        out: Dict[Tuple[str, int], List[Dict]] = defaultdict(list)
+        for r in rows:
+            src = self._normalise_memory_source(r[2] or "")
+            try:
+                tid = int(r[3])
+            except (TypeError, ValueError):
+                continue
+            out[(src, tid)].append({
+                "id": r[0], "timestamp": r[1] or "",
+                "source": src, "target_id": tid,
+                "type": r[4] or "correction",
+                "note": r[5] or "",
+            })
+        return out
+
+    @staticmethod
+    def _apply_memory_corrections(row: Dict,
+                                  corrections: Dict[Tuple[str, int], List[Dict]]) -> Optional[Dict]:
+        key = (SymbionMemory._normalise_memory_source(row.get("source", "")),
+               int(row.get("id") or 0))
+        corr = corrections.get(key) or []
+        if any((c.get("type") or "").lower() in {"delete", "suppress", "forget"} for c in corr):
+            return None
+        if corr:
+            latest = corr[-1]
+            note = latest.get("note") or ""
+            row = dict(row)
+            row["correction"] = note
+            row["preview"] = SymbionMemory._preview(
+                f"{row.get('preview', '')} Correction: {note}", 260)
+            normalized_note = re.sub(r"[^\w#]+", " ", note)
+            row["_search_text"] = "\n".join(
+                x for x in [row.get("_search_text") or "", note, normalized_note] if x)
+        return row
+
+    def search_memory(self, query: str, scope: str = "all", k: int = 5,
+                      user: str = "aaron", candidate_pool: int = 500) -> List[Dict]:
+        """On-demand active-user memory search across durable memory tiers.
+
+        Returns source-labeled rows with enough metadata for the model to
+        decide whether to call get_memory_item() or read_session(). This is
+        intentionally read-only and user-scoped; cross-user recall remains
+        behind get_user_recent_activity().
+        """
+        q = (query or "").strip()
+        sc = (scope or "all").strip().lower()
+        if sc not in self._MEMORY_SEARCH_SCOPES:
+            raise ValueError(f"unknown memory search scope: {scope}")
+        limit = max(1, min(int(k or 5), 20))
+        pool = max(limit, min(int(candidate_pool or 500), 2000))
+        wanted = self._MEMORY_SEARCH_SCOPES - {"all"} if sc == "all" else {sc}
+        all_hits: List[Dict] = []
+        with sqlite3.connect(self.db) as c:
+            corrections = self._memory_corrections_for_user(c, user or "aaron")
+            if "summaries" in wanted:
+                rows = c.execute(
+                    "SELECT id,timestamp,session,content FROM summaries "
+                    "WHERE user=? ORDER BY id DESC LIMIT ?",
+                    (user or "aaron", pool)).fetchall()
+                candidates = [{
+                    "source": "summary", "id": r[0], "timestamp": r[1] or "",
+                    "session": r[2] or "", "preview": self._preview(r[3]),
+                    "_search_text": r[3] or "",
+                } for r in rows]
+                candidates = [x for x in
+                              (self._apply_memory_corrections(r, corrections) for r in candidates)
+                              if x is not None]
+                all_hits.extend(self._rank_memory_rows(q, candidates, limit))
+
+            if "messages" in wanted:
+                rows = c.execute(
+                    "SELECT id,timestamp,session,role,content FROM messages "
+                    "WHERE user=? AND length(content) >= 8 "
+                    "ORDER BY id DESC LIMIT ?",
+                    (user or "aaron", pool)).fetchall()
+                candidates = [{
+                    "source": "message", "id": r[0], "timestamp": r[1] or "",
+                    "session": r[2] or "", "role": r[3] or "",
+                    "preview": self._preview(r[4]),
+                    "_search_text": r[4] or "",
+                } for r in rows]
+                candidates = [x for x in
+                              (self._apply_memory_corrections(r, corrections) for r in candidates)
+                              if x is not None]
+                all_hits.extend(self._rank_memory_rows(q, candidates, limit))
+
+            if "techniques" in wanted:
+                rows = c.execute(
+                    "SELECT id,timestamp,session,query,move,evidence,source FROM techniques "
+                    "WHERE user=? ORDER BY id DESC LIMIT ?",
+                    (user or "aaron", min(pool, 500))).fetchall()
+                candidates = []
+                for r in rows:
+                    text = "\n".join(x for x in [r[3] or "", r[4] or "", r[5] or ""] if x)
+                    candidates.append({
+                        "source": "technique", "id": r[0], "timestamp": r[1] or "",
+                        "session": r[2] or "", "technique_source": r[6] or "local",
+                        "preview": self._preview(r[4] or text),
+                        "_search_text": text,
+                    })
+                candidates = [x for x in
+                              (self._apply_memory_corrections(r, corrections) for r in candidates)
+                              if x is not None]
+                all_hits.extend(self._rank_memory_rows(q, candidates, limit))
+
+            if "checkins" in wanted:
+                rows = c.execute(
+                    "SELECT ec.id,ec.timestamp,ec.session,ec.emotion,ec.intensity,"
+                    "ec.trigger,ec.note,ea.trigger_event,ea.practices_helped,"
+                    "ea.positive_marker,ea.negative_marker "
+                    "FROM emotional_checkins ec "
+                    "LEFT JOIN emotional_analytics ea ON ea.source_checkin_id=ec.id "
+                    "WHERE ec.user=? ORDER BY ec.id DESC LIMIT ?",
+                    (user or "aaron", min(pool, 500))).fetchall()
+                candidates = []
+                for r in rows:
+                    practices = " ".join(self._normalize_practices(r[8]))
+                    text = " ".join(str(x) for x in [
+                        r[3] or "", r[5] or "", r[6] or "", r[7] or "",
+                        practices, r[9] or "", r[10] or "",
+                    ] if x)
+                    intensity = f" intensity={r[4]}" if r[4] is not None else ""
+                    candidates.append({
+                        "source": "checkin", "id": r[0], "timestamp": r[1] or "",
+                        "session": r[2] or "", "emotion": r[3] or "",
+                        "preview": self._preview(f"{r[3] or ''}{intensity}: {r[6] or r[5] or ''}"),
+                        "_search_text": text,
+                    })
+                candidates = [x for x in
+                              (self._apply_memory_corrections(r, corrections) for r in candidates)
+                              if x is not None]
+                all_hits.extend(self._rank_memory_rows(q, candidates, limit))
+
+            if "profile" in wanted:
+                profile = self.get_profile_with_meta(user=user or "aaron")
+                candidates = []
+                for key, (value, updated_at) in profile.items():
+                    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
+                    candidates.append({
+                        "source": "profile", "id": 0, "timestamp": updated_at or "",
+                        "session": "", "key": key,
+                        "preview": self._preview(f"{key}: {text}"),
+                        "_search_text": f"{key}\n{text}",
+                    })
+                all_hits.extend(self._rank_memory_rows(q, candidates, limit))
+
+        if "counseling" in wanted:
+            include_high = bool(self._COUNSELING_HIGH_INTENSITY_RE.search(q))
+            all_hits.extend(self.search_counseling_sources(
+                q, k=limit, include_high_intensity=include_high))
+
+        all_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return all_hits[:limit]
+
+    def get_memory_item(self, source: str, item_id: int,
+                        user: str = "aaron", context: int = 3) -> Optional[Dict]:
+        """Fetch one active-user memory row by source/id.
+
+        Returns None for missing or non-owned rows so callers do not leak
+        whether another user's memory exists at that id.
+        """
+        src = (source or "").strip().lower().rstrip("s")
+        if src == "emotional_checkin":
+            src = "checkin"
+        target_id = int(item_id)
+        with sqlite3.connect(self.db) as c:
+            corrections = self._memory_corrections_for_user(c, user or "aaron")
+        target_corrections = corrections.get((src, target_id)) or []
+        if any((c.get("type") or "").lower() in {"delete", "suppress", "forget"}
+               for c in target_corrections):
+            return None
+
+        def _with_corrections(item: Dict) -> Dict:
+            if target_corrections:
+                item = dict(item)
+                item["corrections"] = target_corrections
+                item["correction"] = target_corrections[-1].get("note") or ""
+            return item
+
+        if src == "summary":
+            with sqlite3.connect(self.db) as c:
+                r = c.execute(
+                    "SELECT id,timestamp,session,content,msg_count FROM summaries "
+                    "WHERE id=? AND user=?",
+                    (target_id, user or "aaron")).fetchone()
+            if not r:
+                return None
+            return _with_corrections({
+                "source": "summary", "id": r[0], "timestamp": r[1] or "",
+                "session": r[2] or "", "content": r[3] or "",
+                "msg_count": int(r[4] or 0)})
+
+        if src == "message":
+            with sqlite3.connect(self.db) as c:
+                target = c.execute(
+                    "SELECT id,timestamp,session,role,content FROM messages "
+                    "WHERE id=? AND user=?",
+                    (target_id, user or "aaron")).fetchone()
+                if not target:
+                    return None
+                before = c.execute(
+                    "SELECT id,timestamp,role,content FROM messages "
+                    "WHERE session=? AND user=? AND id<? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (target[2], user or "aaron", target_id, max(0, int(context)))).fetchall()
+                after = c.execute(
+                    "SELECT id,timestamp,role,content FROM messages "
+                    "WHERE session=? AND user=? AND id>? "
+                    "ORDER BY id ASC LIMIT ?",
+                    (target[2], user or "aaron", target_id, max(0, int(context)))).fetchall()
+            rows = list(reversed(before)) + [(target[0], target[1], target[3], target[4])] + list(after)
+            return _with_corrections({"source": "message", "id": target[0], "timestamp": target[1] or "",
+                    "session": target[2] or "", "role": target[3] or "",
+                    "content": target[4] or "",
+                    "context": [{"id": r[0], "timestamp": r[1] or "",
+                                 "role": r[2] or "", "content": r[3] or ""}
+                                for r in rows]})
+
+        if src == "technique":
+            with sqlite3.connect(self.db) as c:
+                r = c.execute(
+                    "SELECT id,timestamp,session,query,move,evidence,source FROM techniques "
+                    "WHERE id=? AND user=?",
+                    (target_id, user or "aaron")).fetchone()
+            if not r:
+                return None
+            return _with_corrections({"source": "technique", "id": r[0], "timestamp": r[1] or "",
+                    "session": r[2] or "", "query": r[3] or "",
+                    "move": r[4] or "", "evidence": r[5] or "",
+                    "technique_source": r[6] or "local"})
+
+        if src in {"checkin", "emotional_checkin"}:
+            with sqlite3.connect(self.db) as c:
+                r = c.execute(
+                    "SELECT id,timestamp,session,emotion,intensity,valence,"
+                    "body_location,trigger,note,confidence,captured_by "
+                    "FROM emotional_checkins WHERE id=? AND user=?",
+                    (target_id, user or "aaron")).fetchone()
+                ar = c.execute(
+                    "SELECT stress,peace,hope,trigger_event,practices_helped,"
+                    "positive_marker,negative_marker FROM emotional_analytics "
+                    "WHERE source_checkin_id=? ORDER BY id DESC LIMIT 1",
+                    (target_id,)).fetchone()
+            if not r:
+                return None
+            item = {"source": "checkin", "id": r[0], "timestamp": r[1] or "",
+                    "session": r[2] or "", "emotion": r[3] or "",
+                    "intensity": r[4], "valence": r[5],
+                    "body_location": r[6] or "", "trigger": r[7] or "",
+                    "note": r[8] or "", "confidence": r[9],
+                    "captured_by": r[10] or ""}
+            if ar:
+                item.update({
+                    "stress": ar[0], "peace": ar[1], "hope": ar[2],
+                    "trigger_event": ar[3] or "",
+                    "practices_helped": self._normalize_practices(ar[4]),
+                    "positive_marker": ar[5] or "",
+                    "negative_marker": ar[6] or "",
+                })
+            return _with_corrections(item)
+
+        if src in {"counseling", "counseling_source"}:
+            with sqlite3.connect(self.db) as c:
+                r = c.execute(
+                    "SELECT id,created_at,source_name,chunk_index,title,content,"
+                    "tags,intensity,safety_class,preference "
+                    "FROM counseling_sources WHERE id=?",
+                    (target_id,)).fetchone()
+            if not r:
+                return None
+            try:
+                tags = json.loads(r[6] or "[]")
+            except Exception:
+                tags = []
+            return _with_corrections({
+                "source": "counseling_source", "id": r[0],
+                "timestamp": r[1] or "", "source_name": r[2] or "",
+                "chunk_index": r[3], "title": r[4] or "",
+                "content": r[5] or "", "tags": tags,
+                "intensity": r[7] or "normal",
+                "safety_class": r[8] or "support",
+                "preference": r[9] or "gentle_practical",
+            })
+
+        raise ValueError(f"unknown memory source: {source}")
+
+    def read_session(self, session_id: str, user: str = "aaron",
+                     limit: int = 80) -> Dict:
+        """Read the most recent active-user messages from one session."""
+        lim = max(1, min(int(limit or 80), 200))
+        with sqlite3.connect(self.db) as c:
+            total = c.execute(
+                "SELECT COUNT(*) FROM messages WHERE session=? AND user=?",
+                (session_id, user or "aaron")).fetchone()[0] or 0
+            rows = c.execute(
+                "SELECT id,timestamp,role,content FROM messages "
+                "WHERE session=? AND user=? ORDER BY id DESC LIMIT ?",
+                (session_id, user or "aaron", lim)).fetchall()
+        rows = list(reversed(rows))
+        return {"session": session_id, "user": user or "aaron",
+                "total_messages": int(total), "returned_messages": len(rows),
+                "truncated": int(total) > len(rows),
+                "messages": [{"id": r[0], "timestamp": r[1] or "",
+                              "role": r[2] or "", "content": r[3] or ""}
+                             for r in rows]}
+
+    def list_related_sessions(self, query: str, user: str = "aaron",
+                              limit: int = 8) -> List[Dict]:
+        """Find active-user sessions whose messages/summaries match a query."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        lim = max(1, min(int(limit or 8), 20))
+        with sqlite3.connect(self.db) as c:
+            corrections = self._memory_corrections_for_user(c, user or "aaron")
+            msg_rows = c.execute(
+                "SELECT id,timestamp,session,role,content FROM messages "
+                "WHERE user=? AND length(content)>=8 ORDER BY id DESC LIMIT 600",
+                (user or "aaron",)).fetchall()
+            sum_rows = c.execute(
+                "SELECT id,timestamp,session,content,msg_count FROM summaries "
+                "WHERE user=? ORDER BY id DESC LIMIT 400",
+                (user or "aaron",)).fetchall()
+        candidates: List[Dict] = []
+        for r in msg_rows:
+            candidates.append({
+                "source": "message", "id": r[0], "timestamp": r[1] or "",
+                "session": r[2] or "", "role": r[3] or "",
+                "preview": self._preview(r[4]), "_search_text": r[4] or "",
+            })
+        for r in sum_rows:
+            candidates.append({
+                "source": "summary", "id": r[0], "timestamp": r[1] or "",
+                "session": r[2] or "", "msg_count": int(r[4] or 0),
+                "preview": self._preview(r[3]), "_search_text": r[3] or "",
+            })
+        candidates = [x for x in
+                      (self._apply_memory_corrections(r, corrections) for r in candidates)
+                      if x is not None and x.get("session")]
+        ranked = self._rank_memory_rows(q, candidates, len(candidates))
+        sessions: Dict[str, Dict] = {}
+        for hit in ranked:
+            sess = hit.get("session") or ""
+            if not sess:
+                continue
+            cur = sessions.setdefault(sess, {
+                "source": "session", "id": sess, "session": sess,
+                "timestamp": hit.get("timestamp") or "", "score": 0.0,
+                "source_labels": [], "source_counts": defaultdict(int),
+                "previews": [],
+            })
+            cur["timestamp"] = max(cur["timestamp"], hit.get("timestamp") or "")
+            cur["score"] = max(float(cur["score"]), float(hit.get("score") or 0.0))
+            label = f"{hit.get('source')}#{hit.get('id')}"
+            cur["source_labels"].append(label)
+            cur["source_counts"][hit.get("source") or "memory"] += 1
+            if len(cur["previews"]) < 3:
+                cur["previews"].append(hit.get("preview") or "")
+        out: List[Dict] = []
+        for item in sessions.values():
+            item["score"] = round(float(item["score"]), 4)
+            item["source_counts"] = dict(item["source_counts"])
+            item["preview"] = self._preview(" | ".join(item["previews"]), 300)
+            out.append(item)
+        out.sort(key=lambda x: (x.get("score", 0.0), x.get("timestamp", "")),
+                 reverse=True)
+        return out[:lim]
+
+    def get_profile_fact(self, key: str, user: str = "aaron") -> Optional[Dict]:
+        """Return one profile fact with timestamp, user-scoped."""
+        k = (key or "").strip()
+        if not k:
+            return None
+        meta = self.get_profile_with_meta(user)
+        if k not in meta:
+            lk = k.lower()
+            match = next((name for name in meta if name.lower() == lk), "")
+            if not match:
+                return None
+            k = match
+        value, ts = meta[k]
+        age_hours = None
+        if ts:
+            try:
+                t = datetime.fromisoformat(ts.replace("Z", "").split("+")[0])
+                age_hours = (datetime.now() - t).total_seconds() / 3600.0
+            except Exception:
+                age_hours = None
+        return {"source": "profile", "key": k, "value": value,
+                "updated_at": ts or "", "age_hours": age_hours,
+                "user": user or "aaron"}
+
+    def record_memory_correction(self, *, user: str = "aaron", session: str = "",
+                                  target_source: str = "", target_id: Optional[int] = None,
+                                  correction_type: str = "note",
+                                  note: str = "") -> int:
+        """Non-destructive correction layer for wrong/stale/sensitive memory."""
+        clean_note = (note or "").strip()
+        if not clean_note:
+            return 0
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "INSERT INTO memory_corrections "
+                "(timestamp,user,session,target_source,target_id,correction_type,note) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(), user or "aaron", session or "",
+                 (target_source or "").strip().lower()[:40],
+                 int(target_id) if target_id else None,
+                 (correction_type or "note").strip().lower()[:40],
+                 clean_note[:1000]))
+            c.commit()
+            return cur.lastrowid or 0
+
+    def correct_memory(self, source: str, item_id: int, correction: str,
+                       user: str = "aaron", session: str = "",
+                       delete_original: bool = False) -> Dict:
+        """Add a correction or suppression row for an owned memory item."""
+        src = self._normalise_memory_source(source)
+        if src not in {"summary", "message", "technique", "checkin"}:
+            raise ValueError(f"unknown memory source: {source}")
+        note = (correction or "").strip()
+        if not note:
+            raise ValueError("correction text is required")
+        target = self.get_memory_item(src, int(item_id), user=user or "aaron")
+        if not target:
+            return {"ok": False, "found": False,
+                    "reason": "memory item not found for active user"}
+        ctype = "suppress" if delete_original else "correction"
+        cid = self.record_memory_correction(
+            user=user or "aaron", session=session or "",
+            target_source=src, target_id=int(item_id),
+            correction_type=ctype, note=note)
+        return {"ok": bool(cid), "found": True, "id": cid,
+                "source": src, "target_id": int(item_id),
+                "correction_type": ctype, "suppressed": bool(delete_original),
+                "note": note[:1000],
+                "reason": "" if cid else "correction was not saved"}
+
+    _COUNSELING_HIGH_INTENSITY_RE = re.compile(
+        r"\b(demon|jezebel|spiritual warfare|warfare|deliverance|enemy|"
+        r"narcissist|persecution|witchcraft|curse|crush enemies|"
+        r"command(?:ing)? spirits?|spirit of)\b",
+        re.I)
+    _COUNSELING_CRISIS_RE = re.compile(
+        r"\b(suicid|self[- ]?harm|kill myself|hurt myself|hurt someone|"
+        r"violence|immediate danger|abuse|stalking|coercive control|"
+        r"psychosis|medical crisis|emergency)\b",
+        re.I)
+    _COUNSELING_QUERY_RE = re.compile(
+        r"\b(counsel|counseling|therapy|therapist|mentor|friend|support|"
+        r"grief|forgive|forgiveness|boundary|boundaries|repair|shame|"
+        r"anxious|anxiety|panic|depress|sad|angry|anger|trauma|pray|"
+        r"prayer|jesus|god|ground|grounding|breath|journal|feelings?)\b",
+        re.I)
+    _COUNSELING_TAG_RULES: List[Tuple[str, Tuple[str, ...]]] = [
+        ("grounding", ("ground", "breath", "breathe", "present", "body", "room")),
+        ("journaling", ("journal", "write", "prompt")),
+        ("grief", ("grief", "loss", "mourning", "died", "death")),
+        ("forgiveness", ("forgive", "forgiveness", "release")),
+        ("repair", ("repair", "amends", "own it", "responsibility")),
+        ("boundaries", ("boundary", "boundaries", "safe distance")),
+        ("confession", ("confess", "repent", "sin", "honest")),
+        ("safe_listener", ("listen", "safe", "validate", "mirror", "heard")),
+        ("relationship", ("marriage", "wife", "husband", "family", "friend")),
+        ("shame", ("shame", "ashamed", "guilt")),
+        ("anxiety", ("anxious", "anxiety", "panic", "fear")),
+        ("anger", ("angry", "anger", "rage")),
+        ("trauma", ("trauma", "trigger", "flashback")),
+        ("christian", ("jesus", "christ", "holy spirit", "god", "prayer", "pray")),
+        ("practical_next_step", ("next step", "water", "walk", "sunlight", "sleep")),
+    ]
+
+    @staticmethod
+    def _is_counseling_query(text: str) -> bool:
+        return bool(SymbionMemory._COUNSELING_QUERY_RE.search(text or ""))
+
+    @staticmethod
+    def _is_crisis_query(text: str) -> bool:
+        return bool(SymbionMemory._COUNSELING_CRISIS_RE.search(text or ""))
+
+    @staticmethod
+    def _counseling_tags_for(text: str) -> Tuple[List[str], str, str]:
+        t = (text or "").lower()
+        tags: List[str] = []
+        for tag, needles in SymbionMemory._COUNSELING_TAG_RULES:
+            if any(n in t for n in needles):
+                tags.append(tag)
+        high = bool(SymbionMemory._COUNSELING_HIGH_INTENSITY_RE.search(t))
+        crisis = bool(SymbionMemory._COUNSELING_CRISIS_RE.search(t))
+        if high:
+            tags.append("high_intensity_do_not_default")
+        if crisis:
+            tags.append("crisis_safety_non_override")
+        if not tags:
+            tags.append("gentle_practical")
+        safety_class = "crisis" if crisis else "support"
+        return sorted(set(tags)), "high" if high else "normal", safety_class
+
+    @staticmethod
+    def _chunk_text(text: str, max_chars: int = 1600) -> List[str]:
+        paras = [p.strip() for p in re.split(r"\n{2,}", text or "") if p.strip()]
+        chunks: List[str] = []
+        cur = ""
+        cur_intensity = ""
+        for p in paras:
+            _, p_intensity, _ = SymbionMemory._counseling_tags_for(p)
+            if cur and (len(cur) + len(p) + 2 > max_chars or p_intensity != cur_intensity):
+                chunks.append(cur.strip())
+                cur = p
+                cur_intensity = p_intensity
+            else:
+                cur = (cur + "\n\n" + p).strip() if cur else p
+                cur_intensity = cur_intensity or p_intensity
+        if cur:
+            chunks.append(cur.strip())
+        return chunks or ([text.strip()] if text.strip() else [])
+
+    @staticmethod
+    def _extract_docx_text(path: Path) -> str:
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml")
+        root = ET.fromstring(xml)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paras: List[str] = []
+        for para in root.findall(".//w:p", ns):
+            bits: List[str] = []
+            for node in para.iter():
+                if node.tag == f"{{{ns['w']}}}t":
+                    bits.append(node.text or "")
+                elif node.tag == f"{{{ns['w']}}}tab":
+                    bits.append("\t")
+                elif node.tag in {f"{{{ns['w']}}}br", f"{{{ns['w']}}}cr"}:
+                    bits.append("\n")
+            line = "".join(bits).strip()
+            if line:
+                paras.append(line)
+        return "\n\n".join(paras)
+
+    def import_counseling_source_docx(self, path: str,
+                                      source_name: str = "MasterDocument.docx") -> Dict:
+        p = _anchor(path)
+        if not p.exists():
+            return {"ok": False, "reason": "missing", "path": str(p), "chunks": 0}
+        text = self._extract_docx_text(p)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        chunks = self._chunk_text(text)
+        now = datetime.now().isoformat()
+        inserted = 0
+        with sqlite3.connect(self.db) as c:
+            for i, chunk in enumerate(chunks):
+                title = chunk.splitlines()[0][:120] if chunk else source_name
+                tags, intensity, safety_class = self._counseling_tags_for(chunk)
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO counseling_sources "
+                    "(source_name,source_hash,chunk_index,title,content,tags,"
+                    "intensity,safety_class,preference,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (source_name, digest, i, title, chunk,
+                     json.dumps(tags), intensity, safety_class,
+                     "gentle_practical", now))
+                inserted += cur.rowcount or 0
+                if not cur.rowcount:
+                    c.execute(
+                        "UPDATE counseling_sources SET tags=?, intensity=?, "
+                        "safety_class=?, preference=? "
+                        "WHERE source_hash=? AND chunk_index=?",
+                        (json.dumps(tags), intensity, safety_class,
+                         "gentle_practical", digest, i))
+            c.commit()
+        return {"ok": True, "path": str(p), "source_hash": digest,
+                "chunks": len(chunks), "inserted": inserted}
+
+    def search_counseling_sources(self, query: str, k: int = 5,
+                                  include_high_intensity: bool = False,
+                                  crisis_context: bool = False) -> List[Dict]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        # Crisis support is governed by the safety prompt, not by imported
+        # source material. Keep the source corpus out of immediate-risk turns.
+        if crisis_context or self._is_crisis_query(q):
+            return []
+        params: List[Any] = []
+        clauses = ["safety_class!='crisis'"]
+        if not include_high_intensity:
+            clauses.append("intensity!='high'")
+        where = "WHERE " + " AND ".join(clauses)
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id,source_name,chunk_index,title,content,tags,intensity,"
+                "safety_class,preference "
+                f"FROM counseling_sources {where} ORDER BY id DESC LIMIT 1000",
+                params).fetchall()
+        candidates = []
+        for r in rows:
+            try:
+                tags = json.loads(r[5] or "[]")
+            except Exception:
+                tags = []
+            candidates.append({
+                "source": "counseling_source", "id": r[0],
+                "source_name": r[1], "chunk_index": r[2],
+                "title": r[3] or "", "tags": tags, "intensity": r[6] or "normal",
+                "safety_class": r[7] or "support",
+                "preference": r[8] or "gentle_practical",
+                "preview": self._preview(r[4], 260),
+                "_search_text": " ".join([r[3] or "", r[4] or "", " ".join(tags), r[8] or ""]),
+            })
+        ranked = self._rank_memory_rows(q, candidates, max(1, min(int(k), 20)))
+        for item in ranked:
+            if item.get("preference") == "gentle_practical":
+                item["score"] = round(float(item.get("score", 0.0)) + 0.05, 4)
+        ranked.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return ranked[:max(1, min(int(k), 20))]
+
     def clear_location(self, user: str = "aaron") -> None:
         """Remove all location fields for `user`. UI 'forget my location'
         path; also useful when the user explicitly opts out."""
@@ -3914,15 +5015,16 @@ class SymbionMemory:
         cutoff = (datetime.now() - timedelta(days=min_age_days)).isoformat()
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
-                "SELECT id, content, embedding FROM summaries "
+                "SELECT id, content, embedding, COALESCE(user, 'aaron') FROM summaries "
                 "WHERE embedding IS NOT NULL AND timestamp < ? "
                 "ORDER BY id DESC LIMIT ?",
                 (cutoff, max_candidates)).fetchall()
         items: List[Dict] = []
-        for sid, content, blob in rows:
+        for sid, content, blob, row_user in rows:
             vec = _blob_to_vec(blob)
             if vec:
-                items.append({"id": sid, "content": content, "vec": vec})
+                items.append({"id": sid, "content": content, "vec": vec,
+                              "user": row_user or "aaron"})
         if len(items) < min_cluster_size:
             return []
         assigned: set = set()
@@ -3932,6 +5034,8 @@ class SymbionMemory:
             cluster_idx = [i]
             for j in range(i+1, len(items)):
                 if j in assigned: continue
+                if items[i]["user"] != items[j]["user"]:
+                    continue
                 if _cosine(items[i]["vec"], items[j]["vec"]) >= similarity_threshold:
                     cluster_idx.append(j)
             if len(cluster_idx) >= min_cluster_size:
@@ -3939,27 +5043,32 @@ class SymbionMemory:
                 clusters.append([items[k]["id"] for k in cluster_idx])
         return clusters
 
-    def get_summaries_by_ids(self, ids: List[int]) -> List[Tuple[int, str, int]]:
-        """Return (id, content, msg_count) for a list of summary ids."""
+    def get_summaries_by_ids(self, ids: List[int]) -> List[Tuple[int, str, int, str, str, str]]:
+        """Return summary rows for a list of ids, including source session/user."""
         if not ids: return []
         with sqlite3.connect(self.db) as c:
             rows = c.execute(
-                "SELECT id, content, COALESCE(msg_count, 0) FROM summaries "
+                "SELECT id, content, COALESCE(msg_count, 0), session, "
+                "COALESCE(user, 'aaron'), timestamp FROM summaries "
                 f"WHERE id IN ({','.join('?'*len(ids))})", ids).fetchall()
         return rows
 
     def replace_with_consolidated(self, source_ids: List[int], merged_content: str,
-                                   total_msg_count: int) -> int:
+                                   total_msg_count: int, user: str = "aaron",
+                                   source_sessions: Optional[List[str]] = None) -> int:
         """Insert a new consolidated summary (session='consolidated') and
         delete the originals. Embedding is left NULL; _backfill_embeddings
         will fill it on next launch (which also re-syncs the vec index).
         Returns the new summary id."""
         ts = datetime.now().isoformat()
+        sessions = [s for s in (source_sessions or []) if s]
+        if sessions and "source sessions:" not in (merged_content or "").lower():
+            merged_content = "Source sessions: " + ", ".join(dict.fromkeys(sessions)) + "\n" + (merged_content or "")
         with sqlite3.connect(self.db) as c:
             cur = c.execute(
-                "INSERT INTO summaries (timestamp, session, content, msg_count, embedding) "
-                "VALUES (?, 'consolidated', ?, ?, NULL)",
-                (ts, merged_content, total_msg_count))
+                "INSERT INTO summaries (timestamp, session, content, msg_count, embedding, user) "
+                "VALUES (?, 'consolidated', ?, ?, NULL, ?)",
+                (ts, merged_content, total_msg_count, user or "aaron"))
             new_id = cur.lastrowid
             for sid in source_ids:
                 c.execute("DELETE FROM summaries WHERE id=?", (sid,))
@@ -4032,6 +5141,44 @@ class SymbionMemory:
         for m in matches.get("summaries", []):
             self.vec_index.delete(m["id"])
         return counts
+
+    @staticmethod
+    def _trim_context_part(part: str, max_chars: int) -> str:
+        if len(part) <= max_chars:
+            return part
+        if max_chars <= 40:
+            return part[:max_chars]
+        return part[:max_chars - 20].rstrip() + "\n...[trimmed]"
+
+    def _apply_local_gemma_context_budget(
+            self, recent: List[Dict], parts: List[str]) -> Tuple[List[Dict], List[str]]:
+        """Keep ambient memory bounded for the 4096-token local Gemma path.
+
+        Deep recall should happen through memory tools; this only limits the
+        always-injected preamble and raw recent turns.
+        """
+        if (self.cfg.llm_provider or "").lower() != "local_gemma":
+            return recent, parts
+        keep_turns = max(2, int(getattr(self.cfg, "local_gemma_recent_turns", 8) or 8))
+        recent = recent[-keep_turns:]
+        budget = int(getattr(self.cfg, "local_gemma_context_char_budget", 12000) or 0)
+        if budget <= 0:
+            return recent, parts
+        out: List[str] = []
+        used = 0
+        for i, part in enumerate(parts):
+            sep = 2 if out else 0
+            remaining = budget - used - sep
+            if remaining <= 0:
+                break
+            # Preserve short anchor blocks whole; trim large memory blocks.
+            min_keep = 350 if i == 0 else 500
+            if len(part) > remaining and remaining < min_keep:
+                continue
+            trimmed = self._trim_context_part(part, remaining)
+            out.append(trimmed)
+            used += sep + len(trimmed)
+        return recent, out
 
     def build_context(self, session: str, identity: "LongitudinalIdentity",
                       tasks: "TaskEngine", gaps: "KnowledgeGapTracker",
@@ -4236,6 +5383,22 @@ class SymbionMemory:
                     lines.append(f"- ({speaker}) {body}")
                 parts.append("Past quotes relevant to this query:\n" + "\n".join(lines))
 
+        if (query and getattr(self.cfg, "counseling_source_context_enabled", True)
+                and self._is_counseling_query(query)
+                and not self._is_crisis_query(query)):
+            chunks = self.search_counseling_sources(
+                query, k=2, include_high_intensity=False, crisis_context=False)
+            if chunks:
+                lines = [
+                    "Counseling source guidance from MasterDocument "
+                    "(gentle/practical; do not mention source labels; never overrides crisis safety):"
+                ]
+                for ch in chunks:
+                    tags = ",".join(ch.get("tags") or [])
+                    preview = ch.get("preview", "")
+                    lines.append(f"- [{tags}] {preview}")
+                parts.append("\n".join(lines))
+
         # Relevant user positions on-topic
         if query and contradictions:
             positions = contradictions.get_relevant_positions(query, k=3)
@@ -4274,6 +5437,7 @@ class SymbionMemory:
         gap_ctx = gaps.summary_for_context()
         if gap_ctx: parts.append(gap_ctx)
 
+        recent, parts = self._apply_local_gemma_context_budget(recent, parts)
         return recent, "\n\n".join(parts)
 
     # --- Techniques (high-fidelity reasoning preservation) ----------------
@@ -4776,11 +5940,33 @@ _VOICE_TASK_RE = re.compile(
                                                                key=len, reverse=True)) + r")\b",
     re.IGNORECASE)
 
+_EXPLICIT_WORK_RE = re.compile(
+    r"\b(?:"
+    r"write|draft|compose|generate|create|build|implement|code|design|"
+    r"author|produce|rewrite|revise|edit|debug|fix|patch|repair|refactor|"
+    r"review|audit"
+    r")\b"
+    r"|"
+    r"\b(?:script|function|class|test|tests|code|program|app|component|"
+    r"essay|letter|email|post|story|scene|poem|proposal|documentation|"
+    r"release\s+note|changelog)\b",
+    re.IGNORECASE)
+
 _EMOTIONAL_PROCESSING_RE = re.compile(
     r"\b(feel|feeling|felt|hurt|hurts|sad|angry|mad|scared|afraid|anxious|"
     r"panic|ashamed|shame|guilt|grief|grieving|lonely|alone|betrayed|"
     r"overwhelmed|depressed|hopeless|confused|stuck|worthless|trauma|"
     r"counsel|counselor|mentor|friend|guide|talk this through)\b",
+    re.IGNORECASE)
+
+_INTENSITY_SKIP_RE = re.compile(
+    r"\b(?:skip|skip it|not now|later|rather not|no thanks|don't|do not|"
+    r"without|no need)\b.{0,48}\b(?:intensity|rating|rate|number|scale|"
+    r"0\s*(?:-|to)\s*100|percent|%)\b"
+    r"|"
+    r"\b(?:intensity|rating|rate|number|scale|0\s*(?:-|to)\s*100|percent|%)"
+    r"\b.{0,48}\b(?:skip|skip it|not now|later|rather not|no thanks|"
+    r"don't|do not|without|no need)\b",
     re.IGNORECASE)
 
 _INTENSITY_RE = re.compile(
@@ -4800,6 +5986,28 @@ def _extract_emotion_intensity(text: str) -> Optional[int]:
     if n <= 10 and ("/10" in marker or "out of" in marker):
         return n * 10
     return max(0, min(100, n))
+
+
+def _explicit_work_task(text: str) -> bool:
+    """True when the user is asking for a concrete code/writing deliverable."""
+    t = text or ""
+    return bool(_VOICE_TASK_STRUCTURAL(t) or _EXPLICIT_WORK_RE.search(t))
+
+
+def _intensity_followup_skipped(text: str) -> bool:
+    """True when the user explicitly opts out of rating/numbering intensity."""
+    return bool(_INTENSITY_SKIP_RE.search(text or ""))
+
+
+def _should_offer_intensity_followup(text: str, emotional_processing: bool,
+                                     explicit_work_task: bool) -> bool:
+    if not emotional_processing or explicit_work_task:
+        return False
+    if _extract_emotion_intensity(text) is not None:
+        return False
+    if _intensity_followup_skipped(text):
+        return False
+    return True
 
 
 # ==============================================================================
@@ -5285,13 +6493,25 @@ class TurnPipeline:
         }
         if emotion_mode in mode_instructions:
             system += f"\n\nResponse mode: {mode_instructions[emotion_mode]}"
+        turn_text = ctx.text or ""
+        explicit_work_task = _explicit_work_task(turn_text)
         emotional_processing = (
             emotion_mode in ("gentle_slow", "grounding")
             or ctx.emotional_state.get("state", "") in (
                 "distressed", "frustrated", "confused", "grieving", "anxious", "sad")
-            or bool(_EMOTIONAL_PROCESSING_RE.search(ctx.text or ""))
+            or bool(_EMOTIONAL_PROCESSING_RE.search(turn_text))
         )
-        if emotional_processing and not _VOICE_TASK_STRUCTURAL(ctx.text or ""):
+        if explicit_work_task:
+            system += (
+                "\n\nExplicit work mode: the user is asking for a concrete "
+                "code/writing/review deliverable. Complete the requested work "
+                "directly. Be as long as the deliverable requires, and use "
+                "code blocks, lists, or step-by-step structure when they serve "
+                "the task. If emotional context is present, acknowledge it "
+                "briefly, then do the work; do not replace the deliverable "
+                "with a single emotional follow-up question."
+            )
+        if emotional_processing and not explicit_work_task:
             system += (
                 "\n\nEmotional processing mode: respond like a steady friend/mentor. "
                 "Give one brief mirror or tentative label, then ask exactly one simple "
@@ -5299,12 +6519,23 @@ class TurnPipeline:
                 "to fix. If there is immediate self-harm or violence risk, ask one "
                 "plain safety question and encourage urgent local help."
             )
+            if _should_offer_intensity_followup(turn_text, emotional_processing,
+                                                explicit_work_task):
+                system += (
+                    " If intensity would help, make the one follow-up a gentle "
+                    "optional intensity check and make clear they can skip it."
+                )
+            elif _intensity_followup_skipped(turn_text):
+                system += (
+                    " The user has already skipped numeric intensity tracking; "
+                    "do not ask them to rate or number it."
+                )
         if (sym.cfg.voice_loosen_enabled
                 and emotion_mode not in ("gentle_slow", "grounding")
                 and ctx.emotional_state.get("state", "") in ("neutral", "focused", "excited")
-                and len(ctx.text) < 200
-                and not _VOICE_TASK_RE.search(ctx.text)
-                and not _VOICE_TASK_STRUCTURAL(ctx.text)):
+                and len(turn_text) < 200
+                and not _VOICE_TASK_RE.search(turn_text)
+                and not _VOICE_TASK_STRUCTURAL(turn_text)):
             system += f"\n\n{VOICE_LOOSEN}"
         if ctx.evaluation.get("over_cautious"):
             system += "\n\nThis query was flagged as one a naive system would wrongly refuse. Engage with it fully."
@@ -5809,6 +7040,18 @@ class SYMBION:
             except Exception as ex:
                 logger.warning(f"Shared learnings auto-import failed: {ex}")
 
+        if getattr(self.cfg, "counseling_source_auto_import", True):
+            try:
+                source_path = _anchor(getattr(self.cfg, "counseling_source_path", "MasterDocument.docx"))
+                if source_path.exists():
+                    stats = self.memory.import_counseling_source_docx(str(source_path))
+                    if stats.get("inserted"):
+                        logger.warning(
+                            f"Counseling source: imported {stats.get('inserted')} "
+                            f"chunks from {source_path}")
+            except Exception as ex:
+                logger.warning(f"Counseling source auto-import failed: {ex}")
+
         # Notification watcher: attach an `on_trip` callback to every
         # circuit breaker so a closed→open transition fires a Slack post.
         # Off by default — explicit config, no surprise external traffic.
@@ -5872,6 +7115,13 @@ class SYMBION:
 
     def _make_client(self, provider: str):
         if provider == "local_gemma":
+            if getattr(self.cfg, "local_gemma_autostart", False):
+                st = _local_gemma_status(self.cfg)
+                if st.get("state") != "warm" and _try_start_local_gemma(self.cfg):
+                    for _ in range(20):
+                        time.sleep(0.5)
+                        if _local_gemma_status(self.cfg).get("state") == "warm":
+                            break
             c = LocalGemmaClient(self.cfg.local_gemma_model, self.cfg,
                                  base_url=self.cfg.local_gemma_base_url)
             if c.is_available(): return c
@@ -6929,8 +8179,13 @@ class SYMBION:
                 continue
             sources = [r[1] for r in rows]
             msg_total = sum(r[2] for r in rows)
+            source_sessions = [r[3] for r in rows if len(r) > 3 and r[3]]
+            source_users = [r[4] for r in rows if len(r) > 4 and r[4]]
+            user = source_users[0] if source_users else "aaron"
             prompt = "\n\n---\n\n".join(
-                f"SUMMARY {i+1}:\n{s}" for i, s in enumerate(sources))
+                f"SOURCE {i+1} | id={rows[i][0]} | session={rows[i][3]} | "
+                f"user={rows[i][4]} | timestamp={rows[i][5]}:\n{s}"
+                for i, s in enumerate(sources))
             try:
                 merged = await client.chat_text(
                     self._jmodel("summarize"), CONSOLIDATE_SYSTEM, prompt, 0.3, 400)
@@ -6944,7 +8199,8 @@ class SYMBION:
                 continue
             try:
                 self.memory.replace_with_consolidated(
-                    [r[0] for r in rows], merged, msg_total)
+                    [r[0] for r in rows], merged, msg_total,
+                    user=user, source_sessions=source_sessions)
                 out["clusters_merged"] += 1
                 out["summaries_replaced"] += len(rows)
                 out["summaries_created"] += 1
@@ -7226,6 +8482,29 @@ class SYMBION:
                 return [f"OK Forgot technique #{tid}:", f"  {res['deleted_move'][:120]}"]
             return [res["reason"]]
 
+        if c_low.startswith("/correct-memory") or c_low.startswith("/suppress-memory"):
+            suppress = c_low.startswith("/suppress-memory")
+            parts = c.split(None, 3)
+            usage = ("/suppress-memory <source> <id> <reason>" if suppress
+                     else "/correct-memory <source> <id> <correction>")
+            if len(parts) < 4:
+                return [f"Usage: {usage}"]
+            try:
+                item_id = int(parts[2])
+            except ValueError:
+                return [f"Invalid id: {parts[2]!r}. Must be an integer."]
+            try:
+                res = self.memory.correct_memory(
+                    parts[1], item_id, parts[3], user=user, session=session,
+                    delete_original=suppress)
+            except Exception as ex:
+                return [f"Memory correction failed: {type(ex).__name__}: {ex}"]
+            if not res.get("ok"):
+                return [f"Memory correction not saved: {res.get('reason', 'unknown')}"]
+            action = "suppressed" if suppress else "corrected"
+            return [f"OK Memory {action}: {res['source']} #{res['target_id']}",
+                    f"  {res['note']}"]
+
         if c_low == "/save-learnings":
             res = self.sync_shared_learnings()
             if not res["path"]:
@@ -7437,13 +8716,12 @@ def validate_and_report(cfg) -> list:
         print(yellow("     Get one at: https://platform.deepseek.com/api_keys"))
         print(yellow("     PowerShell: $env:DEEPSEEK_API_KEY='sk-...'\n")); import sys; sys.exit(1)
     if cfg.llm_provider=="local_gemma":
-        try:
-            r = httpx.get(cfg.local_gemma_base_url.rstrip("/") + "/models", timeout=2.0)
-            if r.status_code != 200:
-                warnings.append(f"Local Gemma returned HTTP {r.status_code} at {cfg.local_gemma_base_url}/models")
-        except Exception:
-            warnings.append("Local Gemma is offline; start CodeCat with "
-                            f"{cfg.local_gemma_start_script} or choose another provider")
+        st = _local_gemma_status(cfg, timeout=2.0)
+        if st["state"] != "warm":
+            warnings.append(
+                f"Local Gemma is {st['state']}; start CodeCat with "
+                f"{cfg.local_gemma_start_script} or choose another provider"
+            )
     if not _FASTAPI:
         warnings.append("fastapi/uvicorn not installed -- web UI unavailable (pip install fastapi uvicorn)")
     if not cfg.brave_api_key:
@@ -7610,6 +8888,11 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             "welfare_concern":   m.welfare_concern(),
         }
 
+    def _clean_user_name(user: str = "") -> str:
+        clean = (user or "").strip().lower()[:32]
+        clean = "".join(ch for ch in clean if ch.isalnum() or ch in "_-")
+        return clean or (symbion.cfg.active_user or "aaron")
+
     @app.get("/", response_class=HTMLResponse)
     async def index(): return _load_web_html()
 
@@ -7627,6 +8910,11 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
             "open_knowledge_gaps":len(symbion.gaps.get_open()),
             **_health_dict(),
         })
+
+    @app.get("/api/local-gemma/status")
+    async def api_local_gemma_status(request: Request):
+        _auth(request); _rate(request)
+        return JSONResponse(_local_gemma_status(symbion.cfg))
 
     @app.get("/analytics")
     async def analytics_route(request: Request):
@@ -7751,6 +9039,168 @@ def build_web_app(symbion: "SYMBION") -> "FastAPI":
         msgs = symbion.memory.get_session_messages(
             session_id, u, limit=max(1, min(limit, 500)))
         return JSONResponse({"session_id": session_id, "user": u, "messages": msgs})
+
+    @app.get("/api/emotions")
+    async def api_emotions(request: Request, user: str = "", limit: int = 12,
+                           days: int = 30, emotion: str = ""):
+        """Local-only emotional check-in history for the active user."""
+        _auth(request)
+        u = _clean_user_name(user)
+        lim = max(1, min(int(limit), 50))
+        day_count = max(1, min(int(days), 365))
+        rows = symbion.memory.get_recent_emotional_checkins(
+            u, limit=lim, days=day_count, emotion=emotion)
+        counts = Counter(r.get("emotion", "") for r in rows if r.get("emotion"))
+        intensities = [int(r["intensity"]) for r in rows
+                       if r.get("intensity") is not None]
+        signal_avgs = {}
+        for key in ("stress", "peace", "hope"):
+            vals = [int(r[key]) for r in rows if r.get(key) is not None]
+            signal_avgs[key] = round(sum(vals) / len(vals)) if vals else None
+        summary = {
+            "count": len(rows),
+            "top": [{"emotion": name, "count": count}
+                    for name, count in counts.most_common(5)],
+            "avg_intensity": (round(sum(intensities) / len(intensities))
+                              if intensities else None),
+            "avg_stress": signal_avgs["stress"],
+            "avg_peace": signal_avgs["peace"],
+            "avg_hope": signal_avgs["hope"],
+            "positive_markers": sum(1 for r in rows if r.get("positive_marker")),
+            "negative_markers": sum(1 for r in rows if r.get("negative_marker")),
+        }
+        return JSONResponse({"user": u, "days": day_count, "limit": lim,
+                             "checkins": rows, "summary": summary})
+
+    @app.post("/api/emotions")
+    async def api_emotion_checkin(request: Request):
+        """Manual emotional check-in. Writes only to the local SQLite DB."""
+        _auth(request)
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > 64_000:
+            raise HTTPException(413, "Request body too large (max 64000 bytes)")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON body")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "JSON object required")
+
+        user = _clean_user_name(body.get("user", ""))
+        _rate(request, user)
+        emotion = (body.get("emotion") or "").strip().lower()[:40]
+        if not emotion or emotion == "neutral":
+            raise HTTPException(400, "non-neutral emotion required")
+
+        def _optional_int(name: str) -> Optional[int]:
+            raw = body.get(name)
+            if raw in (None, ""): return None
+            try: return max(0, min(100, int(raw)))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{name} must be an integer 0-100")
+
+        def _optional_float(name: str) -> Optional[float]:
+            raw = body.get(name)
+            if raw in (None, ""): return None
+            try: return max(-1.0, min(1.0, float(raw)))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{name} must be a number -1..1")
+
+        session = (body.get("session") or body.get("session_id") or
+                   datetime.now().strftime("web_%Y%m%d_%H%M%S"))
+        practices = body.get("practices_helped") or body.get("practices") or []
+        cid = symbion.memory.save_emotional_checkin(
+            session=str(session)[:128],
+            user=user,
+            emotion=emotion,
+            intensity=_optional_int("intensity"),
+            valence=_optional_float("valence"),
+            body_location=str(body.get("body_location") or "")[:120],
+            trigger=str(body.get("trigger") or "")[:240],
+            note=str(body.get("note") or "")[:500],
+            confidence=_optional_float("confidence"),
+            captured_by="web",
+            stress=_optional_int("stress"),
+            peace=_optional_int("peace"),
+            hope=_optional_int("hope"),
+            trigger_event=str(body.get("trigger_event") or body.get("trigger") or "")[:240],
+            practices_helped=practices,
+            positive_marker=str(body.get("positive_marker") or "")[:240],
+            negative_marker=str(body.get("negative_marker") or "")[:240],
+        )
+        if not cid:
+            raise HTTPException(400, "check-in was not saved")
+        rows = symbion.memory.get_recent_emotional_checkins(
+            user, limit=1, days=365)
+        return JSONResponse({"ok": True, "id": cid, "user": user,
+                             "checkin": rows[0] if rows else None})
+
+    @app.patch("/api/emotions/{checkin_id}")
+    async def api_emotion_checkin_update(request: Request, checkin_id: int):
+        """Edit one local emotional check-in owned by the active user."""
+        _auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON body")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "JSON object required")
+
+        user = _clean_user_name(body.get("user", ""))
+        _rate(request, user)
+        emotion = (body.get("emotion") or "").strip().lower()[:40]
+        if not emotion or emotion == "neutral":
+            raise HTTPException(400, "non-neutral emotion required")
+
+        def _optional_int(name: str) -> Optional[int]:
+            raw = body.get(name)
+            if raw in (None, ""): return None
+            try: return max(0, min(100, int(raw)))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{name} must be an integer 0-100")
+
+        practices = body.get("practices_helped") or []
+        if not isinstance(practices, list):
+            practices = []
+        ok = symbion.memory.update_emotional_checkin(
+            checkin_id, user=user, emotion=emotion,
+            intensity=_optional_int("intensity"),
+            stress=_optional_int("stress"),
+            peace=_optional_int("peace"),
+            hope=_optional_int("hope"),
+            trigger_event=str(body.get("trigger_event") or body.get("trigger") or "")[:240],
+            practices_helped=[str(x)[:80] for x in practices[:10]],
+            positive_marker=str(body.get("positive_marker") or "")[:240],
+            negative_marker=str(body.get("negative_marker") or "")[:240],
+            note=str(body.get("note") or "")[:500],
+        )
+        if not ok:
+            raise HTTPException(404, "check-in not found")
+        rows = symbion.memory.get_recent_emotional_checkins(user, limit=1, days=365)
+        return JSONResponse({"ok": True, "id": checkin_id, "user": user,
+                             "checkin": rows[0] if rows else None})
+
+    @app.delete("/api/emotions/{checkin_id}")
+    async def api_emotion_checkin_delete(request: Request, checkin_id: int,
+                                         user: str = ""):
+        """Delete one local emotional check-in owned by the active user."""
+        _auth(request)
+        u = _clean_user_name(user)
+        _rate(request, u)
+        if not symbion.memory.delete_emotional_checkin(checkin_id, user=u):
+            raise HTTPException(404, "check-in not found")
+        return JSONResponse({"ok": True, "id": checkin_id, "user": u})
+
+    @app.get("/api/emotional-analytics")
+    async def api_emotional_analytics(request: Request, user: str = "",
+                                      limit: int = 50, days: int = 30):
+        """Graph-ready emotional signals; no graph/export UI yet."""
+        _auth(request)
+        u = _clean_user_name(user)
+        rows = symbion.memory.get_emotional_analytics(
+            u, limit=max(1, min(int(limit), 200)),
+            days=max(1, min(int(days), 3650)))
+        return JSONResponse({"user": u, "signals": rows})
 
     @app.get("/api/tasks")
     async def api_tasks(request: Request, session: str = ""):
@@ -8451,6 +9901,10 @@ HELP_TEXT = f"""
     /forget           clear the current session's memory
     /forget <topic>   search summaries/profile/positions for a topic and
                        selectively delete after confirmation
+    /correct-memory <source> <id> <correction>
+                      add a non-destructive correction to one memory item
+    /suppress-memory <source> <id> <reason>
+                      hide one memory item from future recall
     /consolidate      merge old similar summaries into one (cosine>=0.85,
                        min 3 per cluster, >=7 days old)
     /mcp              list configured Model Context Protocol servers
@@ -8458,6 +9912,10 @@ HELP_TEXT = f"""
     /tool-stats       per-tool reliability counters for this session
                        (calls, errors, avg latency, avg output size)
     /history          recent interactions with quality scores
+    /checkin <emotion> [0-100] [note]
+                      record an emotional check-in for trend tracking
+    /emotions [emotion]
+                      show recent emotional check-ins for the active user
     /feedback <id> <score> [comment]
                       rate a past interaction (-1.0 to +1.0)
     /tasks            active tasks
@@ -8802,6 +10260,30 @@ def run_terminal(symbion: "SYMBION"):
                 for k,v in p.items():
                     if v: print(f"  {cyan(k):<24}  {v}")
                 print()
+        elif raw.startswith("/correct-memory") or raw.startswith("/suppress-memory"):
+            suppress = raw.startswith("/suppress-memory")
+            parts = raw.split(None, 3)
+            usage = ("/suppress-memory <source> <id> <reason>" if suppress
+                     else "/correct-memory <source> <id> <correction>")
+            if len(parts) < 4:
+                print(yellow(f"  Usage: {usage}"))
+            else:
+                try:
+                    item_id = int(parts[2])
+                    res = symbion.memory.correct_memory(
+                        parts[1], item_id, parts[3],
+                        user=symbion._active_user(session),
+                        session=session, delete_original=suppress)
+                    if res.get("ok"):
+                        action = "suppressed" if suppress else "corrected"
+                        print(green(f"  OK Memory {action}: {res['source']} #{res['target_id']}"))
+                        print(f"  {res['note']}")
+                    else:
+                        print(yellow(f"  Memory correction not saved: {res.get('reason', 'unknown')}"))
+                except ValueError:
+                    print(red(f"  Invalid id: {parts[2]!r}. Must be an integer."))
+                except Exception as ex:
+                    print(red(f"  Memory correction failed: {type(ex).__name__}: {ex}"))
         elif raw.startswith("/forget"):
             parts = raw.split(None, 1)
             if len(parts) == 1:
@@ -8859,6 +10341,48 @@ def run_terminal(symbion: "SYMBION"):
                     ic={"POSITIVE":green,"RISKY":red,"NEUTRAL":dim}.get(r["survival_impact"],str)
                     print(f"  {r['id']:>4}  {ic(r['survival_impact']):<9}  {q}  {em:<4} {fl}  {fb:>4}  {r['query'][:44]}")
                 print(dim("  Em=emotional state detected *=revised OK/!=eval"))
+                print()
+        elif raw.startswith("/checkin"):
+            parts = raw.split(None, 3)
+            if len(parts) < 2:
+                print(yellow("  Usage: /checkin <emotion> [0-100] [note]"))
+            else:
+                emotion = parts[1].strip().lower()
+                intensity = None
+                note = ""
+                if len(parts) >= 3:
+                    try:
+                        intensity = max(0, min(100, int(parts[2])))
+                        note = parts[3] if len(parts) >= 4 else ""
+                    except ValueError:
+                        note = " ".join(parts[2:])
+                cid = symbion.memory.save_emotional_checkin(
+                    session=session,
+                    user=symbion._active_user(session),
+                    emotion=emotion,
+                    intensity=intensity,
+                    note=note,
+                    confidence=1.0,
+                    captured_by="manual")
+                print(green(f"  OK Emotional check-in #{cid} saved."))
+        elif raw.startswith("/emotions"):
+            parts = raw.split(None, 1)
+            filt = parts[1].strip().lower() if len(parts) > 1 else ""
+            rows = symbion.memory.get_recent_emotional_checkins(
+                user=symbion._active_user(session), emotion=filt, days=30, limit=20)
+            if not rows:
+                print(dim("  No emotional check-ins in the last 30 days."))
+            else:
+                print()
+                for r in rows:
+                    ts = (r.get("timestamp") or "")[:16].replace("T", " ")
+                    inten = r.get("intensity")
+                    level = f" {inten:>3}/100" if inten is not None else "    -- "
+                    sig = " ".join(
+                        f"{k[:1]}={r.get(k)}" for k in ("stress", "peace", "hope")
+                        if r.get(k) is not None)
+                    note = (r.get("note") or r.get("trigger") or "").replace("\n", " ")[:70]
+                    print(f"  {dim(ts)}  {cyan((r.get('emotion') or '')[:14]):<14} {level}  {sig:<17} {note}")
                 print()
         elif raw.startswith("/feedback"):
             parts=raw.split(None,3)
