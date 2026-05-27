@@ -56,9 +56,11 @@ bool LooksLikeForget(const std::string& text) {
 
 bool LooksLikeWipeAll(const std::string& text) {
     return ContainsAny(text, {
-        "wipe all memory", "delete all memory", "erase all memory", "clear all memory",
-        "reset memory", "factory reset memory", "forget everything", "delete everything you remember",
-        "clear every memory", "wipe memories", "reset all memories"
+        "wipe memory", "wipe my memory", "wipe all memory", "delete all memory",
+        "delete my memory", "erase memory", "erase my memory", "erase all memory",
+        "clear all memory", "clear my memory", "reset memory", "factory reset memory",
+        "forget everything", "delete everything you remember", "clear every memory",
+        "wipe memories", "reset all memories"
     });
 }
 
