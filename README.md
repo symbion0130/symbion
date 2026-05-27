@@ -1,25 +1,29 @@
 # Symbion
 
-Symbion is being moved to a lightweight native Windows runtime:
+Symbion is a lightweight native Windows runtime:
 
 - C++ WebView2 shell
-- C++ local backend
-- SQLite memory
-- Local Gemma by default
+- C++ local backend with SQLite memory
+- Local Gemma by default through the OpenAI-compatible llama.cpp server
 
-Electron and the tracked Python runtime have been removed. The native backend is intentionally small right now; memory, chat, and counseling features are being ported into C++ next.
+Electron and Python have been removed from the tracked runtime. The native backend now owns health, chat, local Gemma calls, SQLite message storage, and emotional signal tracking.
 
 ## Build
 
 ```powershell
-cmake -S native -B native\build -G "Visual Studio 17 2022" -A x64 -DSYMBION_WEBVIEW2_SDK_ROOT="C:\projects\symbion\native\.deps\Microsoft.Web.WebView2.1.0.3967.48"
-cmake --build native\build --config Release
+.\scripts\build-native.ps1 -WebView2SdkRoot "C:\projects\symbion\native\.deps\Microsoft.Web.WebView2.1.0.3967.48"
 ```
 
 ## Run
 
 ```powershell
 .\scripts\start-native.ps1
+```
+
+## Package
+
+```powershell
+.\scripts\package-native.ps1
 ```
 
 See [docs/WEBVIEW2_MIGRATION.md](docs/WEBVIEW2_MIGRATION.md) for the native migration status.

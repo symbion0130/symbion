@@ -1,13 +1,11 @@
 # Symbion Commands
 
-Symbion is being moved to a native C++ runtime. Electron has been removed.
+Symbion is a native C++ runtime. Electron and Python have been removed from the tracked app.
 
 ## Native Build
 
 ```powershell
-cmake -S native -B native\build -G "Visual Studio 17 2022" -A x64 -DSYMBION_WEBVIEW2_SDK_ROOT="C:\projects\symbion\native\.deps\Microsoft.Web.WebView2.1.0.3967.48"
-cmake --build native\build --config Release
-.\scripts\start-native.ps1
+.\scripts\build-native.ps1 -WebView2SdkRoot "C:\projects\symbion\native\.deps\Microsoft.Web.WebView2.1.0.3967.48"
 ```
 
 ## Native Runtime
@@ -17,4 +15,15 @@ cmake --build native\build --config Release
 .\native\build\Release\symbion_native.exe
 ```
 
-The native shell now launches `symbion_backend.exe`, not Electron and not Python.
+## Smoke
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"I feel anxious"}'
+```
+
+## Package
+
+```powershell
+.\scripts\package-native.ps1
+```

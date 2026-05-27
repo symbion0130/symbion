@@ -7,95 +7,245 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #101214;
-      --panel: #171b1f;
-      --line: #293039;
-      --text: #f1f4f7;
-      --muted: #a7b0bb;
+      --bg: #111315;
+      --surface: #171b1f;
+      --surface-2: #1e242a;
+      --line: #2b333c;
+      --text: #f3f6f8;
+      --muted: #9ea9b3;
       --accent: #65d6ad;
-      --warn: #e7c168;
+      --warn: #e8c26a;
+      --user: #243a35;
+      --assistant: #20262d;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
+      height: 100vh;
       background: var(--bg);
       color: var(--text);
       font-family: "Segoe UI", system-ui, sans-serif;
+      letter-spacing: 0;
     }
     main {
       display: grid;
-      grid-template-rows: auto 1fr auto;
-      min-height: 100vh;
+      grid-template-rows: 48px 1fr auto;
+      height: 100vh;
     }
-    header, footer {
-      padding: 14px 18px;
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 16px;
       border-bottom: 1px solid var(--line);
       background: #12161a;
     }
-    footer {
-      border-top: 1px solid var(--line);
-      border-bottom: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
     h1 {
       margin: 0;
-      font-size: 18px;
+      font-size: 17px;
       font-weight: 600;
     }
-    section {
-      display: grid;
-      align-content: center;
-      gap: 16px;
-      width: min(760px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 32px 0;
-    }
-    .status {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 8px;
-      padding: 18px;
-    }
-    .label {
+    #status {
       color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 6px;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .value {
-      font-size: 20px;
-      line-height: 1.35;
+    #messages {
+      overflow: auto;
+      padding: 18px 16px 24px;
     }
-    .accent { color: var(--accent); }
-    .warn { color: var(--warn); }
+    .stack {
+      width: min(860px, 100%);
+      margin: 0 auto;
+      display: grid;
+      gap: 12px;
+    }
+    .msg {
+      max-width: min(720px, 92%);
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .user {
+      justify-self: end;
+      background: var(--user);
+    }
+    .assistant {
+      justify-self: start;
+      background: var(--assistant);
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    form {
+      border-top: 1px solid var(--line);
+      background: #12161a;
+      padding: 12px 16px;
+    }
+    .composer {
+      width: min(860px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    textarea {
+      width: 100%;
+      min-height: 48px;
+      max-height: 160px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 12px;
+      font: inherit;
+      outline: none;
+    }
+    textarea:focus {
+      border-color: var(--accent);
+    }
+    button {
+      min-width: 82px;
+      height: 48px;
+      border: 1px solid #4aa98a;
+      border-radius: 8px;
+      background: #24594b;
+      color: var(--text);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: .55;
+      cursor: default;
+    }
+    .empty {
+      margin: 12vh auto 0;
+      width: min(620px, 100%);
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .empty strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    @media (max-width: 640px) {
+      header { align-items: flex-start; flex-direction: column; height: auto; padding: 10px 12px; }
+      main { grid-template-rows: auto 1fr auto; }
+      .composer { grid-template-columns: 1fr; }
+      button { width: 100%; }
+      .msg { max-width: 100%; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <header><h1>Symbion</h1></header>
-    <section>
-      <div class="status">
-        <div class="label">Runtime</div>
-        <div class="value"><span class="accent">Native C++ backend online.</span></div>
-      </div>
-      <div class="status">
-        <div class="label">Migration</div>
-        <div class="value"><span class="warn">Memory, chat, and counseling flows are being ported into C++.</span></div>
+    <header>
+      <h1>Symbion</h1>
+      <div id="status">Starting native runtime...</div>
+    </header>
+    <section id="messages">
+      <div class="stack" id="stack">
+        <div class="empty" id="empty">
+          <strong>What feels most present right now?</strong><br>
+          Symbion will keep the conversation simple, remember locally, and ask one question at a time.
+        </div>
       </div>
     </section>
-    <footer id="health">Checking health...</footer>
+    <form id="form">
+      <div class="composer">
+        <textarea id="input" autocomplete="off" placeholder="Say what is going on..."></textarea>
+        <button id="send" type="submit">Send</button>
+      </div>
+    </form>
   </main>
   <script>
-    fetch("/health")
-      .then((r) => r.json())
-      .then((h) => {
-        document.getElementById("health").textContent =
-          `Health: ${h.status} | Runtime: ${h.runtime} | Provider: ${h.provider}`;
-      })
-      .catch(() => {
-        document.getElementById("health").textContent = "Health check unavailable";
-      });
+    const stack = document.getElementById("stack");
+    const empty = document.getElementById("empty");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const send = document.getElementById("send");
+    const status = document.getElementById("status");
+
+    function addMessage(role, content, meta = "") {
+      empty?.remove();
+      const node = document.createElement("div");
+      node.className = `msg ${role}`;
+      node.textContent = content;
+      if (meta) {
+        const detail = document.createElement("div");
+        detail.className = "meta";
+        detail.textContent = meta;
+        node.appendChild(detail);
+      }
+      stack.appendChild(node);
+      node.scrollIntoView({ block: "end" });
+    }
+
+    async function refreshHealth() {
+      try {
+        const h = await fetch("/health").then((r) => r.json());
+        status.textContent = `${h.runtime} | ${h.provider} | ${h.message_count} messages`;
+      } catch {
+        status.textContent = "backend unavailable";
+      }
+    }
+
+    async function loadRecent() {
+      try {
+        const data = await fetch("/api/messages/recent").then((r) => r.json());
+        for (const msg of data.messages || []) {
+          addMessage(msg.role, msg.content);
+        }
+      } catch {}
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      send.disabled = true;
+      addMessage("user", message);
+      try {
+        const result = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message })
+        }).then((r) => r.json());
+        const emotion = result.emotion?.label
+          ? `${result.emotion.label} ${result.emotion.intensity}/10`
+          : "";
+        addMessage("assistant", result.reply || "What feels most important in that right now?", emotion);
+      } catch {
+        addMessage("assistant", "I lost the local connection for a moment. What feels most important right now?");
+      } finally {
+        send.disabled = false;
+        input.focus();
+        refreshHealth();
+      }
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    refreshHealth();
+    loadRecent();
+    input.focus();
   </script>
 </body>
 </html>

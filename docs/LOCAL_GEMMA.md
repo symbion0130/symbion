@@ -1,6 +1,6 @@
 # Local Gemma
 
-Status: configured as the default provider in `symbion.json`. Native C++ chat calls are the next migration target.
+Status: configured as the default provider in `symbion.json`. Native C++ chat calls are implemented through `/api/chat`.
 
 ## Target Runtime
 

@@ -1,11 +1,8 @@
-# Environment
+# Local environment
 .env
 *.txt
-venv/
-__pycache__/
-*.pyc
 
-# Data files
+# Local data
 *.db
 *.db.bak
 *.db.bak.*
@@ -14,36 +11,26 @@ __pycache__/
 *.log
 *.jsonl
 
-# IDE / tools
-.claude/
+# Legacy local runtime artifacts
+venv/
+.python/
+*.egg-info/
+__pycache__/
+*.pyc
 .pytest_cache/
 
-# Portable Python install — created by scripts\bootstrap-portable.bat,
-# machine-arch-specific (~100MB), should never be committed
-.python/
+# Native build/package outputs
+native/build/
+native/.deps/
+native/dist/
 
-# Editable install artifact — pip creates this from pyproject.toml
-*.egg-info/
-
-# Stray launcher logs from Start-Process redirects
+# Local-only scratch and archives
+.claude/
+.codecat/
+symbion_workspace/
+archive/
+Model9/
+_pastes/
+verify_artifacts/
 .start.log
 .start.err
-
-# Eval run artifacts — JSON outputs from evals/run.py + tee'd log files.
-# Each run produces a new timestamped file; the golden set + harness are
-# source-of-truth, the per-run results are reproducible from them.
-evals/results/
-evals/golden_*.jsonl
-
-# Archived legacy code, snapshots, plans (kept locally for diffing only)
-archive/
-
-# Personal historical archives (referenced by some evals; local-only)
-Model9/
-
-# Web UI image paste cache — written by the WS handler, scrubbed per-session
-_pastes/
-
-# Browser-verify run artifacts (screenshots + log) from
-# scripts/verify_session_sync.py. Each run overwrites; reproducible.
-verify_artifacts/

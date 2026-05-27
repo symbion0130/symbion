@@ -13,4 +13,12 @@ Expected smoke endpoint:
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Python tests were removed with the legacy runtime. New checks should target the native backend and WebView2 shell.
+Chat smoke:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"I feel overwhelmed today"}'
+Invoke-RestMethod http://127.0.0.1:8000/api/messages/recent
+Invoke-RestMethod http://127.0.0.1:8000/api/emotions/recent
+```
+
+Python tests were removed with the legacy runtime. Checks now target the native backend and WebView2 shell.

@@ -135,6 +135,13 @@ Current open item groups: 0.
 - [x] Build native C++ shell and backend.
 - [x] Smoke native `/health`.
 - [x] Remove Electron check path.
+- [x] Add native C++ SQLite memory store.
+- [x] Add native C++ Local Gemma client.
+- [x] Add native `/api/chat`.
+- [x] Add native recent-message and recent-emotion APIs.
+- [x] Replace native placeholder page with a working chat UI.
+- [x] Remove stale installer, worker, and portable-sync scripts.
+- [x] Add native build and package scripts.
 - [x] Verify `symbion.json` parses.
 - [x] Run Playwright UI smoke for the Emotions tab.
 

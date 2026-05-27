@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SymbionNativeShell VERSION 0.1.0 LANGUAGES CXX)
+project(SymbionNativeShell VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Symbion native shell currently targets Windows/WebView2 only.")
@@ -17,11 +17,28 @@ add_executable(symbion_native WIN32
 )
 
 add_executable(symbion_backend
+    src/app.cpp
+    src/app.h
     src/backend_main.cpp
+    src/config.cpp
+    src/config.h
+    src/gemma_client.cpp
+    src/gemma_client.h
+    src/http_server.cpp
+    src/http_server.h
+    src/json_util.cpp
+    src/json_util.h
+    src/memory_store.cpp
+    src/memory_store.h
+    vendor/sqlite/sqlite-amalgamation-3530100/sqlite3.c
 )
 
 target_compile_features(symbion_native PRIVATE cxx_std_20)
 target_compile_features(symbion_backend PRIVATE cxx_std_20)
+target_include_directories(symbion_backend PRIVATE
+    src
+    vendor/sqlite/sqlite-amalgamation-3530100
+)
 target_compile_definitions(symbion_native PRIVATE
     NOMINMAX
     UNICODE
@@ -44,7 +61,7 @@ target_link_libraries(symbion_native PRIVATE
     winhttp
 )
 
-target_link_libraries(symbion_backend PRIVATE ws2_32)
+target_link_libraries(symbion_backend PRIVATE ws2_32 winhttp)
 
 if(SYMBION_NATIVE_ENABLE_WEBVIEW2)
     set(_webview2_roots)

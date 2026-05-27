@@ -13,13 +13,15 @@ The current target is:
 ## Current Native Status
 
 - `symbion_native.exe` builds and hosts WebView2.
-- `symbion_backend.exe` builds and serves `/health`, `/api/local-gemma/status`, and the existing web template.
+- `symbion_backend.exe` builds and serves `/health`, `/api/local-gemma/status`, `/api/chat`, `/api/messages/recent`, `/api/emotions/recent`, and the native web UI.
 - The shell launches `symbion_backend.exe` directly.
+- SQLite message storage and emotional signal tracking are native.
+- Local Gemma chat calls are native.
 
 ## Remaining Migration Work
 
-- Port SQLite schema management and migrations.
-- Port memory retrieval and emotional check-in storage.
-- Port prompt assembly and local Gemma chat calls.
-- Replace the old web API endpoints used by the current UI.
+- Expand SQLite schema compatibility with old memory tables where useful.
+- Improve memory ranking beyond the current lightweight keyword retrieval.
+- Add streaming responses.
+- Add native tests around memory, chat, and prompt behavior.
 - Rebuild native test coverage around the C++ backend.

@@ -1,6 +1,14 @@
 # Prompt Modules
 
-Runtime prompt assembly is being ported into the native C++ backend.
+Runtime prompt assembly now lives in the native C++ backend.
+
+The active counseling prompt is intentionally compact:
+
+- Be warm, direct, and grounded.
+- Avoid bullet lists unless the user asks.
+- Ask one simple question at a time.
+- Mirror the user's words and track emotional intensity.
+- Use retrieved memory only when it helps the current turn.
 
 ## Always-On Baseline
 
