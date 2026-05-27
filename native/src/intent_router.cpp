@@ -69,6 +69,14 @@ bool LooksLikeCreative(const std::string& text) {
     });
 }
 
+bool LooksLikeEmotionLabel(const std::string& text) {
+    return text == "anger" || text == "angry" || text == "rage" || text == "sadness" ||
+           text == "sad" || text == "grief" || text == "fear" || text == "scared" ||
+           text == "anxiety" || text == "anxious" || text == "shame" || text == "ashamed" ||
+           text == "guilt" || text == "lonely" || text == "overwhelmed" || text == "stress" ||
+           text == "stressed" || text == "confused" || text == "numb" || text == "hopeless";
+}
+
 }  // namespace
 
 Intent ClassifyIntent(std::string_view message) {
@@ -81,9 +89,9 @@ Intent ClassifyIntent(std::string_view message) {
     intent.emotional = ContainsAny(text, {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",
         "i'm anxious", "im anxious", "i am anxious", "i'm scared", "im scared",
-        "overwhelmed", "stressed", "lonely", "angry", "hurt", "grief", "ashamed",
+        "overwhelmed", "stress", "stressed", "lonely", "anger", "angry", "hurt", "grief", "ashamed",
         "depressed", "hopeless", "panic", "afraid", "confused about my life"
-    });
+    }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",
         "molested", "raped", "touched me", "touch me", "back there", "body is always on guard",
