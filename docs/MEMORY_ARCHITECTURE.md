@@ -13,6 +13,7 @@ The previous Python memory implementation was removed from the active runtime on
 - Relevant recall now prefers the user's own prior words, not older assistant replies.
 - The current turn is stored after retrieval so the memory layer does not simply echo the sentence the user just typed.
 - Old memories should be reopened softly, only when they reduce stress or increase clarity.
+- Natural forget requests such as "forget this", "delete that memory", and "clear this chat" remove stored chat history and matching emotion signals.
 
 ## Current SQLite Memory Surface
 

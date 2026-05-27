@@ -44,6 +44,16 @@ bool LooksLikeTask(const std::string& text) {
     });
 }
 
+bool LooksLikeForget(const std::string& text) {
+    return ContainsAny(text, {
+        "forget", "delete memory", "delete that memory", "delete this memory",
+        "remove memory", "erase memory", "clear memory", "clear this chat",
+        "delete this chat", "forget this", "forget that", "don't bring this up",
+        "dont bring this up", "do not bring this up", "stop remembering",
+        "remove that from memory", "erase that from memory"
+    });
+}
+
 bool LooksLikeCreative(const std::string& text) {
     return ContainsAny(text, {
         "write a poem", "write a story", "draft", "brainstorm", "ideas for",
@@ -57,6 +67,7 @@ Intent ClassifyIntent(std::string_view message) {
     const std::string text = Lower(message);
     Intent intent;
 
+    intent.forget = LooksLikeForget(text);
     intent.asks_for_list = ContainsAny(text, {"list", "what are the", "name the", "give me the"});
     intent.emotional = ContainsAny(text, {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",
@@ -81,7 +92,9 @@ Intent ClassifyIntent(std::string_view message) {
         "unbearable", "panic", "terrified", "emergency"
     });
 
-    if (IsGreetingOnly(text)) {
+    if (intent.forget) {
+        intent.mode = IntentMode::Forget;
+    } else if (IsGreetingOnly(text)) {
         intent.mode = IntentMode::Social;
     } else if (intent.intense) {
         intent.mode = IntentMode::Counseling;
@@ -109,6 +122,7 @@ std::string IntentModeName(IntentMode mode) {
         case IntentMode::Counseling: return "counseling";
         case IntentMode::Creative: return "creative";
         case IntentMode::Task: return "task";
+        case IntentMode::Forget: return "forget";
         case IntentMode::Clarify: return "clarify";
     }
     return "direct_answer";

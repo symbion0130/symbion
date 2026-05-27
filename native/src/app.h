@@ -21,6 +21,7 @@ public:
 private:
     HttpResponse HandleHealth() const;
     HttpResponse HandleChat(const HttpRequest& request);
+    HttpResponse HandleForget(const HttpRequest& request);
     HttpResponse HandleRecent() const;
     HttpResponse HandleEmotions() const;
     HttpResponse HandleRelevantMemory(const HttpRequest& request) const;

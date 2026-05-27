@@ -22,6 +22,7 @@ Config lives at `config\symbion.json`. Runtime data lives under `data\`.
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"I feel anxious"}'
+Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"forget that memory"}'
 ```
 
 ## Package

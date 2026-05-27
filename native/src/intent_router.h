@@ -12,6 +12,7 @@ enum class IntentMode {
     Counseling,
     Creative,
     Task,
+    Forget,
     Clarify
 };
 
@@ -20,6 +21,7 @@ struct Intent {
     bool emotional = false;
     bool intense = false;
     bool crisis = false;
+    bool forget = false;
     bool asks_for_list = false;
 };
 

@@ -40,6 +40,8 @@ public:
     std::vector<ChatMessage> RecentMessages(const std::string& session_id, int limit) const;
     std::vector<ChatMessage> RetrieveRelevant(const std::string& query, int limit) const;
     std::vector<EmotionSignal> RecentEmotionSignals(int limit) const;
+    int DeleteSession(const std::string& session_id);
+    int DeleteMatching(const std::string& query);
     int MessageCount() const;
 
 private:

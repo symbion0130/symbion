@@ -3,6 +3,7 @@
 #include "json_util.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -59,6 +60,18 @@ std::string RoutePath(const std::string& path) {
     return question == std::string::npos ? path : path.substr(0, question);
 }
 
+bool IsGeneralForget(const std::string& text) {
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return lower.find("clear this chat") != std::string::npos ||
+           lower.find("delete this chat") != std::string::npos ||
+           lower.find("forget this chat") != std::string::npos ||
+           lower.find("forget this conversation") != std::string::npos ||
+           lower.find("clear conversation") != std::string::npos;
+}
+
 }  // namespace
 
 App::App(std::filesystem::path repo_root)
@@ -93,6 +106,7 @@ HttpResponse App::Handle(const HttpRequest& request) {
                             "\",\"model\":\"" + EscapeJson(config_.gemma_model) + "\"}");
     }
     if (request.method == "POST" && path == "/api/chat") return HandleChat(request);
+    if (request.method == "POST" && path == "/api/forget") return HandleForget(request);
     return JsonResponse("{\"error\":\"not_found\"}", 404);
 }
 
@@ -114,6 +128,9 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const std::string user_message = *maybe_message;
     const Intent intent = ClassifyIntent(user_message);
     const EmotionSignal signal = DetectEmotion(user_message);
+    if (intent.forget) {
+        return HandleForget(request);
+    }
 
     const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
     const auto relevant = memory_.RetrieveRelevant(user_message, 5);
@@ -127,6 +144,29 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
                         "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +
                         std::to_string(signal.intensity) + "},"
                         "\"intent\":\"" + EscapeJson(IntentModeName(intent.mode)) + "\"}");
+}
+
+HttpResponse App::HandleForget(const HttpRequest& request) {
+    const auto maybe_message = ExtractJsonStringSimple(request.body, "message");
+    const std::string message = maybe_message.value_or("");
+    const std::string session_id = SessionFromRequest(request);
+    int deleted = 0;
+    if (message.empty() || IsGeneralForget(message)) {
+        deleted = memory_.DeleteSession(session_id);
+    } else {
+        deleted = memory_.DeleteMatching(message);
+        if (deleted == 0) {
+            deleted = memory_.DeleteSession(session_id);
+        }
+    }
+    const std::string reply = IsGeneralForget(message)
+        ? "I cleared this chat from stored history."
+        : (deleted > 0
+            ? "I deleted that from memory and cleared it from the stored chat history."
+            : "I did not find a matching memory, but I will not bring that topic forward from this chat.");
+    return JsonResponse("{\"reply\":\"" + EscapeJson(reply) + "\","
+                        "\"deleted\":" + std::to_string(deleted) + ","
+                        "\"intent\":\"forget\"}");
 }
 
 HttpResponse App::HandleRecent() const {

@@ -179,6 +179,70 @@ std::vector<EmotionSignal> MemoryStore::RecentEmotionSignals(int limit) const {
     return out;
 }
 
+int MemoryStore::DeleteSession(const std::string& session_id) {
+    if (!db_) return 0;
+    int changed = 0;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM native_messages WHERE session_id=?;", -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, session_id);
+        sqlite3_step(stmt);
+        changed += sqlite3_changes(db_);
+    }
+    sqlite3_finalize(stmt);
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM native_emotion_signals WHERE session_id=?;", -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, session_id);
+        sqlite3_step(stmt);
+        changed += sqlite3_changes(db_);
+    }
+    sqlite3_finalize(stmt);
+    return changed;
+}
+
+int MemoryStore::DeleteMatching(const std::string& query) {
+    if (!db_) return 0;
+    const auto terms = QueryTerms(query);
+    if (terms.empty()) return 0;
+    int changed = 0;
+
+    sqlite3_stmt* select = nullptr;
+    std::vector<std::string> source_texts;
+    if (sqlite3_prepare_v2(db_, "SELECT content FROM native_messages ORDER BY id DESC LIMIT 500;", -1, &select, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(select) == SQLITE_ROW) {
+            const std::string content = ColumnText(select, 0);
+            if (ContainsAny(Lower(content), terms)) {
+                source_texts.push_back(content);
+            }
+        }
+    }
+    sqlite3_finalize(select);
+
+    sqlite3_stmt* del_msg = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM native_messages WHERE content=?;", -1, &del_msg, nullptr) == SQLITE_OK) {
+        for (const auto& content : source_texts) {
+            sqlite3_reset(del_msg);
+            sqlite3_clear_bindings(del_msg);
+            BindText(del_msg, 1, content);
+            sqlite3_step(del_msg);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_msg);
+
+    sqlite3_stmt* del_emotion = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM native_emotion_signals WHERE source_text=?;", -1, &del_emotion, nullptr) == SQLITE_OK) {
+        for (const auto& content : source_texts) {
+            sqlite3_reset(del_emotion);
+            sqlite3_clear_bindings(del_emotion);
+            BindText(del_emotion, 1, content);
+            sqlite3_step(del_emotion);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_emotion);
+    return changed;
+}
+
 int MemoryStore::MessageCount() const {
     if (!db_) return 0;
     sqlite3_stmt* stmt = nullptr;
@@ -214,7 +278,9 @@ EmotionSignal DetectEmotion(std::string_view text) {
 std::vector<std::string> QueryTerms(std::string_view text) {
     static const std::unordered_set<std::string> stop = {
         "the", "and", "that", "this", "with", "have", "just", "about", "what", "when",
-        "where", "why", "how", "you", "your", "for", "are", "was", "were", "but"
+        "where", "why", "how", "you", "your", "for", "are", "was", "were", "but",
+        "forget", "delete", "remove", "erase", "memory", "memories", "bring", "again",
+        "discuss", "anymore", "remember", "clear", "from", "chat", "conversation"
     };
     std::vector<std::string> terms;
     std::string current;

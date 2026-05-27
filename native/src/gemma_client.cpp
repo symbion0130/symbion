@@ -127,6 +127,9 @@ std::string BuildSystemPrompt(const Intent& intent,
         case IntentMode::Task:
             prompt << "Help complete the task directly. Be concise and action-oriented. ";
             break;
+        case IntentMode::Forget:
+            prompt << "The user wants memory removed. Confirm calmly and do not ask them to re-explain the memory. ";
+            break;
         case IntentMode::Clarify:
             prompt << "Ask one concise clarifying question. ";
             break;
