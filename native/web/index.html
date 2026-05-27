@@ -58,6 +58,12 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
     #messages {
       overflow: auto;
       min-height: 0;
@@ -133,6 +139,18 @@
       font-weight: 600;
       cursor: pointer;
     }
+    .icon-button {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      min-width: 34px;
+      height: 34px;
+      border-color: var(--line);
+      background: var(--surface-2);
+      font-size: 22px;
+      line-height: 1;
+      padding: 0;
+    }
     button:disabled {
       opacity: .55;
       cursor: default;
@@ -149,9 +167,11 @@
     }
     @media (max-width: 640px) {
       header { align-items: flex-start; flex-direction: column; height: auto; padding: 10px 12px; }
+      .header-actions { width: 100%; justify-content: space-between; }
       main { grid-template-rows: auto 1fr auto; }
       .composer { grid-template-columns: 1fr; }
       button { width: 100%; }
+      .icon-button { width: 34px; }
       .msg { max-width: 100%; }
     }
   </style>
@@ -160,7 +180,10 @@
   <main>
     <header>
       <h1>Symbion</h1>
-      <div id="status">Starting native runtime...</div>
+      <div class="header-actions">
+        <div id="status">Starting native runtime...</div>
+        <button class="icon-button" id="new-chat" type="button" title="New chat" aria-label="New chat">+</button>
+      </div>
     </header>
     <section id="messages">
       <div class="stack" id="stack">
@@ -179,14 +202,39 @@
   </main>
   <script>
     const stack = document.getElementById("stack");
-    const empty = document.getElementById("empty");
     const form = document.getElementById("form");
     const input = document.getElementById("input");
     const send = document.getElementById("send");
     const status = document.getElementById("status");
+    const newChat = document.getElementById("new-chat");
+    let sessionId = createSessionId();
+
+    function createSessionId() {
+      const random = crypto?.getRandomValues
+        ? crypto.getRandomValues(new Uint32Array(2)).join("-")
+        : Math.random().toString(16).slice(2);
+      return `native-${Date.now()}-${random}`;
+    }
+
+    function renderEmpty() {
+      stack.innerHTML = `
+        <div class="empty" id="empty">
+          <strong>What feels most present right now?</strong><br>
+          Symbion will keep the conversation simple, remember locally, and ask one question at a time.
+        </div>
+      `;
+    }
+
+    function startNewChat() {
+      sessionId = createSessionId();
+      renderEmpty();
+      input.value = "";
+      input.focus();
+      refreshHealth();
+    }
 
     function addMessage(role, content, meta = "") {
-      empty?.remove();
+      document.getElementById("empty")?.remove();
       const node = document.createElement("div");
       node.className = `msg ${role}`;
       node.textContent = content;
@@ -228,7 +276,10 @@
       try {
         const result = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Symbion-Session": sessionId
+          },
           body: JSON.stringify({ message })
         }).then((r) => r.json());
         const emotion = result.emotion?.label
@@ -251,8 +302,9 @@
       }
     });
 
+    newChat.addEventListener("click", startNewChat);
     refreshHealth();
-    loadRecent();
+    startNewChat();
     input.focus();
   </script>
 </body>
