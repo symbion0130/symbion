@@ -16,4 +16,8 @@ if ($Url.Trim()) {
     $args += $Url.Trim()
 }
 
-Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $repo
+if ($args.Count -gt 0) {
+    Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $repo
+} else {
+    Start-Process -FilePath $exe -WorkingDirectory $repo
+}
