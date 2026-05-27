@@ -39,8 +39,8 @@ bool LooksLikeDirectQuestion(const std::string& text) {
 
 bool LooksLikeTask(const std::string& text) {
     return ContainsAny(text, {
-        "make", "create", "build", "fix", "change", "update", "delete", "move",
-        "rename", "run", "install", "open", "write code", "implement"
+        "make ", "create ", "build ", "fix ", "change ", "update ", "delete ", "move ",
+        "rename ", "run ", "install ", "open ", "write code", "implement "
     });
 }
 
@@ -90,7 +90,9 @@ Intent ClassifyIntent(std::string_view message) {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",
         "i'm anxious", "im anxious", "i am anxious", "i'm scared", "im scared",
         "overwhelmed", "stress", "stressed", "lonely", "anger", "angry", "hurt", "grief", "ashamed",
-        "depressed", "hopeless", "panic", "afraid", "confused about my life"
+        "depressed", "hopeless", "panic", "afraid", "confused about my life",
+        "talking down to me", "talks down to me", "disrespect", "disrespected",
+        "worthless", "respect me", "respect from"
     }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",

@@ -92,6 +92,54 @@ bool IsGeneralForget(const std::string& text) {
            lower.find("clear conversation") != std::string::npos;
 }
 
+bool ContainsAnyLocal(const std::string& text, const std::initializer_list<const char*> needles) {
+    return std::any_of(needles.begin(), needles.end(), [&](const char* needle) {
+        return text.find(needle) != std::string::npos;
+    });
+}
+
+int WordCount(const std::string& text) {
+    int count = 0;
+    bool in_word = false;
+    for (const unsigned char c : text) {
+        if (std::isalnum(c)) {
+            if (!in_word) ++count;
+            in_word = true;
+        } else {
+            in_word = false;
+        }
+    }
+    return count;
+}
+
+bool IsEmotionalContinuation(const std::string& message,
+                             const Intent& intent,
+                             const std::vector<ChatMessage>& recent) {
+    const std::string lower = Lower(message);
+    if (recent.empty() || intent.forget || intent.wipe_all || lower.find('?') != std::string::npos) return false;
+    if (intent.crisis || intent.emotional) return false;
+    if (WordCount(lower) > 16) return false;
+    if (ContainsAnyLocal(lower, {"write ", "make ", "create ", "build ", "fix ", "install ", "run ", "open "})) {
+        return false;
+    }
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "assistant") continue;
+        const std::string assistant = Lower(it->content);
+        return ContainsAnyLocal(assistant, {
+            "what feelings", "what emotions", "what part", "which feeling",
+            "does this anger", "does this stress", "connected to family",
+            "family, work, finances", "what is happening", "what happens",
+            "what is it like", "what does that feeling", "where do you feel",
+            "what need", "what feels", "what seems", "tell me more",
+            "most pressing feeling", "how does that make you feel", "make you feel",
+            "how does that feel", "something happening", "something else in your life",
+            "what is causing", "causing this anger", "hardest part", "need beneath",
+            "anything specific"
+        });
+    }
+    return false;
+}
+
 std::string KnownDirectAnswer(const std::string& message) {
     const std::string lower = Lower(message);
     auto remember_prefix = lower.find("remember that ");
@@ -165,7 +213,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
 
     const std::string session_id = SessionFromRequest(request);
     const std::string user_message = *maybe_message;
-    const Intent intent = ClassifyIntent(user_message);
+    Intent intent = ClassifyIntent(user_message);
     const EmotionSignal signal = DetectEmotion(user_message);
     if (pending_wipe_sessions_.contains(session_id)) {
         if (IsConfirmWipe(user_message)) {
@@ -186,6 +234,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     }
 
     const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
+    if (IsEmotionalContinuation(user_message, intent, recent)) {
+        intent.mode = IntentMode::Reflective;
+        intent.emotional = true;
+    }
     const auto relevant = memory_.RetrieveRelevant(user_message, 5);
     const auto emotions = memory_.RecentEmotionSignals(8);
     memory_.SaveMessage(session_id, "user", user_message);
