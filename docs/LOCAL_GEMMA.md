@@ -1,6 +1,6 @@
 # Local Gemma
 
-Status: implemented as the default provider in `symbion_v14.py` and `symbion.json`.
+Status: configured as the default provider in `symbion.json`. Native C++ chat calls are the next migration target.
 
 ## Target Runtime
 

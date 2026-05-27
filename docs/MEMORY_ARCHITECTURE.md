@@ -1,7 +1,15 @@
 # Symbion Memory Architecture
 
 Status: current architecture plus next-version backlog, based on
-`symbion_v14.py` and `symbion_tools.py` as of 2026-05-26.
+The previous Python memory implementation was removed from the active runtime on 2026-05-27. This document now tracks the native C++ SQLite memory port.
+
+## Native Port Targets
+
+- Open `symbion.db` directly from the C++ backend.
+- Preserve existing conversation and emotional check-in tables where practical.
+- Retrieve memories on demand instead of preloading everything.
+- Store daily emotional intensity signals for later graph/dashboard work.
+- Keep the counselor-style prompt behavior in compact native prompt modules.
 
 ## Current SQLite Memory Surface
 

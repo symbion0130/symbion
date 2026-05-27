@@ -16,7 +16,12 @@ add_executable(symbion_native WIN32
     src/symbion_shell.h
 )
 
+add_executable(symbion_backend
+    src/backend_main.cpp
+)
+
 target_compile_features(symbion_native PRIVATE cxx_std_20)
+target_compile_features(symbion_backend PRIVATE cxx_std_20)
 target_compile_definitions(symbion_native PRIVATE
     NOMINMAX
     UNICODE
@@ -26,8 +31,10 @@ target_compile_definitions(symbion_native PRIVATE
 
 if(MSVC)
     target_compile_options(symbion_native PRIVATE /W4 /permissive-)
+    target_compile_options(symbion_backend PRIVATE /W4 /permissive-)
 else()
     target_compile_options(symbion_native PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(symbion_backend PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 target_link_libraries(symbion_native PRIVATE
@@ -36,6 +43,8 @@ target_link_libraries(symbion_native PRIVATE
     user32
     winhttp
 )
+
+target_link_libraries(symbion_backend PRIVATE ws2_32)
 
 if(SYMBION_NATIVE_ENABLE_WEBVIEW2)
     set(_webview2_roots)

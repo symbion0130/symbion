@@ -17,7 +17,7 @@ Current open item groups: 0.
 - [x] The always-on prompt is measured and under the 200-line target.
 - [x] The current web UI look and feel is preserved.
 - [x] A thin native WebView2 scaffold exists under `native/`.
-- [x] Full Python test suite is passing.
+- [x] Legacy Python test suite passed before runtime removal.
 
 ## Local Gemma Default
 
@@ -122,8 +122,8 @@ Current open item groups: 0.
 
 ## Tests
 
-- [x] Install portable Python for the repo.
-- [x] Install pytest, pytest-asyncio, Playwright, and Chromium for verification.
+- [x] Remove portable Python runtime from the repo machine.
+- [x] Remove Python test/runtime dependency from the current native path.
 - [x] Add local Gemma request-construction tests.
 - [x] Add CodeCat config parsing tests.
 - [x] Add local prompt-budget tests.
@@ -132,9 +132,9 @@ Current open item groups: 0.
 - [x] Add emotional mode prompt tests.
 - [x] Add memory tool scoping tests.
 - [x] Add prompt line-budget tests.
-- [x] Run `py_compile` on edited Python.
-- [x] Run full Python suite: `143 passed, 12 skipped`.
-- [x] Run `node --check electron/main.js`.
+- [x] Build native C++ shell and backend.
+- [x] Smoke native `/health`.
+- [x] Remove Electron check path.
 - [x] Verify `symbion.json` parses.
 - [x] Run Playwright UI smoke for the Emotions tab.
 

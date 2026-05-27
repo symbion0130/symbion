@@ -1,6 +1,6 @@
 # Prompt Modules
 
-Runtime prompt assembly lives in `symbion_v14.py`.
+Runtime prompt assembly is being ported into the native C++ backend.
 
 ## Always-On Baseline
 

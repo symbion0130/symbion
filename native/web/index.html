@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Symbion</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #171b1f;
+      --line: #293039;
+      --text: #f1f4f7;
+      --muted: #a7b0bb;
+      --accent: #65d6ad;
+      --warn: #e7c168;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 100vh;
+    }
+    header, footer {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #12161a;
+    }
+    footer {
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    section {
+      display: grid;
+      align-content: center;
+      gap: 16px;
+      width: min(760px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0;
+    }
+    .status {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .value {
+      font-size: 20px;
+      line-height: 1.35;
+    }
+    .accent { color: var(--accent); }
+    .warn { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Symbion</h1></header>
+    <section>
+      <div class="status">
+        <div class="label">Runtime</div>
+        <div class="value"><span class="accent">Native C++ backend online.</span></div>
+      </div>
+      <div class="status">
+        <div class="label">Migration</div>
+        <div class="value"><span class="warn">Memory, chat, and counseling flows are being ported into C++.</span></div>
+      </div>
+    </section>
+    <footer id="health">Checking health...</footer>
+  </main>
+  <script>
+    fetch("/health")
+      .then((r) => r.json())
+      .then((h) => {
+        document.getElementById("health").textContent =
+          `Health: ${h.status} | Runtime: ${h.runtime} | Provider: ${h.provider}`;
+      })
+      .catch(() => {
+        document.getElementById("health").textContent = "Health check unavailable";
+      });
+  </script>
+</body>
+</html>

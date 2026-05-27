@@ -62,7 +62,7 @@ private:
     std::wstring status_;
     std::wstring repo_root_;
     std::wstring config_path_;
-    std::wstring python_path_;
+    std::wstring backend_path_;
     std::wstring api_key_;
     std::wstring provider_;
     std::wstring health_url_;

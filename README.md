@@ -1,87 +1,25 @@
-# Symbion v14
+# Symbion
 
-Symbion is an async local-first AI assistant with multi-provider LLM support, SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI web UI. The default provider is local Gemma through the CodeCat `llama.cpp` server, with cloud providers available as fallback/escalation.
+Symbion is being moved to a lightweight native Windows runtime:
 
-## Install
+- C++ WebView2 shell
+- C++ local backend
+- SQLite memory
+- Local Gemma by default
 
-See **[docs/SETUP.md](docs/SETUP.md)** for the full setup guide — four install paths (Worker one-liner, portable drive, system Python, dev clone), API keys, optional add-ons (Ollama, MCP, OCR, sqlite-vec), and a gotchas table.
+Electron and the tracked Python runtime have been removed. The native backend is intentionally small right now; memory, chat, and counseling features are being ported into C++ next.
 
-TL;DR:
+## Build
 
 ```powershell
-# Fresh Windows machine — Worker one-liner (clone + bootstrap + key seed in one paste)
-irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex
-# Locked-down machine variant if the above errors with "running scripts is disabled":
-powershell -ExecutionPolicy Bypass -Command "irm https://symbion-installer.symbion-0130.workers.dev?t=<INSTALL_TOKEN> | iex"
+cmake -S native -B native\build -G "Visual Studio 17 2022" -A x64 -DSYMBION_WEBVIEW2_SDK_ROOT="C:\projects\symbion\native\.deps\Microsoft.Web.WebView2.1.0.3967.48"
+cmake --build native\build --config Release
 ```
 
-```bash
-# System Python (dev clone)
-pip install -e .[web]
-python -m symbion --setup        # interactive: writes API keys to .env
-python -m symbion --web          # http://localhost:8000
+## Run
 
-# Portable drive (no system Python required)
-scripts\bootstrap-portable.bat   # one-time, ~5 min
-symbion                          # terminal REPL (default) — same as scripts\start.bat
-symbion --web                    # web UI on http://localhost:8000
+```powershell
+.\scripts\start-native.ps1
 ```
 
-## Architecture
-
-Four pillars:
-
-1. **Persona** (`SYMBION_PERSONA`, voice-loosen logic) — constitutional identity
-2. **Memory & identity** — SQLite-backed conversation memory, user profile, longitudinal identity, task engine, contradiction tracker, knowledge gap tracker
-3. **Judge -> Responder -> Self-eval loop** — pre-gen judge+emotion call (fused), generation with stale-draft fallback, post-gen quality eval with single-shot revision
-4. **Tools** — AST-based calculator, machine-wide file I/O, SSRF-protected web search and URL fetch
-
-v14 removed the probe layer (11 LLM-grading-LLM subsystems) that ran in v11-v13. These added latency and cost without providing real safety signal. They are replaced by:
-- **Offline eval harness** (`evals/`) with a golden set of 30 test cases, scored rule-based
-- **JSONL event stream** (`symbion_events.jsonl`) for real-time telemetry
-
-## Configuration
-
-Source of truth: `symbion_v14.py`, class `SymbionConfig`. Key fields:
-
-- `llm_provider`: "local_gemma" | "ollama" | "anthropic" | "openai" | "kimi" | "groq" | "deepseek" | "hf_router"
-- `local_gemma_base_url`: default `http://127.0.0.1:8088/v1`
-- `local_gemma_model`: default `local-gemma`
-- `self_eval_enabled` / `self_eval_threshold`: quality gating
-- `voice_loosen_enabled`: casual-tone adaptation
-- `tools_enabled`: calculator, file I/O, web search
-- `memory_summary_every`: turns between auto-summaries (default 16)
-
-Config persists to `symbion.json` via `--save-config`. API keys live in `.env` (never in JSON).
-
-## Tools and file access
-
-Read tools (`read_file`, `read_file_chunk`, `read_image`, `read_pdf`, `list_dir`) and write tools (`write_file`) can operate anywhere on the machine when the user explicitly asks. This is deliberate for a local desktop assistant; safety on writes is enforced by the judge/persona/tool-use discipline rather than a repo-only path sandbox.
-
-The calculator uses AST validation — no `eval()` on untrusted input. Only numeric expressions with allowed functions (sqrt, sin, cos, tan, log, abs, round, floor, ceil) and constants (pi, e).
-
-URL fetching rejects non-HTTP schemes, localhost, cloud metadata endpoints, and private/loopback IPs.
-
-## Event log
-
-Every turn appends one JSON line to `symbion_events.jsonl`:
-```bash
-cat symbion_events.jsonl | jq 'select(.self_eval.revised == true)'
-```
-
-## Eval harness
-
-Run offline against the golden set:
-```bash
-python evals/run.py --provider ollama
-```
-
-Results are saved to `evals/results/` as JSON summaries for diffing across versions.
-
-## DB migration from v13
-
-```bash
-python scripts/migrate_v13_to_v14.py symbion.db.v13.bak symbion_v14.db
-```
-
-This copies the 12 kept tables and drops the 14 probe-related tables.
+See [docs/WEBVIEW2_MIGRATION.md](docs/WEBVIEW2_MIGRATION.md) for the native migration status.

@@ -39,7 +39,7 @@ Future backlog for work that is not required for the current next-version ship.
   - [ ] Local Gemma simple chat.
   - [ ] Local Gemma with memory retrieval.
   - [ ] Cloud model fallback.
-  - [ ] Current Python pipeline.
+  - [ ] Legacy pipeline behavior, now being reimplemented in C++.
 - [ ] Reduce LLM round trips.
   - [ ] Skip judge on low-risk/local chat.
   - [ ] Run emotional classifier locally/heuristically.
@@ -55,7 +55,7 @@ Future backlog for work that is not required for the current next-version ship.
 - [ ] Decide long-term support window for:
   - [ ] Terminal mode.
   - [ ] Current FastAPI web mode.
-  - [ ] Electron shell.
-  - [ ] Existing Python backend.
+  - [x] Electron shell.
+  - [x] Tracked Python backend source.
 - [ ] Decide if spiritual mode should become an explicit user setting.
 - [ ] Decide whether emotional graphs stay in the chat sidebar or move to a separate dashboard.

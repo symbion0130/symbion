@@ -249,7 +249,9 @@ std::filesystem::path ModuleDirectory() {
 
 bool LooksLikeRepo(const std::filesystem::path& path) {
     std::error_code ec;
-    return !path.empty() && std::filesystem::exists(path / L"symbion_v14.py", ec);
+    return !path.empty() &&
+           std::filesystem::exists(path / L"symbion.json", ec) &&
+           std::filesystem::exists(path / L"native" / L"CMakeLists.txt", ec);
 }
 
 std::wstring ResolveRepoRoot() {
@@ -670,8 +672,6 @@ void SymbionShell::ResolveRuntimeConfiguration() {
     }
     if (auto native_tray = ReadConfigBool("native_tray_enabled")) {
         tray_enabled_ = *native_tray;
-    } else if (auto electron_tray = ReadConfigBool("electron_tray_enabled")) {
-        tray_enabled_ = *electron_tray;
     }
 
     if (url_ == SYMBION_NATIVE_DEFAULT_URL && web_port_ != 8000) {
@@ -710,13 +710,19 @@ void SymbionShell::ResolveRuntimeConfiguration() {
         api_key_ = ReadEnvApiKey(repo_root_);
     }
 
-    const std::filesystem::path repo(repo_root_);
-    const auto portable = repo / L".python" / L"python.exe";
+    const std::filesystem::path module_dir = ModuleDirectory();
+    const auto beside_shell = module_dir / L"symbion_backend.exe";
+    const auto build_release = std::filesystem::path(repo_root_) / L"native" / L"build" / L"Release" / L"symbion_backend.exe";
+    const auto build_debug = std::filesystem::path(repo_root_) / L"native" / L"build" / L"Debug" / L"symbion_backend.exe";
     std::error_code ec;
-    if (!repo_root_.empty() && std::filesystem::exists(portable, ec)) {
-        python_path_ = portable.wstring();
+    if (std::filesystem::exists(beside_shell, ec)) {
+        backend_path_ = beside_shell.wstring();
+    } else if (!repo_root_.empty() && std::filesystem::exists(build_release, ec)) {
+        backend_path_ = build_release.wstring();
+    } else if (!repo_root_.empty() && std::filesystem::exists(build_debug, ec)) {
+        backend_path_ = build_debug.wstring();
     } else {
-        python_path_ = L"python";
+        backend_path_ = L"symbion_backend.exe";
     }
 }
 
@@ -1173,10 +1179,10 @@ bool SymbionShell::StartBackend() {
     }
 
     CloseProcessInfo(backend_process_);
-    const std::wstring command = QuoteArg(python_path_) + L" -u -m symbion --web --host 127.0.0.1";
+    const std::wstring command = QuoteArg(backend_path_) + L" --repo " + QuoteArg(repo_root_);
     if (!LaunchProcess(command, repo_root_, CREATE_NO_WINDOW, &backend_process_)) {
         backend_status_ = L"failed to start";
-        SetStatus(L"Could not launch Python backend: " + command);
+        SetStatus(L"Could not launch native backend: " + command);
         return false;
     }
     owns_backend_ = true;
