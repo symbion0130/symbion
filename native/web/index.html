@@ -187,15 +187,12 @@
     </header>
     <section id="messages">
       <div class="stack" id="stack">
-        <div class="empty" id="empty">
-          <strong>What feels most present right now?</strong><br>
-          Symbion will keep the conversation simple, remember locally, and ask one question at a time.
-        </div>
+        <div class="empty" id="empty"></div>
       </div>
     </section>
     <form id="form">
       <div class="composer">
-        <textarea id="input" autocomplete="off" placeholder="Say what is going on..."></textarea>
+        <textarea id="input" autocomplete="off" placeholder=""></textarea>
         <button id="send" type="submit">Send</button>
       </div>
     </form>
@@ -217,12 +214,7 @@
     }
 
     function renderEmpty() {
-      stack.innerHTML = `
-        <div class="empty" id="empty">
-          <strong>What feels most present right now?</strong><br>
-          Symbion will keep the conversation simple, remember locally, and ask one question at a time.
-        </div>
-      `;
+      stack.innerHTML = `<div class="empty" id="empty"></div>`;
     }
 
     function startNewChat() {
