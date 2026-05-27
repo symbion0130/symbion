@@ -24,6 +24,7 @@ Copy-Item (Join-Path $build "symbion_native.exe") $stage
 Copy-Item (Join-Path $build "symbion_backend.exe") $stage
 Copy-Item (Join-Path $build "WebView2Loader.dll") $stage -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $repo "native\README.md") $stage
+Copy-Item (Join-Path $repo "config") (Join-Path $stage "config") -Recurse
 Copy-Item (Join-Path $repo "native\web") (Join-Path $stage "web") -Recurse
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
 Remove-Item -LiteralPath $stage -Recurse -Force

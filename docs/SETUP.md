@@ -23,3 +23,10 @@ Symbion is now a Windows native WebView2 application with a C++ backend.
 ```
 
 The shell starts the local native backend on `127.0.0.1`.
+
+## Project Layout
+
+- `config/` stores app configuration.
+- `data/` stores local SQLite runtime data.
+- `docs/source/` stores source documents.
+- `logs/` stores local runtime logs.

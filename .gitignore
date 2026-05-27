@@ -3,6 +3,8 @@
 *.txt
 
 # Local data
+data/
+logs/
 *.db
 *.db.bak
 *.db.bak.*

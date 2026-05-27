@@ -81,7 +81,7 @@ Current open item groups: 0.
 
 ## Prompt And Persona
 
-- [x] Distill `MasterDocument.docx` into `docs/COUNSELING_CANON.md`.
+- [x] Distill `docs/source/MasterDocument.docx` into `docs/COUNSELING_CANON.md`.
 - [x] Keep the counseling canon as source guidance, not prompt bulk.
 - [x] Add prompt-module docs in `docs/PROMPT_MODULES.md`.
 - [x] Add prompt line-count helper.
@@ -142,7 +142,7 @@ Current open item groups: 0.
 - [x] Replace native placeholder page with a working chat UI.
 - [x] Remove stale installer, worker, and portable-sync scripts.
 - [x] Add native build and package scripts.
-- [x] Verify `symbion.json` parses.
+- [x] Verify `config/symbion.json` parses.
 - [x] Run Playwright UI smoke for the Emotions tab.
 
 ## Current Open Items
@@ -169,7 +169,7 @@ Current open item groups: 0.
 - [x] Improve consolidation.
   - [x] Preserve source sessions.
   - [x] Avoid losing emotionally important detail.
-- [x] Import `MasterDocument.docx` into runtime memory.
+- [x] Import `docs/source/MasterDocument.docx` into runtime memory.
   - [x] Extract text.
   - [x] Chunk by section.
   - [x] Store chunks in SQLite.

@@ -34,7 +34,7 @@ Current memory-bearing tables:
 | `learning_metrics` | Global adaptive metrics. | Global. |
 | `techniques` | Promoted moves worth replicating, with optional embedding and sync source. | User-scoped retrieval. |
 | `emotional_checkins` | First-class emotional events with emotion, intensity, valence, note, confidence, and capture source. | User-scoped and retrieved on demand. |
-| `counseling_sources` | Chunked/tagged material imported from `MasterDocument.docx` for counsel-like retrieval. | Global source corpus; high-intensity and crisis chunks are excluded from default runtime retrieval. |
+| `counseling_sources` | Chunked/tagged material imported from `docs/source/MasterDocument.docx` for counsel-like retrieval. | Global source corpus; high-intensity and crisis chunks are excluded from default runtime retrieval. |
 | `embedding_meta` | Lazily created embedding model marker. | Global. |
 | `summaries_vec` | Optional sqlite-vec virtual table for summary vectors. | Mirrors `summaries.embedding`; user filtering happens after ID fetch. |
 
@@ -115,7 +115,7 @@ Privacy posture:
 
 ## Counseling Source Corpus
 
-`MasterDocument.docx` is imported into SQLite as `counseling_sources` chunks.
+`docs/source/MasterDocument.docx` is imported into SQLite as `counseling_sources` chunks.
 The importer uses standard-library DOCX XML extraction, chunks paragraphs,
 tags each chunk, and records:
 

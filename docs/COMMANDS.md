@@ -15,6 +15,8 @@ Symbion is a native C++ runtime. Electron and Python have been removed from the 
 .\native\build\Release\symbion_native.exe
 ```
 
+Config lives at `config\symbion.json`. Runtime data lives under `data\`.
+
 ## Smoke
 
 ```powershell

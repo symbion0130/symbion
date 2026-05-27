@@ -23,7 +23,10 @@ std::string ReadTextFile(const std::filesystem::path& path) {
 
 Config LoadConfig(const std::filesystem::path& repo_root) {
     Config config;
-    const std::string json = ReadTextFile(repo_root / "symbion.json");
+    std::string json = ReadTextFile(repo_root / "config" / "symbion.json");
+    if (json.empty()) {
+        json = ReadTextFile(repo_root / "symbion.json");
+    }
     if (auto value = ExtractJsonInt(json, "web_port")) config.port = *value;
     if (auto value = ExtractJsonInt(json, "local_gemma_max_tokens")) config.local_gemma_max_tokens = *value;
     if (auto value = ExtractJsonInt(json, "local_gemma_context_char_budget")) config.local_gemma_context_char_budget = *value;

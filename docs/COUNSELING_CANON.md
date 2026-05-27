@@ -1,12 +1,12 @@
 # Symbion Counseling Canon
 
-Runtime guidance distilled from `MasterDocument.docx` and `.codecat/MasterDocument.extracted.txt`.
+Runtime guidance distilled from `docs/source/MasterDocument.docx`.
 
 This document is a curated canon for future prompt/persona work. It is not a clinical protocol, not a replacement for licensed care, and not a wholesale import of the master document. The goal is to preserve the warmth, courage, Jesus-centered hope, emotional steadiness, and practical wisdom of the source while removing material that would be unsafe or unstable in an AI runtime.
 
 Prompt-module boundary: this canon should guide the short conditional emotional-processing module, not become always-on prompt bulk. Keep the runtime instruction tiny unless the user is actually asking for counsel-like support; see `docs/PROMPT_MODULES.md` for the module map and line-count budget.
 
-Runtime ingestion: `MasterDocument.docx` is imported into SQLite as tagged
+Runtime ingestion: `docs/source/MasterDocument.docx` is imported into SQLite as tagged
 `counseling_sources` chunks. Retrieval prefers `gentle_practical` chunks,
 excludes high-intensity material by default, and returns no source chunks for
 crisis/self-harm/violence/immediate-danger queries so crisis safety cannot be

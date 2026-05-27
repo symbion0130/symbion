@@ -10,3 +10,4 @@
 - Added native SQLite message storage and emotional signal tracking.
 - Added native Local Gemma chat calls and `/api/chat`.
 - Replaced the placeholder web page with a native chat UI.
+- Moved root config and source documents into `config/` and `docs/source/`.

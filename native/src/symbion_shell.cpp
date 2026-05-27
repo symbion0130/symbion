@@ -250,7 +250,8 @@ std::filesystem::path ModuleDirectory() {
 bool LooksLikeRepo(const std::filesystem::path& path) {
     std::error_code ec;
     return !path.empty() &&
-           std::filesystem::exists(path / L"symbion.json", ec) &&
+           (std::filesystem::exists(path / L"config" / L"symbion.json", ec) ||
+            std::filesystem::exists(path / L"symbion.json", ec)) &&
            std::filesystem::exists(path / L"native" / L"CMakeLists.txt", ec);
 }
 
@@ -657,7 +658,10 @@ void SymbionShell::FocusExistingInstance() {
 void SymbionShell::ResolveRuntimeConfiguration() {
     repo_root_ = ResolveRepoRoot();
     if (!repo_root_.empty()) {
-        config_path_ = (std::filesystem::path(repo_root_) / L"symbion.json").wstring();
+        const auto native_config = std::filesystem::path(repo_root_) / L"config" / L"symbion.json";
+        const auto legacy_config = std::filesystem::path(repo_root_) / L"symbion.json";
+        std::error_code ec;
+        config_path_ = std::filesystem::exists(native_config, ec) ? native_config.wstring() : legacy_config.wstring();
         config_json_ = ReadTextFile(config_path_);
     }
 
@@ -1226,7 +1230,7 @@ bool SymbionShell::RestartBackend() {
 
 bool SymbionShell::StartGemma() {
     if (gemma_start_script_.empty()) {
-        MessageBoxW(hwnd_, L"No local_gemma_start_script is configured in symbion.json.", L"Symbion", MB_ICONWARNING);
+        MessageBoxW(hwnd_, L"No local_gemma_start_script is configured in config\\symbion.json.", L"Symbion", MB_ICONWARNING);
         return false;
     }
     std::error_code ec;
@@ -1267,7 +1271,7 @@ bool SymbionShell::StopGemma() {
     MessageBoxW(
         hwnd_,
         L"No Gemma stop command is configured, and the native shell does not have a live started process to stop.\n\n"
-        L"Set local_gemma_stop_command in symbion.json or SYMBION_GEMMA_STOP_COMMAND to make this a full stop hook.",
+        L"Set local_gemma_stop_command in config\\symbion.json or SYMBION_GEMMA_STOP_COMMAND to make this a full stop hook.",
         L"Symbion",
         MB_ICONINFORMATION);
     return false;
@@ -1293,7 +1297,7 @@ void SymbionShell::SwitchProvider(const std::wstring& provider) {
 
     std::string json = ReadTextFile(config_path_);
     if (!ReplaceOrInsertJsonString(json, "llm_provider", WideToUtf8(provider)) || !WriteTextFile(config_path_, json)) {
-        MessageBoxW(hwnd_, L"Failed to update llm_provider in symbion.json.", L"Symbion", MB_ICONERROR);
+        MessageBoxW(hwnd_, L"Failed to update llm_provider in config\\symbion.json.", L"Symbion", MB_ICONERROR);
         return;
     }
 
@@ -1313,7 +1317,7 @@ void SymbionShell::OpenAnalytics() {
     if (api_key_.empty()) {
         MessageBoxW(
             hwnd_,
-            L"No api_key in symbion.json or SYMBION_API_KEY in .env. The analytics route may reject the request until a key is configured.",
+            L"No api_key in config\\symbion.json or SYMBION_API_KEY in .env. The analytics route may reject the request until a key is configured.",
             L"Symbion analytics",
             MB_ICONINFORMATION);
     }
