@@ -1,8 +1,21 @@
 #include "json_util.h"
 
-#include <regex>
-
 namespace symbion {
+
+namespace {
+
+std::optional<size_t> FindJsonValueStart(const std::string& json, const std::string& key) {
+    const std::string quoted_key = "\"" + key + "\"";
+    size_t pos = json.find(quoted_key);
+    if (pos == std::string::npos) return std::nullopt;
+    pos = json.find(':', pos + quoted_key.size());
+    if (pos == std::string::npos) return std::nullopt;
+    pos = json.find_first_not_of(" \t\r\n", pos + 1);
+    if (pos == std::string::npos) return std::nullopt;
+    return pos;
+}
+
+}  // namespace
 
 std::string EscapeJson(std::string_view value) {
     std::string out;
@@ -48,30 +61,58 @@ std::string JsonUnescape(std::string_view value) {
 }
 
 std::optional<std::string> ExtractJsonString(const std::string& json, const std::string& key) {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"");
-    std::smatch match;
-    if (!std::regex_search(json, match, pattern)) {
-        return std::nullopt;
+    return ExtractJsonStringSimple(json, key);
+}
+
+std::optional<std::string> ExtractJsonStringSimple(const std::string& json, const std::string& key) {
+    auto start = FindJsonValueStart(json, key);
+    if (!start || json[*start] != '"') return std::nullopt;
+    size_t pos = *start + 1;
+
+    std::string raw;
+    bool escaped = false;
+    for (; pos < json.size(); ++pos) {
+        const char c = json[pos];
+        if (escaped) {
+            raw.push_back('\\');
+            raw.push_back(c);
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            return JsonUnescape(raw);
+        }
+        raw.push_back(c);
     }
-    return JsonUnescape(match[1].str());
+    return std::nullopt;
 }
 
 std::optional<int> ExtractJsonInt(const std::string& json, const std::string& key) {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?\\d+)");
-    std::smatch match;
-    if (!std::regex_search(json, match, pattern)) {
-        return std::nullopt;
-    }
-    return std::stoi(match[1].str());
+    auto start = FindJsonValueStart(json, key);
+    if (!start) return std::nullopt;
+    size_t end = *start;
+    if (end < json.size() && json[end] == '-') ++end;
+    while (end < json.size() && json[end] >= '0' && json[end] <= '9') ++end;
+    if (end == *start) return std::nullopt;
+    return std::stoi(json.substr(*start, end - *start));
 }
 
 std::optional<double> ExtractJsonDouble(const std::string& json, const std::string& key) {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
-    std::smatch match;
-    if (!std::regex_search(json, match, pattern)) {
-        return std::nullopt;
+    auto start = FindJsonValueStart(json, key);
+    if (!start) return std::nullopt;
+    size_t end = *start;
+    if (end < json.size() && json[end] == '-') ++end;
+    while (end < json.size() && json[end] >= '0' && json[end] <= '9') ++end;
+    if (end < json.size() && json[end] == '.') {
+        ++end;
+        while (end < json.size() && json[end] >= '0' && json[end] <= '9') ++end;
     }
-    return std::stod(match[1].str());
+    if (end == *start) return std::nullopt;
+    return std::stod(json.substr(*start, end - *start));
 }
 
 }  // namespace symbion

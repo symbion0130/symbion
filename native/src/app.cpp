@@ -68,13 +68,14 @@ HttpResponse App::HandleHealth() const {
 }
 
 HttpResponse App::HandleChat(const HttpRequest& request) {
-    const auto maybe_message = ExtractJsonString(request.body, "message");
+    const auto maybe_message = ExtractJsonStringSimple(request.body, "message");
     if (!maybe_message || maybe_message->empty()) {
         return JsonResponse("{\"error\":\"message_required\"}", 400);
     }
 
     const std::string session_id = SessionFromRequest(request);
     const std::string user_message = *maybe_message;
+    const Intent intent = ClassifyIntent(user_message);
     const EmotionSignal signal = DetectEmotion(user_message);
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
@@ -82,12 +83,13 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
     const auto relevant = memory_.RetrieveRelevant(user_message, 5);
     const auto emotions = memory_.RecentEmotionSignals(8);
-    const std::string answer = gemma_.Chat(user_message, recent, relevant, emotions);
+    const std::string answer = gemma_.Chat(user_message, intent, recent, relevant, emotions);
     memory_.SaveMessage(session_id, "assistant", answer);
 
     return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","
                         "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +
-                        std::to_string(signal.intensity) + "}}");
+                        std::to_string(signal.intensity) + "},"
+                        "\"intent\":\"" + EscapeJson(IntentModeName(intent.mode)) + "\"}");
 }
 
 HttpResponse App::HandleRecent() const {

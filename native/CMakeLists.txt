@@ -26,6 +26,8 @@ add_executable(symbion_backend
     src/gemma_client.h
     src/http_server.cpp
     src/http_server.h
+    src/intent_router.cpp
+    src/intent_router.h
     src/json_util.cpp
     src/json_util.h
     src/memory_store.cpp

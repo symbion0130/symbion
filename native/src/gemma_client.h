@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "intent_router.h"
 #include "memory_store.h"
 
 #include <string>
@@ -13,6 +14,7 @@ public:
     explicit GemmaClient(Config config);
 
     std::string Chat(const std::string& user_message,
+                     const Intent& intent,
                      const std::vector<ChatMessage>& recent,
                      const std::vector<ChatMessage>& relevant,
                      const std::vector<EmotionSignal>& emotions) const;
@@ -21,6 +23,6 @@ private:
     Config config_;
 };
 
-std::string FallbackCounselorReply(const std::string& user_message);
+std::string FallbackReply(const std::string& user_message, const Intent& intent);
 
 }  // namespace symbion

@@ -5,8 +5,6 @@
 #include <windows.h>
 #include <winhttp.h>
 
-#include <algorithm>
-#include <cctype>
 #include <sstream>
 
 namespace symbion {
@@ -95,17 +93,41 @@ std::string HttpPostJson(const std::string& url, const std::string& body) {
     return response;
 }
 
-std::string BuildSystemPrompt(const std::vector<ChatMessage>& relevant,
+std::string BuildSystemPrompt(const Intent& intent,
+                              const std::vector<ChatMessage>& relevant,
                               const std::vector<EmotionSignal>& emotions) {
     std::ostringstream prompt;
     prompt
         << "You are Symbion, a warm local friend, mentor, counselor, guide, and advisor. "
-        << "Answer direct factual, spiritual, technical, or reference questions directly first. "
-        << "Do not turn normal questions into therapy intake. Do not mirror a factual question back as a question. "
-        << "Use the one-simple-question style only when the user is sharing feelings, distress, confusion, or asking to reflect. "
-        << "Do not give bullet lists unless the user explicitly asks. "
-        << "For intense statements, stay calm and ask a short labeling or mirroring question. "
-        << "For Bible or spiritual reference questions, give the likely passage, a brief explanation, and ask a follow-up only if useful. "
+        << "Detected mode: " << IntentModeName(intent.mode) << ". ";
+
+    switch (intent.mode) {
+        case IntentMode::Social:
+            prompt << "Respond naturally and briefly. Do not probe for feelings unless the user brings them up. ";
+            break;
+        case IntentMode::DirectAnswer:
+            prompt << "Answer directly first. For factual, Bible, spiritual, technical, or reference questions, provide the requested information. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
+            break;
+        case IntentMode::Reflective:
+            prompt << "The user is sharing feelings or reflection. Mirror gently and ask one simple follow-up question. ";
+            break;
+        case IntentMode::Counseling:
+            prompt << "The user may be distressed. Stay calm, concrete, and compassionate. Ask one short grounding or labeling question. ";
+            break;
+        case IntentMode::Creative:
+            prompt << "Help create or brainstorm. Give usable output, then ask only if a choice is genuinely needed. ";
+            break;
+        case IntentMode::Task:
+            prompt << "Help complete the task directly. Be concise and action-oriented. ";
+            break;
+        case IntentMode::Clarify:
+            prompt << "Ask one concise clarifying question. ";
+            break;
+    }
+
+    prompt
+        << "Avoid bullet lists unless the user asks for a list or structure. "
+        << "Questions are not the default; usefulness is the default. "
         << "You are not a replacement for emergency help, but do not sound legalistic.\n";
 
     if (!emotions.empty()) {
@@ -132,52 +154,21 @@ std::string ExtractAssistantContent(const std::string& json) {
     return {};
 }
 
-std::string Lower(std::string_view value) {
-    std::string out(value);
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return out;
-}
-
-std::string DirectAnswerOverride(const std::string& user_message) {
-    const std::string text = Lower(user_message);
-    const bool asks_fish_tax =
-        text.find("fish") != std::string::npos &&
-        (text.find("tax") != std::string::npos || text.find("collect") != std::string::npos) &&
-        (text.find("mouth") != std::string::npos || text.find("money") != std::string::npos || text.find("coin") != std::string::npos);
-    if (asks_fish_tax) {
-        return "That is Matthew 17:24-27. Jesus tells Peter to go to the lake, catch a fish, and take the coin from its mouth to pay the temple tax for both of them.";
-    }
-    const bool asks_about_jesus =
-        text.find("jesus") != std::string::npos &&
-        (text.find("tell me") != std::string::npos ||
-         text.find("who is") != std::string::npos ||
-         text.find("about") != std::string::npos);
-    if (asks_about_jesus) {
-        return "Jesus is the central figure of Christianity. The New Testament presents him as the Son of God and Messiah: a Jewish teacher who proclaimed the kingdom of God, healed people, welcomed sinners and outsiders, taught love of God and neighbor, was crucified under Pontius Pilate, and, according to Christian belief, rose from the dead. A good starting place is the Gospel of John for his identity and the Gospel of Luke for his compassion and teachings.";
-    }
-    return {};
-}
-
 }  // namespace
 
 GemmaClient::GemmaClient(Config config) : config_(std::move(config)) {}
 
 std::string GemmaClient::Chat(const std::string& user_message,
+                              const Intent& intent,
                               const std::vector<ChatMessage>& recent,
                               const std::vector<ChatMessage>& relevant,
                               const std::vector<EmotionSignal>& emotions) const {
-    if (const std::string direct = DirectAnswerOverride(user_message); !direct.empty()) {
-        return direct;
-    }
-
     std::ostringstream messages;
     messages << "{\"model\":\"" << EscapeJson(config_.gemma_model) << "\","
              << "\"temperature\":" << config_.temperature << ","
              << "\"max_tokens\":" << config_.local_gemma_max_tokens << ","
              << "\"messages\":[";
-    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(relevant, emotions)) << "\"}";
+    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(intent, relevant, emotions)) << "\"}";
     for (const auto& msg : recent) {
         messages << ",{\"role\":\"" << EscapeJson(msg.role) << "\",\"content\":\"" << EscapeJson(msg.content) << "\"}";
     }
@@ -190,15 +181,24 @@ std::string GemmaClient::Chat(const std::string& user_message,
     if (!answer.empty()) {
         return answer;
     }
-    return FallbackCounselorReply(user_message);
+    return FallbackReply(user_message, intent);
 }
 
-std::string FallbackCounselorReply(const std::string& user_message) {
+std::string FallbackReply(const std::string& user_message, const Intent& intent) {
     const EmotionSignal signal = DetectEmotion(user_message);
-    if (!signal.label.empty()) {
+    if (intent.mode == IntentMode::Social) {
+        return "Hey. Good to see you.";
+    }
+    if (intent.mode == IntentMode::Reflective || intent.mode == IntentMode::Counseling || !signal.label.empty()) {
         return "It sounds like there is some " + signal.label + " here. What feels most intense about it right now?";
     }
-    return "What feels most important in that right now?";
+    if (intent.mode == IntentMode::Creative) {
+        return "I can help draft that. What shape do you want it to take?";
+    }
+    if (intent.mode == IntentMode::Task) {
+        return "I can help with that. Send me the details or the file you want changed.";
+    }
+    return "I can answer that directly, but the local model did not return a response. Try asking it once more in a little more detail.";
 }
 
 }  // namespace symbion
