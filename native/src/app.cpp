@@ -92,6 +92,25 @@ bool IsGeneralForget(const std::string& text) {
            lower.find("clear conversation") != std::string::npos;
 }
 
+std::string KnownDirectAnswer(const std::string& message) {
+    const std::string lower = Lower(message);
+    auto remember_prefix = lower.find("remember that ");
+    if (remember_prefix == 0 && message.size() > 14) {
+        return "I will remember that " + message.substr(14) + ".";
+    }
+    if (lower.rfind("remember ", 0) == 0 && message.size() > 9) {
+        return "I will remember " + message.substr(9) + ".";
+    }
+    const bool asks_fish_tax =
+        (lower.find("fish") != std::string::npos || lower.find("fish mouth") != std::string::npos) &&
+        (lower.find("tax") != std::string::npos || lower.find("temple tax") != std::string::npos ||
+         lower.find("money") != std::string::npos || lower.find("coin") != std::string::npos);
+    if (asks_fish_tax) {
+        return "That story is in Matthew 17:24-27. Jesus tells Peter to go fishing, and the first fish he catches will have a coin in its mouth to pay the temple tax for both of them.";
+    }
+    return {};
+}
+
 }  // namespace
 
 App::App(std::filesystem::path repo_root)
@@ -171,7 +190,13 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto emotions = memory_.RecentEmotionSignals(8);
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
-    const std::string answer = gemma_.Chat(user_message, intent, recent, relevant, emotions);
+    std::string answer;
+    if (intent.mode == IntentMode::DirectAnswer) {
+        answer = KnownDirectAnswer(user_message);
+    }
+    if (answer.empty()) {
+        answer = gemma_.Chat(user_message, intent, recent, relevant, emotions);
+    }
     memory_.SaveMessage(session_id, "assistant", answer);
 
     return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","

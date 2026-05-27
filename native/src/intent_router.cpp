@@ -64,7 +64,7 @@ bool LooksLikeWipeAll(const std::string& text) {
 
 bool LooksLikeCreative(const std::string& text) {
     return ContainsAny(text, {
-        "write a poem", "write a story", "draft", "brainstorm", "ideas for",
+        "write a poem", "write a story", "write a short", "write me", "draft", "brainstorm", "ideas for",
         "make a song", "roleplay"
     });
 }
@@ -89,11 +89,15 @@ Intent ClassifyIntent(std::string_view message) {
         "molested", "raped", "touched me", "touch me", "back there", "body is always on guard",
         "always on guard", "freeze instead", "fight back", "blaming myself", "dirty",
         "scared to sleep", "ashamed for surviving", "after what happened", "smelled",
-        "smell", "felt scared", "suddenly felt scared"
+        "smell", "felt scared", "suddenly felt scared", "body freezes", "my body freezes",
+        "someone raises their voice", "raises their voice", "replaying what happened",
+        "keep replaying", "cannot calm down", "can't calm down"
     });
     intent.crisis = ContainsAny(text, {
         "suicide", "kill myself", "end my life", "can't go on", "cannot go on",
-        "want to die", "wants to die",
+        "want to die", "wants to die", "do not want to be alive", "don't want to be alive",
+        "dont want to be alive", "not want to be alive", "wish i was dead",
+        "hurt myself", "harm myself", "cut myself",
         "want to disappear", "do not want to wake up", "don't want to wake up",
         "plan to end my life", "pills", "overdose", "holding a gun", "holding pills"
     });
