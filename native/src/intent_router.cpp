@@ -64,8 +64,19 @@ Intent ClassifyIntent(std::string_view message) {
         "overwhelmed", "stressed", "lonely", "angry", "hurt", "grief", "ashamed",
         "depressed", "hopeless", "panic", "afraid", "confused about my life"
     });
-    intent.intense = ContainsAny(text, {
+    const bool trauma_related = ContainsAny(text, {
+        "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",
+        "molested", "raped", "touched me", "touch me", "back there", "body is always on guard",
+        "always on guard", "freeze instead", "fight back", "blaming myself", "dirty",
+        "scared to sleep", "ashamed for surviving", "after what happened"
+    });
+    intent.crisis = ContainsAny(text, {
         "suicide", "kill myself", "end my life", "can't go on", "cannot go on",
+        "want to die", "wants to die",
+        "want to disappear", "do not want to wake up", "don't want to wake up",
+        "plan to end my life", "pills", "overdose", "holding a gun", "holding pills"
+    });
+    intent.intense = intent.crisis || ContainsAny(text, {
         "unbearable", "panic", "terrified", "emergency"
     });
 
@@ -73,7 +84,8 @@ Intent ClassifyIntent(std::string_view message) {
         intent.mode = IntentMode::Social;
     } else if (intent.intense) {
         intent.mode = IntentMode::Counseling;
-    } else if (intent.emotional) {
+    } else if (intent.emotional || trauma_related) {
+        intent.emotional = true;
         intent.mode = IntentMode::Reflective;
     } else if (LooksLikeCreative(text)) {
         intent.mode = IntentMode::Creative;

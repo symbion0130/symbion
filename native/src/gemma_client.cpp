@@ -106,7 +106,7 @@ std::string BuildSystemPrompt(const Intent& intent,
             prompt << "Respond naturally and briefly. Do not probe for feelings unless the user brings them up. ";
             break;
         case IntentMode::DirectAnswer:
-            prompt << "Answer directly first. For factual, Bible, spiritual, technical, or reference questions, provide the requested information. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
+            prompt << "Be a good teacher across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
             break;
         case IntentMode::Reflective:
             prompt << "The user is sharing feelings or reflection. Mirror gently and ask one simple follow-up question. ";
@@ -126,7 +126,7 @@ std::string BuildSystemPrompt(const Intent& intent,
     }
 
     prompt
-        << "Avoid bullet lists unless the user asks for a list or structure. "
+        << "Use short paragraphs by default. Avoid markdown bullet lists unless the user asks for a list, steps, or structure. "
         << "Questions are not the default; usefulness is the default. "
         << "You are not a replacement for emergency help, but do not sound legalistic.\n";
 
@@ -198,7 +198,15 @@ std::string FallbackReply(const std::string& user_message, const Intent& intent)
     if (intent.mode == IntentMode::Task) {
         return "I can help with that. Send me the details or the file you want changed.";
     }
-    return "I can answer that directly, but the local model did not return a response. Try asking it once more in a little more detail.";
+    return "I can teach that directly, but the local model did not return a response. Try asking it once more in a little more detail.";
+}
+
+std::string CrisisReply(const std::string& user_message, const Intent& intent) {
+    (void)user_message;
+    if (!intent.crisis) {
+        return FallbackReply(user_message, intent);
+    }
+    return "I'm really glad you said that out loud. This is a stay-alive moment, not a solve-your-whole-life moment. If you might hurt yourself or cannot stay safe, call or text 988 now in the US and Canada, or call your local emergency number. If there are pills, weapons, or anything you could use to hurt yourself near you, move away from them or put them across the room while you reach someone. Tell one real person nearby: \"I need help staying safe right now.\" Stay with me here too: are you away from the immediate means right now?";
 }
 
 }  // namespace symbion

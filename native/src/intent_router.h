@@ -19,6 +19,7 @@ struct Intent {
     IntentMode mode = IntentMode::DirectAnswer;
     bool emotional = false;
     bool intense = false;
+    bool crisis = false;
     bool asks_for_list = false;
 };
 

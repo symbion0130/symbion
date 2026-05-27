@@ -24,5 +24,6 @@ private:
 };
 
 std::string FallbackReply(const std::string& user_message, const Intent& intent);
+std::string CrisisReply(const std::string& user_message, const Intent& intent);
 
 }  // namespace symbion

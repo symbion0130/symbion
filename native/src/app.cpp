@@ -80,6 +80,15 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
 
+    if (intent.crisis) {
+        const std::string answer = CrisisReply(user_message, intent);
+        memory_.SaveMessage(session_id, "assistant", answer);
+        return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","
+                            "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +
+                            std::to_string(signal.intensity) + "},"
+                            "\"intent\":\"" + EscapeJson(IntentModeName(intent.mode)) + "\"}");
+    }
+
     const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
     const auto relevant = memory_.RetrieveRelevant(user_message, 5);
     const auto emotions = memory_.RecentEmotionSignals(8);
