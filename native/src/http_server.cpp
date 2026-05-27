@@ -41,6 +41,24 @@ bool SendAll(SOCKET socket, std::string_view data) {
     return true;
 }
 
+size_t HeaderContentLength(std::string_view request) {
+    const size_t header_end = request.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) return 0;
+    std::string headers(request.substr(0, header_end));
+    std::istringstream lines(headers);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        if (Lower(line.substr(0, colon)) == "content-length") {
+            const std::string value = line.substr(colon + 1);
+            return static_cast<size_t>(std::stoul(value));
+        }
+    }
+    return 0;
+}
+
 HttpRequest ParseRequest(std::string request) {
     HttpRequest parsed;
     const size_t header_end = request.find("\r\n\r\n");
@@ -90,6 +108,19 @@ void HandleClient(SOCKET client, const RouteHandler& handler) {
         return;
     }
     request.resize(static_cast<size_t>(received));
+
+    size_t header_end = request.find("\r\n\r\n");
+    if (header_end != std::string::npos) {
+        const size_t expected_body = HeaderContentLength(request);
+        while (request.size() < header_end + 4 + expected_body) {
+            char buffer[8192] = {};
+            const int more = recv(client, buffer, static_cast<int>(sizeof(buffer)), 0);
+            if (more <= 0) break;
+            request.append(buffer, static_cast<size_t>(more));
+            header_end = request.find("\r\n\r\n");
+        }
+    }
+
     HttpResponse response = handler(ParseRequest(std::move(request)));
     SendAll(client, Serialize(response));
     shutdown(client, SD_BOTH);
