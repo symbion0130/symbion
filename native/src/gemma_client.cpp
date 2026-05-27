@@ -116,7 +116,7 @@ std::string BuildSystemPrompt(const Intent& intent,
             break;
         case IntentMode::Counseling:
             if (intent.crisis) {
-                prompt << "The user may be in self-harm danger. You are the counselor/guide, not a lawyer. Keep the reply under 85 words. Do not dump boilerplate, do not panic, and do not sound legalistic. Be unshaken and peace-loving. Start with warm presence, lower intensity, reduce the time horizon, and help them stay with the next breath. If they mention pills, weapons, a plan, tonight, or immediate means, gently ask them to put distance between themselves and the means right now before anything else. You may mention reaching one real person or 988 only as a calm lifeline, not as a handoff. Ask exactly one short safety or grounding question. ";
+                prompt << "The user may be in self-harm danger. You are the counselor/guide, not a lawyer. Keep the reply under 100 words. Do not dump boilerplate, do not panic, and do not sound legalistic. Be unshaken and peace-loving. Speak directly to the user with 'you' and 'me'. Start with the meaning of this sentence in your own natural words: 'You can talk to me about anything, and we can work through this slowly and gently together.' Frame self-harm thoughts as a bundle of many emotions tangled together with stress, without minimizing them. Ask exactly one short question that invites them to name some emotions they feel right now. Do not ask where they are. Only if they explicitly mention pills, weapons, a plan, tonight, or immediate means, gently ask them to put distance between themselves and the means right now. You may mention reaching one real person or 988 only as a calm lifeline, not as a handoff. ";
             } else {
                 prompt << "The user may be distressed. Keep the reply under 90 words. Stay calm, concrete, compassionate, and nonreactive. Reduce stress and ask exactly one short grounding or labeling question. Do not lecture, make a list, or give multiple techniques unless the user asks. ";
             }
@@ -222,7 +222,7 @@ std::string CrisisReply(const std::string& user_message, const Intent& intent) {
     if (!intent.crisis) {
         return FallbackReply(user_message, intent);
     }
-    return "I'm really glad you said that out loud. Stay with this next minute with me. If you might act on it or there is something nearby you could use to hurt yourself, move away from it if you can and reach one real person right now. You can also call or text 988 in the US and Canada. Are you away from the immediate means right now?";
+    return "You can talk to me about anything. These thoughts can be bundles of many emotions tangled together with a lot of stress, and we can work through it slowly and gently. Can you name some of the emotions you feel right now?";
 }
 
 }  // namespace symbion
