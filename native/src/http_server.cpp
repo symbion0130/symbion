@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <exception>
 #include <iostream>
 #include <sstream>
 
@@ -121,7 +122,14 @@ void HandleClient(SOCKET client, const RouteHandler& handler) {
         }
     }
 
-    HttpResponse response = handler(ParseRequest(std::move(request)));
+    HttpResponse response;
+    try {
+        response = handler(ParseRequest(std::move(request)));
+    } catch (const std::exception& ex) {
+        response = JsonResponse(std::string("{\"error\":\"internal_error\",\"detail\":\"") + ex.what() + "\"}", 500);
+    } catch (...) {
+        response = JsonResponse("{\"error\":\"internal_error\"}", 500);
+    }
     SendAll(client, Serialize(response));
     shutdown(client, SD_BOTH);
     closesocket(client);

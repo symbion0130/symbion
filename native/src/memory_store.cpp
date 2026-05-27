@@ -42,6 +42,11 @@ void BindText(sqlite3_stmt* stmt, int index, const std::string& value) {
     sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
 }
 
+std::string ColumnText(sqlite3_stmt* stmt, int index) {
+    const unsigned char* text = sqlite3_column_text(stmt, index);
+    return text ? reinterpret_cast<const char*>(text) : "";
+}
+
 }  // namespace
 
 MemoryStore::~MemoryStore() {
@@ -124,9 +129,9 @@ std::vector<ChatMessage> MemoryStore::RecentMessages(const std::string& session_
     sqlite3_bind_int(stmt, 2, limit);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         out.push_back({
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)),
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)),
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)),
+            ColumnText(stmt, 0),
+            ColumnText(stmt, 1),
+            ColumnText(stmt, 2),
         });
     }
     sqlite3_finalize(stmt);
@@ -145,9 +150,9 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
     while (sqlite3_step(stmt) == SQLITE_ROW && static_cast<int>(out.size()) < limit) {
         ChatMessage msg{
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)),
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)),
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)),
+            ColumnText(stmt, 0),
+            ColumnText(stmt, 1),
+            ColumnText(stmt, 2),
         };
         if (ContainsAny(Lower(msg.content), terms)) {
             out.push_back(std::move(msg));
@@ -166,7 +171,7 @@ std::vector<EmotionSignal> MemoryStore::RecentEmotionSignals(int limit) const {
     sqlite3_bind_int(stmt, 1, limit);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         out.push_back({
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)),
+            ColumnText(stmt, 0),
             sqlite3_column_int(stmt, 1),
         });
     }

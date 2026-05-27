@@ -149,6 +149,14 @@ std::string DirectAnswerOverride(const std::string& user_message) {
     if (asks_fish_tax) {
         return "That is Matthew 17:24-27. Jesus tells Peter to go to the lake, catch a fish, and take the coin from its mouth to pay the temple tax for both of them.";
     }
+    const bool asks_about_jesus =
+        text.find("jesus") != std::string::npos &&
+        (text.find("tell me") != std::string::npos ||
+         text.find("who is") != std::string::npos ||
+         text.find("about") != std::string::npos);
+    if (asks_about_jesus) {
+        return "Jesus is the central figure of Christianity. The New Testament presents him as the Son of God and Messiah: a Jewish teacher who proclaimed the kingdom of God, healed people, welcomed sinners and outsiders, taught love of God and neighbor, was crucified under Pontius Pilate, and, according to Christian belief, rose from the dead. A good starting place is the Gospel of John for his identity and the Gospel of Luke for his compassion and teachings.";
+    }
     return {};
 }
 
