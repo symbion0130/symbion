@@ -11,3 +11,5 @@
 - Added native Local Gemma chat calls and `/api/chat`.
 - Replaced the placeholder web page with a native chat UI.
 - Moved root config and source documents into `config/` and `docs/source/`.
+- Tuned native counseling prompts around rooted calm, stress reduction, and delicate memory reopening.
+- Adjusted memory retrieval to prefer user-authored memories and avoid treating the current turn as old memory.

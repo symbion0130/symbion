@@ -23,6 +23,7 @@ private:
     HttpResponse HandleChat(const HttpRequest& request);
     HttpResponse HandleRecent() const;
     HttpResponse HandleEmotions() const;
+    HttpResponse HandleRelevantMemory(const HttpRequest& request) const;
     HttpResponse HandleHome() const;
 
     std::filesystem::path repo_root_;

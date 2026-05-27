@@ -10,6 +10,9 @@ The previous Python memory implementation was removed from the active runtime on
 - `/api/messages/recent` retrieves recent conversation history.
 - `/api/emotions/recent` retrieves recent emotional signals.
 - `/api/chat` retrieves recent and relevant memory on demand before calling Local Gemma.
+- Relevant recall now prefers the user's own prior words, not older assistant replies.
+- The current turn is stored after retrieval so the memory layer does not simply echo the sentence the user just typed.
+- Old memories should be reopened softly, only when they reduce stress or increase clarity.
 
 ## Current SQLite Memory Surface
 

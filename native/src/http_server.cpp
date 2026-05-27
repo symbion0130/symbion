@@ -73,8 +73,7 @@ HttpRequest ParseRequest(std::string request) {
         std::istringstream first(line);
         std::string target;
         first >> parsed.method >> target;
-        const size_t query = target.find('?');
-        parsed.path = target.substr(0, query);
+        parsed.path = target;
     }
 
     while (std::getline(lines, line)) {

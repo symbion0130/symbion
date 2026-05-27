@@ -68,7 +68,8 @@ Intent ClassifyIntent(std::string_view message) {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",
         "molested", "raped", "touched me", "touch me", "back there", "body is always on guard",
         "always on guard", "freeze instead", "fight back", "blaming myself", "dirty",
-        "scared to sleep", "ashamed for surviving", "after what happened"
+        "scared to sleep", "ashamed for surviving", "after what happened", "smelled",
+        "smell", "felt scared", "suddenly felt scared"
     });
     intent.crisis = ContainsAny(text, {
         "suicide", "kill myself", "end my life", "can't go on", "cannot go on",

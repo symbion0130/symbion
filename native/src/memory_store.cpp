@@ -146,7 +146,7 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     if (terms.empty()) return out;
 
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT role, content, created_at FROM native_messages ORDER BY id DESC LIMIT 300;";
+    const char* sql = "SELECT role, content, created_at FROM native_messages WHERE role='user' ORDER BY id DESC LIMIT 300;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
     while (sqlite3_step(stmt) == SQLITE_ROW && static_cast<int>(out.size()) < limit) {
         ChatMessage msg{
