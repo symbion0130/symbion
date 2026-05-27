@@ -1,6 +1,6 @@
 # Symbion v14
 
-Symbion is an async Python AI assistant with multi-provider LLM support, SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI web UI. It is a behavioral-safety research harness that uses behavioral probes as proxies for internal state — not a chatbot wrapper.
+Symbion is an async local-first AI assistant with multi-provider LLM support, SQLite persistence, a judge-model safety layer, self-evaluation with revision, longitudinal identity, and a FastAPI web UI. The default provider is local Gemma through the CodeCat `llama.cpp` server, with cloud providers available as fallback/escalation.
 
 ## Install
 
@@ -34,7 +34,7 @@ Four pillars:
 1. **Persona** (`SYMBION_PERSONA`, voice-loosen logic) — constitutional identity
 2. **Memory & identity** — SQLite-backed conversation memory, user profile, longitudinal identity, task engine, contradiction tracker, knowledge gap tracker
 3. **Judge -> Responder -> Self-eval loop** — pre-gen judge+emotion call (fused), generation with stale-draft fallback, post-gen quality eval with single-shot revision
-4. **Tools** — AST-based calculator, workspace-sandboxed file I/O, SSRF-protected web search and URL fetch
+4. **Tools** — AST-based calculator, machine-wide file I/O, SSRF-protected web search and URL fetch
 
 v14 removed the probe layer (11 LLM-grading-LLM subsystems) that ran in v11-v13. These added latency and cost without providing real safety signal. They are replaced by:
 - **Offline eval harness** (`evals/`) with a golden set of 30 test cases, scored rule-based
@@ -44,7 +44,9 @@ v14 removed the probe layer (11 LLM-grading-LLM subsystems) that ran in v11-v13.
 
 Source of truth: `symbion_v14.py`, class `SymbionConfig`. Key fields:
 
-- `llm_provider`: "ollama" | "anthropic" | "openai" | "kimi"
+- `llm_provider`: "local_gemma" | "ollama" | "anthropic" | "openai" | "kimi" | "groq" | "deepseek" | "hf_router"
+- `local_gemma_base_url`: default `http://127.0.0.1:8088/v1`
+- `local_gemma_model`: default `local-gemma`
 - `self_eval_enabled` / `self_eval_threshold`: quality gating
 - `voice_loosen_enabled`: casual-tone adaptation
 - `tools_enabled`: calculator, file I/O, web search
@@ -52,9 +54,9 @@ Source of truth: `symbion_v14.py`, class `SymbionConfig`. Key fields:
 
 Config persists to `symbion.json` via `--save-config`. API keys live in `.env` (never in JSON).
 
-## Tools and the workspace sandbox
+## Tools and file access
 
-Read tools (`read_file`, `read_file_chunk`, `read_image`, `read_pdf`, `list_dir`) can read anywhere on the machine — a deliberate widening (2026-04-25) so Symbion can help with files outside its own repo. Write tools (`write_file`) are sandboxed to the **repo root** (`_REPO_ROOT`, i.e. the directory `symbion_v14.py` lives in); paths that escape via `../`, absolute paths outside the repo, and symlinks targeting outside the repo are all rejected.
+Read tools (`read_file`, `read_file_chunk`, `read_image`, `read_pdf`, `list_dir`) and write tools (`write_file`) can operate anywhere on the machine when the user explicitly asks. This is deliberate for a local desktop assistant; safety on writes is enforced by the judge/persona/tool-use discipline rather than a repo-only path sandbox.
 
 The calculator uses AST validation — no `eval()` on untrusted input. Only numeric expressions with allowed functions (sqrt, sin, cos, tan, log, abs, round, floor, ceil) and constants (pi, e).
 

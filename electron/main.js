@@ -401,6 +401,7 @@ function trayIconPath() {
 // supported providers correspond to the four responder/judge pairings
 // documented in CLAUDE.md ("Provider conventions").
 const SUPPORTED_PROVIDERS = [
+  { id: 'local_gemma', label: 'Local Gemma - CodeCat llama.cpp' },
   { id: 'anthropic', label: 'Anthropic — Sonnet 4.6 + Haiku 4.5' },
   { id: 'groq',      label: 'Groq — Llama 3.3 70b + 3.1 8b' },
   { id: 'kimi',      label: 'Moonshot — K2.6 + v1-8k' },
@@ -412,9 +413,9 @@ function readActiveProvider() {
   // from switchProvider) are reflected without restarting Electron.
   try {
     const fresh = loadConfig();
-    return String(fresh.llm_provider || 'anthropic').toLowerCase();
+    return String(fresh.llm_provider || 'local_gemma').toLowerCase();
   } catch (e) {
-    return 'anthropic';
+    return 'local_gemma';
   }
 }
 

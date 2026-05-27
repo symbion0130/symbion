@@ -426,6 +426,31 @@ TOOL_SCHEMAS = [
             "required": ["move", "query"],
         },
     },
+    {
+        "name": "record_emotional_checkin",
+        "description": "Record an explicit user-stated emotion/intensity into SQLite. Use when the user clearly names how they feel or gives an intensity; do not guess aggressively.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emotion": {"type": "string", "description": "Short emotion label, e.g. sad, angry, anxious, grieving."},
+                "intensity": {"type": "integer", "description": "Optional 0-100 intensity.", "default": 0},
+                "note": {"type": "string", "description": "Brief source note in the user's words.", "default": ""},
+            },
+            "required": ["emotion"],
+        },
+    },
+    {
+        "name": "search_emotional_history",
+        "description": "Retrieve recent emotional check-ins for the active user. Use only when emotional history would help this turn; do not preload everything.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emotion": {"type": "string", "description": "Optional emotion filter.", "default": ""},
+                "days": {"type": "integer", "description": "Look-back window in days.", "default": 30},
+                "limit": {"type": "integer", "description": "Maximum rows to return.", "default": 10},
+            },
+        },
+    },
 ]
 
 
@@ -1082,6 +1107,7 @@ class SymbionTools:
         "get_weather","get_local_time",
         "get_user_recent_activity",
         "promote_technique",
+        "record_emotional_checkin","search_emotional_history",
     })
     _MAX_PATH_LEN = 1024
     _MAX_URL_LEN = 2048
@@ -1219,6 +1245,20 @@ class SymbionTools:
             out["move"] = mv
             qv = _str("query", 1000, required=False)
             out["query"] = qv or ""
+        elif tool == "record_emotional_checkin":
+            em = _str("emotion", 64)
+            if em is None:
+                return False, "record_emotional_checkin requires emotion", {}
+            out["emotion"] = em.lower()
+            inten = _int("intensity", default=0, lo=0, hi=100)
+            out["intensity"] = inten if inten is not None else 0
+            out["note"] = _str("note", 500, required=False) or ""
+        elif tool == "search_emotional_history":
+            out["emotion"] = _str("emotion", 64, required=False) or ""
+            days = _int("days", default=30, lo=1, hi=3650)
+            limit = _int("limit", default=10, lo=1, hi=100)
+            out["days"] = days if days is not None else 30
+            out["limit"] = limit if limit is not None else 10
 
         return True, "", out
 
@@ -1247,6 +1287,40 @@ class SymbionTools:
                 f"conversation is usually the max; most turns don't have a "
                 f"move worth preserving.")
 
+    def record_emotional_checkin(self, emotion: str, intensity: int = 0,
+                                  note: str = "", session: str = "",
+                                  user: str = "aaron") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            cid = self._memory.save_emotional_checkin(
+                session=session, user=user or "aaron", emotion=emotion,
+                intensity=intensity if intensity else None, note=note,
+                confidence=1.0, captured_by="tool")
+        except Exception as ex:
+            return f"Error: emotional check-in save failed: {type(ex).__name__}: {ex}"
+        return f"Emotional check-in #{cid} recorded." if cid else "No check-in recorded."
+
+    def search_emotional_history(self, emotion: str = "", days: int = 30,
+                                  limit: int = 10, user: str = "aaron") -> str:
+        if self._memory is None:
+            return "Error: memory not wired to tools layer"
+        try:
+            rows = self._memory.get_recent_emotional_checkins(
+                user=user or "aaron", limit=limit, days=days, emotion=emotion)
+        except Exception as ex:
+            return f"Error: emotional history search failed: {type(ex).__name__}: {ex}"
+        if not rows:
+            return "(No emotional check-ins found for that window.)"
+        out = ["Recent emotional check-ins:"]
+        for r in rows:
+            ts = (r.get("timestamp") or "")[:16].replace("T", " ")
+            inten = r.get("intensity")
+            level = f" intensity={inten}" if inten is not None else ""
+            note = (r.get("note") or r.get("trigger") or "").replace("\n", " ")[:160]
+            out.append(f"- [{ts}] {r.get('emotion','')}{level}: {note}")
+        return "\n".join(out)
+
     async def dispatch(self, tool: str, args: Dict, cfg: "SymbionConfig",
                        responder=None, responder_model: str = "",
                        active_user: str = "",
@@ -1273,4 +1347,12 @@ class SymbionTools:
         if tool=="promote_technique":
             return self.promote_technique(a["move"], a["query"],
                                             session=session, user=active_user or "aaron")
+        if tool=="record_emotional_checkin":
+            return self.record_emotional_checkin(
+                a["emotion"], a.get("intensity", 0), a.get("note", ""),
+                session=session, user=active_user or "aaron")
+        if tool=="search_emotional_history":
+            return self.search_emotional_history(
+                a.get("emotion", ""), a.get("days", 30), a.get("limit", 10),
+                user=active_user or "aaron")
         return f"Unknown tool: {tool}"

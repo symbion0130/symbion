@@ -20,7 +20,7 @@ Useful flags that stack with the above:
 |---|---|---|
 | `--port N` | 8000 | Different web port |
 | `--host 127.0.0.1` | 0.0.0.0 | Localhost only, no LAN exposure |
-| `--provider anthropic\|openai\|ollama\|kimi` | anthropic | Switch responder |
+| `--provider local_gemma\|anthropic\|openai\|ollama\|kimi\|groq\|deepseek\|hf_router` | local_gemma | Switch responder |
 | `--think` | off | Show chain-of-thought trace in responses |
 | `--proactive 30` | 0 | Unprompted messages every N minutes |
 | `--no-tools` / `--no-eval` / `--no-agent-loop` | all on | Disable subsystems for debugging |
@@ -43,7 +43,7 @@ Full list lives in `/help`. The ones you'll actually use:
 | `/escalate` | Force the **next** turn through the stronger model (Opus 4.7) |
 | `/whoami` | Symbion's self-description |
 | `/paste` | Enter multi-line paste mode (end with `///`) |
-| `/provider anthropic\|kimi` | Switch responder provider at runtime |
+| `/provider local_gemma\|anthropic\|kimi\|groq\|ollama\|openai\|deepseek\|hf_router` | Switch responder provider at runtime |
 | `/feedback <id> <-1.0..1.0> [comment]` | Rate a past interaction by `iid` |
 
 ---

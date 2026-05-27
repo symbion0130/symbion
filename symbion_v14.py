@@ -213,7 +213,7 @@ CONFIG_FILE = _anchor("symbion.json")
 
 @dataclass
 class SymbionConfig:
-    llm_provider:    str = "ollama"
+    llm_provider:    str = "local_gemma"
     ollama_host:     str = "http://localhost:11434"
     # Legacy Ollama defaults (mistral + llama3.2). Kept for backward
     # compatibility with older symbion.json files; new installs and the
@@ -355,6 +355,18 @@ class SymbionConfig:
     deepseek_api_key:         str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY",""))
     deepseek_model:           str = "deepseek-chat"
     deepseek_base_url:        str = "https://api.deepseek.com/v1"
+
+    # Local Gemma via CodeCat's CUDA llama.cpp server. The server exposes an
+    # OpenAI-compatible API; no API key is required on the local loopback
+    # endpoint. Keep token budgets modest by default because the installed
+    # runtime is configured around a 4096-token context.
+    local_gemma_base_url:      str = "http://127.0.0.1:8088/v1"
+    local_gemma_model:         str = "local-gemma"
+    local_gemma_max_tokens:    int = 768
+    local_gemma_json_max_tokens: int = 350
+    local_gemma_context_tokens: int = 4096
+    local_gemma_start_script:  str = r"c:\projects\codecat\runtime\scripts\start-gemma.ps1"
+    local_gemma_autostart:     bool = False
 
     temperature:   float = 0.82
     max_tokens:    int   = 16384  # responder output cap. 1400 (v13/early-v14) truncated
@@ -560,7 +572,7 @@ class SymbionConfig:
 def run_setup():
     print(bold("\n  Symbion v14 -- Setup\n"))
     print("  This will write your API key to .env correctly (no BOM).\n")
-    provider = input("  Provider [anthropic/openai/ollama/kimi]: ").strip().lower() or "ollama"
+    provider = input("  Provider [local_gemma/anthropic/openai/ollama/kimi]: ").strip().lower() or "local_gemma"
     key = ""
     if provider == "anthropic":
         key = input("  ANTHROPIC_API_KEY: ").strip()
@@ -583,8 +595,7 @@ def run_setup():
     print(green("\n  OK .env written (UTF-8, no BOM)"))
 
     cfg = SymbionConfig.load()
-    cfg.llm_provider = provider if provider != "kimi" else "anthropic"
-    if provider == "kimi": cfg.use_kimi_responder = True
+    cfg.llm_provider = provider
     cfg.save()
     print(green(f"  OK symbion.json saved (provider={provider})"))
     print(f"\n  Now run: {cyan(f'python symbion_v14.py --provider {provider} --web')}\n")
@@ -1235,6 +1246,18 @@ def init_db(db_path: str):
                 embedding BLOB,
                 source TEXT DEFAULT 'local',
                 shared_at TEXT);
+            CREATE TABLE IF NOT EXISTS emotional_checkins (
+                id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                session TEXT, user TEXT,
+                emotion TEXT NOT NULL,
+                intensity INTEGER,
+                valence REAL,
+                body_location TEXT,
+                trigger TEXT,
+                note TEXT,
+                source_message_id INTEGER,
+                confidence REAL,
+                captured_by TEXT DEFAULT 'system');
 
             CREATE INDEX IF NOT EXISTS idx_msg_session  ON messages(session);
             CREATE INDEX IF NOT EXISTS idx_sum_session  ON summaries(session);
@@ -1243,6 +1266,8 @@ def init_db(db_path: str):
             CREATE INDEX IF NOT EXISTS idx_pos_topic    ON user_positions(topic);
             CREATE INDEX IF NOT EXISTS idx_tech_user    ON techniques(user);
             CREATE INDEX IF NOT EXISTS idx_tech_source  ON techniques(source);
+            CREATE INDEX IF NOT EXISTS idx_emotion_user_ts ON emotional_checkins(user,timestamp);
+            CREATE INDEX IF NOT EXISTS idx_emotion_name    ON emotional_checkins(emotion);
         """)
         # Additive migration: older DBs (created before semantic retrieval
         # landed) won't have summaries.embedding. ALTER ADD is a no-op on
@@ -2115,6 +2140,87 @@ class HFRouterClient(OpenAIClient):
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"].strip()
         return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+
+class LocalGemmaClient(OpenAIClient):
+    """Local Gemma through CodeCat's llama.cpp OpenAI-compatible server.
+
+    This is intentionally thin: Symbion keeps its orchestration, memory, and
+    UI while the responder/judge calls hit the fast local `/v1` endpoint.
+    """
+    def __init__(self, model: str, cfg: SymbionConfig,
+                 base_url: str = "http://127.0.0.1:8088/v1"):
+        self.api_key = ""
+        self.model   = model
+        self.cfg     = cfg
+        self._base   = base_url.rstrip("/")
+        self._url    = self._base + "/chat/completions"
+        self.cb      = CircuitBreaker("local_gemma", cfg.circuit_open_after)
+
+    def _h(self):
+        return {"Content-Type": "application/json"}
+
+    def is_available(self) -> bool:
+        try:
+            r = httpx.get(self._base + "/models", timeout=2.0)
+            return r.status_code == 200
+        except Exception as ex:
+            self.cb.last_error = (
+                f"Local Gemma is not reachable at {self._base}. "
+                f"Start CodeCat Gemma with {self.cfg.local_gemma_start_script}. "
+                f"({type(ex).__name__}: {ex})"
+            )
+            return False
+
+    def _cap(self, requested: int) -> int:
+        cap = int(getattr(self.cfg, "local_gemma_max_tokens", 768) or 768)
+        return max(64, min(int(requested or cap), cap))
+
+    async def chat_json(self, model, system, user, temp=0.05, max_tokens=200) -> str:
+        # llama.cpp's OpenAI shim is most portable without response_format.
+        async def _call():
+            m = model or self.model
+            mt = min(int(max_tokens or 200),
+                     int(getattr(self.cfg, "local_gemma_json_max_tokens", 350) or 350))
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model": m, "max_tokens": mt, "temperature": temp,
+                    "messages":[{"role":"system","content":system},
+                                {"role":"user","content":user}]})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def chat_text(self, model, messages, temp=0.3, max_tokens=350) -> str:
+        async def _call():
+            m = model or self.model
+            async with httpx.AsyncClient(timeout=90) as c:
+                r = await c.post(self._url, headers=self._h(), json={
+                    "model": m, "max_tokens": self._cap(max_tokens),
+                    "temperature": temp, "messages": messages})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        return await self._retry(_call, self.cfg.max_retries, self.cfg.retry_backoff)
+
+    async def stream(self, model, messages, cfg) -> AsyncIterator[str]:
+        m = model or self.model
+        async with httpx.AsyncClient(timeout=180) as c:
+            async with c.stream("POST", self._url, headers=self._h(), json={
+                "model": m, "max_tokens": self._cap(cfg.max_tokens),
+                "temperature": cfg.temperature, "messages": messages,
+                "stream": True}) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "): continue
+                    data = line[6:]
+                    if data == "[DONE]": break
+                    try:
+                        chunk = json.loads(data)
+                        tok = chunk["choices"][0].get("delta", {}).get("content", "")
+                        if tok:
+                            yield tok
+                    except (json.JSONDecodeError, KeyError):
+                        continue
 
 
 class DeepSeekClient(OpenAIClient):
@@ -3015,6 +3121,57 @@ class SymbionMemory:
                       "VALUES (?,?,?,?,?,?)",
                       (datetime.now().isoformat(), session, role, content, emotional_state, user))
             c.commit()
+
+    def save_emotional_checkin(self, *, session: str, user: str,
+                                emotion: str, intensity: Optional[int] = None,
+                                valence: Optional[float] = None,
+                                body_location: str = "", trigger: str = "",
+                                note: str = "", source_message_id: Optional[int] = None,
+                                confidence: Optional[float] = None,
+                                captured_by: str = "system") -> int:
+        emotion = (emotion or "").strip().lower()
+        if not emotion or emotion == "neutral":
+            return 0
+        if intensity is not None:
+            intensity = max(0, min(100, int(intensity)))
+        if valence is not None:
+            valence = max(-1.0, min(1.0, float(valence)))
+        with sqlite3.connect(self.db) as c:
+            cur = c.execute(
+                "INSERT INTO emotional_checkins "
+                "(timestamp,session,user,emotion,intensity,valence,body_location,"
+                "trigger,note,source_message_id,confidence,captured_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(), session, user or "aaron", emotion,
+                 intensity, valence, body_location or "", trigger or "",
+                 note or "", source_message_id, confidence, captured_by or "system"))
+            c.commit()
+            return cur.lastrowid or 0
+
+    def get_recent_emotional_checkins(self, user: str = "aaron",
+                                       limit: int = 20,
+                                       days: int = 30,
+                                       emotion: str = "") -> List[Dict]:
+        cutoff = (datetime.now() - timedelta(days=max(1, int(days)))).isoformat()
+        params: List[Any] = [user or "aaron", cutoff]
+        where = "WHERE user=? AND timestamp>=?"
+        if emotion:
+            where += " AND emotion LIKE ?"
+            params.append(f"%{emotion.strip().lower()}%")
+        params.append(max(1, min(int(limit), 100)))
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute(
+                "SELECT id,timestamp,session,emotion,intensity,valence,"
+                "body_location,trigger,note,confidence,captured_by "
+                f"FROM emotional_checkins {where} "
+                "ORDER BY timestamp DESC LIMIT ?",
+                params).fetchall()
+        return [{
+            "id": r[0], "timestamp": r[1], "session": r[2],
+            "emotion": r[3], "intensity": r[4], "valence": r[5],
+            "body_location": r[6], "trigger": r[7], "note": r[8],
+            "confidence": r[9], "captured_by": r[10],
+        } for r in rows]
 
     def save_summary(self, session: str, summary: str, count: int,
                       embedding: Optional[List[float]] = None,
@@ -4619,6 +4776,31 @@ _VOICE_TASK_RE = re.compile(
                                                                key=len, reverse=True)) + r")\b",
     re.IGNORECASE)
 
+_EMOTIONAL_PROCESSING_RE = re.compile(
+    r"\b(feel|feeling|felt|hurt|hurts|sad|angry|mad|scared|afraid|anxious|"
+    r"panic|ashamed|shame|guilt|grief|grieving|lonely|alone|betrayed|"
+    r"overwhelmed|depressed|hopeless|confused|stuck|worthless|trauma|"
+    r"counsel|counselor|mentor|friend|guide|talk this through)\b",
+    re.IGNORECASE)
+
+_INTENSITY_RE = re.compile(
+    r"\b(?:intensity|level|at|like)\s*(\d{1,3})(?:\s*/\s*10|\s*out of\s*10|\s*%)?",
+    re.IGNORECASE)
+
+def _extract_emotion_intensity(text: str) -> Optional[int]:
+    """Best-effort parse of a user-stated feeling intensity into 0-100."""
+    m = _INTENSITY_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return None
+    marker = m.group(0).lower()
+    if n <= 10 and ("/10" in marker or "out of" in marker):
+        return n * 10
+    return max(0, min(100, n))
+
 
 # ==============================================================================
 #  SYMBION CORE  -- v12: all subsystems wired
@@ -5103,6 +5285,20 @@ class TurnPipeline:
         }
         if emotion_mode in mode_instructions:
             system += f"\n\nResponse mode: {mode_instructions[emotion_mode]}"
+        emotional_processing = (
+            emotion_mode in ("gentle_slow", "grounding")
+            or ctx.emotional_state.get("state", "") in (
+                "distressed", "frustrated", "confused", "grieving", "anxious", "sad")
+            or bool(_EMOTIONAL_PROCESSING_RE.search(ctx.text or ""))
+        )
+        if emotional_processing and not _VOICE_TASK_STRUCTURAL(ctx.text or ""):
+            system += (
+                "\n\nEmotional processing mode: respond like a steady friend/mentor. "
+                "Give one brief mirror or tentative label, then ask exactly one simple "
+                "follow-up question. No bullet lists, no multi-step plans, no rushing "
+                "to fix. If there is immediate self-harm or violence risk, ask one "
+                "plain safety question and encourage urgent local help."
+            )
         if (sym.cfg.voice_loosen_enabled
                 and emotion_mode not in ("gentle_slow", "grounding")
                 and ctx.emotional_state.get("state", "") in ("neutral", "focused", "excited")
@@ -5360,6 +5556,20 @@ class TurnPipeline:
                             user=ctx.active_user)
         except Exception as ex:
             logger.error(f"[req={ctx.request_id}] memory.add(user): {ex}")
+        try:
+            state = (ctx.emotional_state.get("state", "") or "").strip().lower()
+            confidence = ctx.emotional_state.get("confidence", None)
+            if state and state not in ("neutral", "focused", "excited"):
+                sym.memory.save_emotional_checkin(
+                    session=ctx.session,
+                    user=ctx.active_user,
+                    emotion=state,
+                    intensity=_extract_emotion_intensity(ctx.text),
+                    note=ctx.text[:500],
+                    confidence=confidence if isinstance(confidence, (int, float)) else None,
+                    captured_by="detector")
+        except Exception as ex:
+            logger.warning(f"[req={ctx.request_id}] emotional_checkin save: {ex}")
         try:
             sym.memory.add("assistant", ctx.full_response, ctx.session,
                             user=ctx.active_user)
@@ -5661,6 +5871,11 @@ class SYMBION:
                                f"Falling back to shared responder breaker.")
 
     def _make_client(self, provider: str):
+        if provider == "local_gemma":
+            c = LocalGemmaClient(self.cfg.local_gemma_model, self.cfg,
+                                 base_url=self.cfg.local_gemma_base_url)
+            if c.is_available(): return c
+            logger.warning(c.cb.last_error or "local_gemma unavailable")
         if provider == "kimi" and self.cfg.kimi_api_key:
             return KimiClient(self.cfg.kimi_api_key, self.cfg.kimi_model,
                               self.cfg.kimi_base_url, self.cfg)
@@ -5695,6 +5910,7 @@ class SYMBION:
         "kimi":      "Moonshot",
         "openai":    "OpenAI",
         "ollama":    "Ollama (local)",
+        "local_gemma": "Gemma (local)",
         "deepseek":  "DeepSeek",
         "hf_router": "HuggingFace router",
     }
@@ -5705,6 +5921,7 @@ class SYMBION:
         OfflineJudgeStub heuristic, an escalation client we'd already
         labelled separately). Order matters: GroqClient / HFRouterClient
         inherit OpenAIClient, so subclasses must be checked first."""
+        if isinstance(c, LocalGemmaClient): return "local_gemma"
         if isinstance(c, GroqClient):     return "groq"
         if isinstance(c, HFRouterClient): return "hf_router"
         if isinstance(c, DeepSeekClient): return "deepseek"
@@ -6068,6 +6285,7 @@ class SYMBION:
                 override = getattr(self.cfg, f"groq_{role}_model", "") or ""
                 if override: return override
             return self.cfg.groq_judge_model
+        if p == "local_gemma":        return self.cfg.local_gemma_model
         if p == "openai":              return self.cfg.openai_model
         if p == "hf_router":           return self.cfg.hf_router_model
         if p == "deepseek":            return self.cfg.deepseek_model
@@ -6085,6 +6303,7 @@ class SYMBION:
         if p == "ollama":
             return self.cfg.ollama_responder_model or self.cfg.responder_model
         if p == "groq":      return self.cfg.groq_responder_model
+        if p == "local_gemma": return self.cfg.local_gemma_model
         if p == "openai":    return self.cfg.openai_model
         if p == "hf_router": return self.cfg.hf_router_model
         if p == "deepseek":  return self.cfg.deepseek_model
@@ -7194,7 +7413,7 @@ def _tailscale_ipv4() -> Optional[str]:
 
 def validate_and_report(cfg) -> list:
     warnings = []
-    _KNOWN_PROVIDERS = ("anthropic", "openai", "ollama", "kimi", "groq", "hf_router", "deepseek")
+    _KNOWN_PROVIDERS = ("local_gemma", "anthropic", "openai", "ollama", "kimi", "groq", "hf_router", "deepseek")
     if cfg.llm_provider not in _KNOWN_PROVIDERS:
         print(red(f"\n  X  Unknown --provider '{cfg.llm_provider}'."))
         print(yellow(f"     Valid options: {', '.join(_KNOWN_PROVIDERS)}\n")); import sys; sys.exit(1)
@@ -7217,6 +7436,14 @@ def validate_and_report(cfg) -> list:
         print(red("\n  X  DEEPSEEK_API_KEY not set."))
         print(yellow("     Get one at: https://platform.deepseek.com/api_keys"))
         print(yellow("     PowerShell: $env:DEEPSEEK_API_KEY='sk-...'\n")); import sys; sys.exit(1)
+    if cfg.llm_provider=="local_gemma":
+        try:
+            r = httpx.get(cfg.local_gemma_base_url.rstrip("/") + "/models", timeout=2.0)
+            if r.status_code != 200:
+                warnings.append(f"Local Gemma returned HTTP {r.status_code} at {cfg.local_gemma_base_url}/models")
+        except Exception:
+            warnings.append("Local Gemma is offline; start CodeCat with "
+                            f"{cfg.local_gemma_start_script} or choose another provider")
     if not _FASTAPI:
         warnings.append("fastapi/uvicorn not installed -- web UI unavailable (pip install fastapi uvicorn)")
     if not cfg.brave_api_key:
@@ -8242,7 +8469,7 @@ HELP_TEXT = f"""
     /proactive        ask Symbion if it has anything to say
     /tools            list available tools
     /voice-test       run voice-tone queries
-    /provider <kimi|anthropic>
+    /provider <local_gemma|kimi|anthropic|groq|ollama|openai|deepseek|hf_router>
                       switch responder provider at runtime
     /update           check for updates from GitHub. If behind, prompts to
                       pull, then tells you how to apply (/quit + relaunch
@@ -9075,18 +9302,20 @@ def run_terminal(symbion: "SYMBION"):
 
         elif raw.startswith("/provider"):
             parts=raw.split()
-            if len(parts)<2: print(dim("  Usage: /provider kimi|anthropic"))
-            elif parts[1]=="kimi":
-                if not symbion.cfg.kimi_api_key:
-                    print(red("  No KIMI_API_KEY set in .env"))
+            valid = ("local_gemma","kimi","anthropic","groq","ollama","openai","deepseek","hf_router")
+            if len(parts)<2:
+                print(dim("  Usage: /provider " + "|".join(valid)))
+            elif parts[1] in valid:
+                symbion.cfg.llm_provider = parts[1]
+                symbion.cfg.use_kimi_responder = False
+                symbion._providers = []
+                symbion._build_providers()
+                symbion.client = symbion._providers[0] if symbion._providers else None
+                label = symbion._PROVIDER_LABELS.get(parts[1], parts[1])
+                if symbion.client:
+                    print(green(f"  OK Primary provider -> {label}"))
                 else:
-                    symbion.cfg.use_kimi_responder=True
-                    symbion.kimi_client=KimiClient(symbion.cfg.kimi_api_key,symbion.cfg.kimi_model,
-                                                   symbion.cfg.kimi_base_url,symbion.cfg)
-                    print(green(f"  OK Responder -> Kimi K2.6  (judges still: Anthropic Haiku)"))
-            elif parts[1]=="anthropic":
-                symbion.cfg.use_kimi_responder=False
-                print(green(f"  OK Responder -> Anthropic Sonnet 4.6"))
+                    print(yellow(f"  !  {label} is configured but not available; fallback/degraded mode may answer."))
             else:
                 print(red(f"  Unknown provider: {parts[1]}"))
 
@@ -9277,6 +9506,7 @@ def main():
         epilog="""
 Examples:
   python symbion_v14.py --setup                          (first-time Windows setup)
+  python symbion_v14.py --provider local_gemma --web
   python symbion_v14.py --provider anthropic --web
   python symbion_v14.py --provider anthropic
   python symbion_v14.py --provider anthropic --use-kimi-responder
@@ -9287,7 +9517,7 @@ Examples:
     parser.add_argument("--setup",            action="store_true",  help="Guided setup (Windows-safe .env writer)")
     parser.add_argument("--web",              action="store_true",  help="Launch web UI + REST API")
     parser.add_argument("--kill",             action="store_true",  help="Stop a running --web server (POSTs /api/shutdown to localhost:port)")
-    parser.add_argument("--provider",         default=None,         choices=["ollama","anthropic","openai","kimi","hf_router","deepseek","groq"])
+    parser.add_argument("--provider",         default=None,         choices=["local_gemma","ollama","anthropic","openai","kimi","hf_router","deepseek","groq"])
     parser.add_argument("--host",             default=None)
     parser.add_argument("--port",             type=int,default=None)
     parser.add_argument("--judge",            default=None)
