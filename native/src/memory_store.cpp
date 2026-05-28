@@ -23,6 +23,22 @@ bool Exec(sqlite3* db, const char* sql) {
     return rc == SQLITE_OK;
 }
 
+bool TableHasColumn(sqlite3* db, const char* table, const char* column) {
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql = "PRAGMA table_info(" + std::string(table) + ");";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        if (name && std::string(reinterpret_cast<const char*>(name)) == column) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
 std::string NowSql() {
     return "datetime('now')";
 }
@@ -87,6 +103,36 @@ std::vector<std::string> ExpandSourceTerms(const std::string& query, std::vector
         AddUnique(terms, "forgive");
         AddUnique(terms, "repair");
         AddUnique(terms, "boundary");
+    }
+    if (ContainsAny(lower, {"pray", "prayer", "spiritually dry", "far from god", "listen to jesus", "relationship with jesus"})) {
+        AddUnique(terms, "jesus");
+        AddUnique(terms, "prayer");
+        AddUnique(terms, "presence");
+        AddUnique(terms, "spirit");
+    }
+    if (ContainsAny(lower, {"humble", "humility", "thankful", "gratitude", "complain", "complaining"})) {
+        AddUnique(terms, "humble");
+        AddUnique(terms, "thank");
+        AddUnique(terms, "praise");
+        AddUnique(terms, "pray");
+    }
+    if (ContainsAny(lower, {"quick to listen", "answer softly", "speak when", "angry"})) {
+        AddUnique(terms, "listen");
+        AddUnique(terms, "speak");
+        AddUnique(terms, "anger");
+        AddUnique(terms, "peace");
+    }
+    if (ContainsAny(lower, {"surrender", "control", "trust god", "perfect faith"})) {
+        AddUnique(terms, "trust");
+        AddUnique(terms, "faith");
+        AddUnique(terms, "god");
+        AddUnique(terms, "surrender");
+    }
+    if (ContainsAny(lower, {"worthless", "disrespected", "disrespect", "family anger"})) {
+        AddUnique(terms, "love");
+        AddUnique(terms, "peace");
+        AddUnique(terms, "emotion");
+        AddUnique(terms, "gentle");
     }
     return terms;
 }
@@ -162,6 +208,10 @@ void MemoryStore::Close() {
 
 bool MemoryStore::EnsureSchema() {
     if (!db_) return false;
+    if (!TableHasColumn(db_, "counseling_sources", "source_order")) {
+        Exec(db_, "DROP TABLE IF EXISTS counseling_sources_fts;");
+        Exec(db_, "DROP TABLE IF EXISTS counseling_sources;");
+    }
     return Exec(db_, "PRAGMA journal_mode=WAL;") &&
            Exec(db_, "PRAGMA busy_timeout=5000;") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS native_messages ("
@@ -181,8 +231,6 @@ bool MemoryStore::EnsureSchema() {
                      "created_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_emotions_time "
                      "ON native_emotion_signals(created_at);") &&
-           Exec(db_, "DROP TABLE IF EXISTS counseling_sources_fts;") &&
-           Exec(db_, "DROP TABLE IF EXISTS counseling_sources;") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS counseling_sources ("
                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                      "source_path TEXT NOT NULL,"
@@ -230,6 +278,22 @@ bool MemoryStore::SaveEmotion(const std::string& session_id, const std::string& 
 bool MemoryStore::ImportCounselingSource(const std::filesystem::path& text_path) {
     if (!db_ || !std::filesystem::exists(text_path)) return false;
 
+    const auto file_time = std::filesystem::last_write_time(text_path);
+    const auto file_size = std::filesystem::file_size(text_path);
+    const std::string source_path = text_path.string();
+    std::string import_key = source_path + "|" + std::to_string(file_size) + "|" +
+                             std::to_string(file_time.time_since_epoch().count());
+
+    sqlite3_stmt* check = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM counseling_sources WHERE source_path=?;", -1, &check, nullptr) == SQLITE_OK) {
+        BindText(check, 1, import_key);
+        if (sqlite3_step(check) == SQLITE_ROW && sqlite3_column_int(check, 0) > 0) {
+            sqlite3_finalize(check);
+            return true;
+        }
+    }
+    sqlite3_finalize(check);
+
     std::ifstream input(text_path, std::ios::binary);
     if (!input) return false;
 
@@ -260,7 +324,6 @@ bool MemoryStore::ImportCounselingSource(const std::filesystem::path& text_path)
         return false;
     }
 
-    const std::string source_path = text_path.string();
     std::string title = "MasterDocument";
     std::string chunk;
     int order = 0;
@@ -274,7 +337,7 @@ bool MemoryStore::ImportCounselingSource(const std::filesystem::path& text_path)
 
         sqlite3_reset(insert_source);
         sqlite3_clear_bindings(insert_source);
-        BindText(insert_source, 1, source_path);
+        BindText(insert_source, 1, import_key);
         sqlite3_bind_int(insert_source, 2, order++);
         BindText(insert_source, 3, title);
         BindText(insert_source, 4, chunk);

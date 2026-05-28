@@ -126,12 +126,12 @@ Intent ClassifyIntent(std::string_view message) {
     } else if (intent.emotional || trauma_related) {
         intent.emotional = true;
         intent.mode = IntentMode::Reflective;
+    } else if (LooksLikeDirectQuestion(text) || text.find('?') != std::string::npos) {
+        intent.mode = IntentMode::DirectAnswer;
     } else if (LooksLikeCreative(text)) {
         intent.mode = IntentMode::Creative;
     } else if (LooksLikeTask(text)) {
         intent.mode = IntentMode::Task;
-    } else if (LooksLikeDirectQuestion(text) || text.find('?') != std::string::npos) {
-        intent.mode = IntentMode::DirectAnswer;
     } else {
         intent.mode = IntentMode::DirectAnswer;
     }
