@@ -112,6 +112,105 @@ int WordCount(const std::string& text) {
     return count;
 }
 
+std::string TrimCopy(std::string value) {
+    while (!value.empty() && !std::isalnum(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && !std::isalnum(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string CompactDoorPhrase(const std::string& message) {
+    std::string phrase = Lower(message);
+    std::string out;
+    out.reserve(phrase.size());
+    bool last_space = false;
+    for (const unsigned char c : phrase) {
+        if (std::isalnum(c) || c == '\'' || c == '/') {
+            out.push_back(static_cast<char>(c));
+            last_space = false;
+        } else if (!last_space) {
+            out.push_back(' ');
+            last_space = true;
+        }
+    }
+    std::istringstream words(TrimCopy(out));
+    std::string compact;
+    std::string word;
+    while (words >> word) {
+        if (word == "my") {
+            std::streampos before_next = words.tellg();
+            std::string next;
+            if (words >> next) {
+                if (next == "guy") continue;
+                if (!compact.empty()) compact.push_back(' ');
+                compact += word;
+                if (!compact.empty()) compact.push_back(' ');
+                compact += next;
+                continue;
+            }
+            words.clear();
+            words.seekg(before_next);
+        }
+        if (word == "man" || word == "bro" || word == "dude" || word == "like" ||
+            word == "uh" || word == "um") {
+            continue;
+        }
+        if (!compact.empty()) compact.push_back(' ');
+        compact += word;
+    }
+    return TrimCopy(compact);
+}
+
+bool IsLowSignalCompactReply(const std::string& phrase) {
+    return phrase.empty() || phrase == "yes" || phrase == "no" || phrase == "ok" ||
+           phrase == "okay" || phrase == "yeah" || phrase == "yep" || phrase == "nah" ||
+           phrase == "thanks" || phrase == "thank you" || phrase == "lol" || phrase == "haha" ||
+           phrase == "hello" || phrase == "hi" || phrase == "hey" || phrase == "yo";
+}
+
+std::string CapitalizeFirst(std::string value) {
+    if (!value.empty()) {
+        value[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(value[0])));
+    }
+    return value;
+}
+
+std::string GenericDoorMappingQuestion(const std::string& message, const Intent& intent) {
+    if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
+    const std::string lower = Lower(message);
+    if (lower.find('?') != std::string::npos) return {};
+    if (ContainsAnyLocal(lower, {"write ", "make ", "create ", "build ", "fix ", "install ", "run ", "open ",
+                                 "what is ", "what are ", "who is ", "where is ", "how do ", "show me"})) {
+        return {};
+    }
+
+    const std::string phrase = CompactDoorPhrase(message);
+    const int words = WordCount(phrase);
+    if (words == 0 || words > 5 || IsLowSignalCompactReply(phrase)) return {};
+
+    if (ContainsAnyLocal(phrase, {"family", "work", "finances", "money", "friends", "health", "memories"})) {
+        return "What feels most intense there?";
+    }
+    if (ContainsAnyLocal(phrase, {"shoulder", "shoulders", "neck", "head", "chest", "stomach", "gut", "throat"})) {
+        return "What does it feel like there?";
+    }
+    if (words == 1) {
+        if (phrase == "anger" || phrase == "angry" || phrase == "fear" || phrase == "sadness" ||
+            phrase == "sad" || phrase == "anxiety" || phrase == "anxious" || phrase == "shame" ||
+            phrase == "ashamed" || phrase == "guilt" || phrase == "lonely" || phrase == "numb") {
+            return CapitalizeFirst(phrase) + " is present right now. Is it connected to family, work, finances, friends, health, memories, or something else?";
+        }
+        if (ContainsAnyLocal(phrase, {"ness", "tion", "ment", "ship", "hood"})) {
+            return "What is " + phrase + " connected to?";
+        }
+        return "What is that " + phrase + " feeling connected to?";
+    }
+    return "What is \"" + phrase + "\" connected to?";
+}
+
 bool IsEmotionalContinuation(const std::string& message,
                              const Intent& intent,
                              const std::vector<ChatMessage>& recent) {
@@ -139,7 +238,26 @@ bool IsEmotionalContinuation(const std::string& message,
             "what happened", "what memory", "what did she", "what did he",
             "mother", "mom", "dad", "father", "boss", "friend", "brother",
             "sister", "spouse", "wife", "husband", "partner", "coworker",
-            "tell me about"
+            "tell me about", "what else is present", "what else is there",
+            "feels intense", "feeling down", "uphill battle", "in your body",
+            "down to my bones", "down to your bones", "what makes you feel", "what is it connected",
+            "what is \"", "what is ", "what does it feel like"
+        });
+    }
+    return false;
+}
+
+bool RecentAssistantWasEmotional(const std::vector<ChatMessage>& recent) {
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "assistant") continue;
+        const std::string assistant = Lower(it->content);
+        return ContainsAnyLocal(assistant, {
+            "what does that feeling", "where do you feel", "what else is present",
+            "what feels most intense", "tell me about", "never enough",
+            "woke up like this", "feel small", "in your body", "uphill battle",
+            "what part", "what door", "what ship", "down to your bones",
+            "what makes you feel", "what is it connected", "what is \"",
+            "what is ", "what does it feel like"
         });
     }
     return false;
@@ -171,6 +289,17 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy"})) {
         return "Hey, my guy. I'm here.";
+    }
+    return {};
+}
+
+std::string QuickContextualEmotionalAnswer(const std::string& message,
+                                           const Intent& intent,
+                                           const std::vector<ChatMessage>& recent) {
+    if (intent.mode != IntentMode::Social || !RecentAssistantWasEmotional(recent)) return {};
+    const std::string lower = Lower(message);
+    if (lower.find("my guy") != std::string::npos) {
+        return "Down to your bones?";
     }
     return {};
 }
@@ -223,7 +352,9 @@ std::string RelationshipStoryInvite(const std::string& message, const Intent& in
 
     static const std::initializer_list<const char*> non_people = {
         "anger", "anxiety", "fear", "sadness", "purpose", "life", "heart",
-        "mind", "body", "memory", "memories", "feelings", "emotions"
+        "mind", "body", "memory", "memories", "feelings", "emotions",
+        "bones", "shoulders", "neck", "head", "chest", "stomach", "gut",
+        "throat"
     };
     if (ContainsAnyLocal(relation, non_people)) return {};
     return "Tell me about your " + relation + ".";
@@ -232,8 +363,6 @@ std::string RelationshipStoryInvite(const std::string& message, const Intent& in
 std::string ChargedDoorMirror(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
     const std::string lower = Lower(message);
-    if (WordCount(lower) < 6 &&
-        !ContainsAnyLocal(lower, {"positive", "burn the ships", "ships"})) return {};
 
     struct Door {
         const char* needle;
@@ -242,9 +371,17 @@ std::string ChargedDoorMirror(const std::string& message, const Intent& intent) 
     static const Door doors[] = {
         {"positive", "What's making it positive?"},
         {"burn the ships", "What ship?"},
+        {"so rough", "Tell me about today."},
+        {"rough day", "Tell me about today."},
+        {"uphill battle", "What part of the battle feels most active right now?"},
         {"woke up like this", "Woke up like this?"},
         {"don't even know", "Don't even know?"},
         {"dont even know", "Don't even know?"},
+        {"down to my bones", "Down to your bones?"},
+        {"inadequate", "What is that inadequate feeling connected to?"},
+        {"head throbbing", "What does it feel like in your head right now?"},
+        {"shoulders", "What does it feel like in your shoulders right now?"},
+        {"neck", "What does it feel like in your neck right now?"},
         {"never enough", "Never enough?"},
         {"too sensitive", "Too sensitive?"},
         {"being dramatic", "Being dramatic?"},
@@ -270,7 +407,7 @@ std::string ChargedDoorMirror(const std::string& message, const Intent& intent) 
     for (const auto& door : doors) {
         if (lower.find(door.needle) != std::string::npos) return door.mirror;
     }
-    return {};
+    return GenericDoorMappingQuestion(message, intent);
 }
 
 }  // namespace
@@ -360,12 +497,15 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto emotions = memory_.RecentEmotionSignals(8);
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
-    std::string answer = QuickSocialAnswer(user_message, intent);
+    std::string answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
     if (answer.empty()) {
-        answer = RelationshipStoryInvite(user_message, intent);
+        answer = QuickSocialAnswer(user_message, intent);
     }
     if (answer.empty()) {
         answer = ChargedDoorMirror(user_message, intent);
+    }
+    if (answer.empty()) {
+        answer = RelationshipStoryInvite(user_message, intent);
     }
     if (answer.empty()) {
         answer = QuickEverydayAnswer(user_message, intent);

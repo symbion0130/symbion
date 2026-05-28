@@ -123,9 +123,12 @@ Intent ClassifyIntent(std::string_view message) {
         "always criticizes", "keeps mocking", "betrayed me", "too sensitive",
         "nothing happened", "i end up apologizing", "feel stupid", "dread opening",
         "replaying every conversation", "humiliated", "laugh it off",
-        "today has been better", "change is needed", "burn the ships",
+        "today has been rough", "today has been so rough", "been so rough",
+        "rough day", "rough few", "difficult day",
+        "hard day", "today has been better", "change is needed", "burn the ships",
         "feeling down", "a little down", "woke up like this", "don't even know",
-        "dont even know"
+        "dont even know", "uphill battle", "down to my bones", "head throbbing",
+        "shoulders", "neck", "inadequate"
     }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",
@@ -154,13 +157,13 @@ Intent ClassifyIntent(std::string_view message) {
 
     if (intent.forget) {
         intent.mode = IntentMode::Forget;
-    } else if (LooksLikeSocialChat(text)) {
-        intent.mode = IntentMode::Social;
     } else if (intent.intense) {
         intent.mode = IntentMode::Counseling;
     } else if (intent.emotional || trauma_related) {
         intent.emotional = true;
         intent.mode = IntentMode::Reflective;
+    } else if (LooksLikeSocialChat(text)) {
+        intent.mode = IntentMode::Social;
     } else if (LooksLikeCreative(text)) {
         intent.mode = IntentMode::Creative;
     } else if (LooksLikeTask(text) && LooksLikePracticalLife(text)) {
