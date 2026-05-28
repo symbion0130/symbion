@@ -98,7 +98,9 @@ Intent ClassifyIntent(std::string_view message) {
         "my dad", "my father", "my family", "my boss", "evil boss",
         "my friend", "my brother", "my sister", "my wife", "my husband",
         "my spouse", "my partner", "my coworker", "makes me feel", "made me feel",
-        "always criticizes", "keeps mocking", "betrayed me"
+        "always criticizes", "keeps mocking", "betrayed me", "too sensitive",
+        "nothing happened", "i end up apologizing", "feel stupid", "dread opening",
+        "replaying every conversation", "humiliated", "laugh it off"
     }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",

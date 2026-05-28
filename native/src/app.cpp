@@ -160,6 +160,7 @@ std::string KnownDirectAnswer(const std::string& message) {
 std::string RelationshipStoryInvite(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
     const std::string lower = Lower(message);
+    if (WordCount(lower) > 8) return {};
     const size_t pos = lower.find("my ");
     if (pos == std::string::npos) return {};
     size_t start = pos + 3;
@@ -183,6 +184,44 @@ std::string RelationshipStoryInvite(const std::string& message, const Intent& in
     };
     if (ContainsAnyLocal(relation, non_people)) return {};
     return "Tell me about your " + relation + ".";
+}
+
+std::string ChargedDoorMirror(const std::string& message, const Intent& intent) {
+    if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
+    const std::string lower = Lower(message);
+    if (WordCount(lower) < 6) return {};
+
+    struct Door {
+        const char* needle;
+        const char* mirror;
+    };
+    static const Door doors[] = {
+        {"never enough", "Never enough?"},
+        {"too sensitive", "Too sensitive?"},
+        {"being dramatic", "Being dramatic?"},
+        {"nothing happened", "Like nothing happened?"},
+        {"end up apologizing", "You end up apologizing?"},
+        {"always criticizes", "Always criticizes?"},
+        {"points out what i missed", "What does she point out?"},
+        {"try to explain myself", "Tell me about when you explain yourself."},
+        {"feel like a kid again", "Like a kid again, not in a good way?"},
+        {"hate how angry", "What other emotions are mixed with the anger?"},
+        {"feel stupid", "Feel stupid?"},
+        {"dread opening", "Dread opening it?"},
+        {"betrayed me", "Betrayed you?"},
+        {"replaying every conversation", "Replaying every conversation?"},
+        {"wondering if any of it was real", "Wondering if any of it was real?"},
+        {"laugh it off", "You laugh it off?"},
+        {"humiliated", "Humiliated?"},
+        {"mocking me", "Mocking you?"},
+        {"talking down to me", "Talking down to you?"},
+        {"makes me feel small", "Feel small?"},
+        {"made me feel small", "Feel small?"},
+    };
+    for (const auto& door : doors) {
+        if (lower.find(door.needle) != std::string::npos) return door.mirror;
+    }
+    return {};
 }
 
 }  // namespace
@@ -273,6 +312,9 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
     std::string answer = RelationshipStoryInvite(user_message, intent);
+    if (answer.empty()) {
+        answer = ChargedDoorMirror(user_message, intent);
+    }
     if (intent.mode == IntentMode::DirectAnswer) {
         answer = KnownDirectAnswer(user_message);
     }
