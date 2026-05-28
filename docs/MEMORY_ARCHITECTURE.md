@@ -141,7 +141,11 @@ Runtime rules:
 - High-intensity chunks are only available through explicit source review
   (`search_counseling_sources(..., include_high_intensity=true)`) or direct
   high-intensity search scope, not ordinary support mode.
-- Retrieved chunks are guidance, not output text to mirror verbatim.
+- Retrieved chunks are high-level north-star guidance, not output text to mirror
+  verbatim. When the source answers the user at a high level, the model should
+  use that framing; when the user asks a deeper or adjacent question, the model
+  may expand with its own reasoning while staying aligned with the source's
+  spirit.
 
 ## On-demand Memory Tools
 
