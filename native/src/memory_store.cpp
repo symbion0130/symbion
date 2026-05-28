@@ -569,7 +569,7 @@ int MemoryStore::MessageCount() const {
 EmotionSignal DetectEmotion(std::string_view text) {
     const std::string lower = Lower(text);
     EmotionSignal signal;
-    if (ContainsAny(lower, {"panic", "terrified", "scared", "afraid", "anxious"})) {
+    if (ContainsAny(lower, {"panic", "terrified", "scared", "afraid", "anxious", "anxiety"})) {
         signal = {"anxiety", 7};
     } else if (ContainsAny(lower, {"sad", "grief", "lonely", "depressed", "hopeless"})) {
         signal = {"sadness", 7};
@@ -577,7 +577,7 @@ EmotionSignal DetectEmotion(std::string_view text) {
         signal = {"anger", 7};
     } else if (ContainsAny(lower, {"overwhelmed", "stressed", "too much", "burned out"})) {
         signal = {"overwhelm", 6};
-    } else if (ContainsAny(lower, {"happy", "grateful", "better", "proud", "hopeful"})) {
+    } else if (ContainsAny(lower, {"happy", "grateful", "better", "proud", "hopeful", "positive"})) {
         signal = {"positive", 5};
     }
     if (ContainsAny(lower, {"extremely", "unbearable", "can't", "cannot", "really"})) {

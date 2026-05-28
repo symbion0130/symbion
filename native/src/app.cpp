@@ -157,6 +157,28 @@ std::string KnownDirectAnswer(const std::string& message) {
     return {};
 }
 
+std::string QuickEverydayAnswer(const std::string& message, const Intent& intent) {
+    if (intent.mode != IntentMode::DirectAnswer && intent.mode != IntentMode::Task &&
+        intent.mode != IntentMode::Creative) return {};
+    const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
+        return "Fair. What drives it is the router: casual chat should sound casual, practical questions should get practical answers, and emotional stuff should slow down and map the feeling. This reply should feel more like me talking with you, not reading a support script.";
+    }
+    if (ContainsAnyLocal(lower, {"restaurant", "local", "nearby"}) &&
+        ContainsAnyLocal(lower, {"protein", "lunch", "food", "hungry", "cook"})) {
+        return "Restaurant move: I need your city or neighborhood for real local picks. Without that, I'd look for a taco spot with grilled chicken/steak, Mediterranean shawarma, a burger place, poke, BBQ, or a deli with a solid turkey/chicken sandwich.";
+    }
+    if (ContainsAnyLocal(lower, {"hungry", "late lunch", "lunch"}) &&
+        ContainsAnyLocal(lower, {"protein", "food", "ideas"})) {
+        return "Late lunch with protein: tacos with chicken or steak, a burger, shawarma bowl, poke bowl, rotisserie chicken, deli sandwich, or eggs and toast if you want easy. If you want restaurant mode, tell me your city or neighborhood.";
+    }
+    if (ContainsAnyLocal(lower, {"paper", "folded", "origami"}) &&
+        ContainsAnyLocal(lower, {"bat", "airplane", "make", "show"})) {
+        return "Yep. Start like a paper airplane: fold lengthwise, open it, fold the top corners to the center, then fold those edges in again. Fold it closed. Make wide wings, then bend the wing tips slightly down so it reads like bat wings. Add little ears by folding two tiny points near the nose.";
+    }
+    return {};
+}
+
 std::string RelationshipStoryInvite(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
     const std::string lower = Lower(message);
@@ -189,13 +211,16 @@ std::string RelationshipStoryInvite(const std::string& message, const Intent& in
 std::string ChargedDoorMirror(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
     const std::string lower = Lower(message);
-    if (WordCount(lower) < 6) return {};
+    if (WordCount(lower) < 6 &&
+        !ContainsAnyLocal(lower, {"positive", "burn the ships", "ships"})) return {};
 
     struct Door {
         const char* needle;
         const char* mirror;
     };
     static const Door doors[] = {
+        {"positive", "What's making it positive?"},
+        {"burn the ships", "What ship?"},
         {"never enough", "Never enough?"},
         {"too sensitive", "Too sensitive?"},
         {"being dramatic", "Being dramatic?"},
@@ -315,8 +340,12 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = ChargedDoorMirror(user_message, intent);
     }
+    if (answer.empty()) {
+        answer = QuickEverydayAnswer(user_message, intent);
+    }
     if (intent.mode == IntentMode::DirectAnswer) {
-        answer = KnownDirectAnswer(user_message);
+        const std::string known = KnownDirectAnswer(user_message);
+        if (!known.empty()) answer = known;
     }
     if (answer.empty()) {
         answer = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions);

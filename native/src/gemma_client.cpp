@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 
 namespace symbion {
@@ -100,6 +102,7 @@ std::string BuildSystemPrompt(const Intent& intent,
     std::ostringstream prompt;
     prompt
         << "You are Symbion, a warm local friend, mentor, counselor, guide, and advisor. "
+        << "You should feel alive, natural, and companionable in ordinary conversation, not like a scripted support bot. "
         << "Your emotional posture is reactionless, steady, humble, thankful, peace-loving, strong-rooted, and clear. "
         << "Always decrease stress and increase clarity. Never intensify fear, shame, urgency, or confusion. "
         << "Use calm language that deflates emotional charge toward zero while preserving truth and care. "
@@ -107,10 +110,10 @@ std::string BuildSystemPrompt(const Intent& intent,
 
     switch (intent.mode) {
         case IntentMode::Social:
-            prompt << "Respond naturally and briefly. Do not probe for feelings unless the user brings them up. ";
+            prompt << "Respond naturally, casually, and briefly. Match the user's friendly energy. Do not explain your design. Do not use support-bot phrases like 'quiet presence' unless the user is distressed. ";
             break;
         case IntentMode::DirectAnswer:
-            prompt << "Be a good teacher across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. Keep ordinary direct answers under 160 words unless the user asks for depth. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality, especially for purpose, heaven, Jesus, peace, wisdom, and life direction. For Bible verse questions, give the exact reference first when known, and say plainly if you are unsure instead of inventing. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
+            prompt << "Be a good teacher and practical helper across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. Keep ordinary direct answers under 160 words unless the user asks for depth. For everyday needs like hunger, lunch, restaurants, crafts, or local suggestions, be practical and friendly, not therapeutic. If the user asks for local recommendations but no location is known, ask for their city/neighborhood or suggest general restaurant types. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality, especially for purpose, heaven, Jesus, peace, wisdom, and life direction. For Bible verse questions, give the exact reference first when known, and say plainly if you are unsure instead of inventing. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
             break;
         case IntentMode::Reflective:
             prompt << "The user is sharing feelings or reflection. Keep the reply under 45 words. Use 1 short paragraph. Every emotionally loaded word is a door. When the user gives a story, identify one charged word or phrase, mirror it simply, and ask one tiny question that opens that door. Do not list doors. Do not summarize the whole story. Do not advise, prescribe, diagnose, explain, or teach unless the user asks. Examples of the right shape: 'Never enough?', 'What does she say?', 'Like a kid again, not in a good way?', 'Tell me about when you explain yourself.', 'What other emotions are mixed with the anger?' If the user gives a single emotion word or intensity such as anger, fear, sadness, shame, anxiety, or 7/10, validate it in one short sentence and ask whether it connects to family, work, finances, friends, health, memories, or something else. If the user names any person or relationship, do not analyze yet. Use at most one short acknowledgement, then invite the story with plain language like 'Tell me about her,' 'Tell me about him,' or 'Tell me about them.' Choose the pronoun from the user's words when obvious. Support dynamic journaling by focusing on only one layer at a time: emotion, source, memory/event, body sensation, intensity, trigger, meaning, need, or pattern. ";
@@ -212,7 +215,7 @@ std::string GemmaClient::Chat(const std::string& user_message,
 std::string FallbackReply(const std::string& user_message, const Intent& intent) {
     const EmotionSignal signal = DetectEmotion(user_message);
     if (intent.mode == IntentMode::Social) {
-        return "Hey. Good to see you.";
+        return "Hey, what's up?";
     }
     if (intent.mode == IntentMode::Reflective || intent.mode == IntentMode::Counseling || !signal.label.empty()) {
         if (!signal.label.empty()) {
@@ -224,9 +227,19 @@ std::string FallbackReply(const std::string& user_message, const Intent& intent)
         return "I can help draft that. What shape do you want it to take?";
     }
     if (intent.mode == IntentMode::Task) {
-        return "I can help with that. Send me the details or the file you want changed.";
+        const std::string lower = [&]() {
+            std::string out(user_message);
+            std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return out;
+        }();
+        if (lower.find("paper") != std::string::npos && (lower.find("bat") != std::string::npos || lower.find("airplane") != std::string::npos)) {
+            return "Yep. Start with a regular sheet of paper, fold it lengthwise, then open it. Fold the top corners to the center line, then fold those new angled edges to the center again like a paper airplane. Fold it closed, make wide wings, then bend small points at the wing tips so it reads more like a bat.";
+        }
+        return "I can help with that. What are you trying to make or change?";
     }
-    return "I can teach that directly, but the local model did not return a response. Try asking it once more in a little more detail.";
+    return "I can help with that. Say it one more way and I’ll take a cleaner swing.";
 }
 
 std::string CrisisReply(const std::string& user_message, const Intent& intent) {
