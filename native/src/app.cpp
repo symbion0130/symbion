@@ -134,7 +134,12 @@ bool IsEmotionalContinuation(const std::string& message,
             "most pressing feeling", "how does that make you feel", "make you feel",
             "how does that feel", "something happening", "something else in your life",
             "what is causing", "causing this anger", "hardest part", "need beneath",
-            "anything specific"
+            "anything specific", "connected to family", "family right now",
+            "family, work", "source of this", "where is it coming from",
+            "what happened", "what memory", "what did she", "what did he",
+            "mother", "mom", "dad", "father", "boss", "friend", "brother",
+            "sister", "spouse", "wife", "husband", "partner", "coworker",
+            "tell me about"
         });
     }
     return false;
@@ -150,6 +155,34 @@ std::string KnownDirectAnswer(const std::string& message) {
         return "I will remember " + message.substr(9) + ".";
     }
     return {};
+}
+
+std::string RelationshipStoryInvite(const std::string& message, const Intent& intent) {
+    if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
+    const std::string lower = Lower(message);
+    const size_t pos = lower.find("my ");
+    if (pos == std::string::npos) return {};
+    size_t start = pos + 3;
+    while (start < lower.size() && !std::isalnum(static_cast<unsigned char>(lower[start]))) ++start;
+    if (start >= lower.size()) return {};
+
+    std::string relation;
+    for (size_t i = start; i < lower.size() && relation.size() < 24; ++i) {
+        const char c = lower[i];
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            relation.push_back(c);
+        } else {
+            break;
+        }
+    }
+    if (relation.size() < 2) return {};
+
+    static const std::initializer_list<const char*> non_people = {
+        "anger", "anxiety", "fear", "sadness", "purpose", "life", "heart",
+        "mind", "body", "memory", "memories", "feelings", "emotions"
+    };
+    if (ContainsAnyLocal(relation, non_people)) return {};
+    return "Tell me about your " + relation + ".";
 }
 
 }  // namespace
@@ -239,7 +272,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto emotions = memory_.RecentEmotionSignals(8);
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
-    std::string answer;
+    std::string answer = RelationshipStoryInvite(user_message, intent);
     if (intent.mode == IntentMode::DirectAnswer) {
         answer = KnownDirectAnswer(user_message);
     }

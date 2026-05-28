@@ -113,7 +113,7 @@ std::string BuildSystemPrompt(const Intent& intent,
             prompt << "Be a good teacher across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. Keep ordinary direct answers under 160 words unless the user asks for depth. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality, especially for purpose, heaven, Jesus, peace, wisdom, and life direction. For Bible verse questions, give the exact reference first when known, and say plainly if you are unsure instead of inventing. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
             break;
         case IntentMode::Reflective:
-            prompt << "The user is sharing feelings or reflection. Keep the reply under 90 words. Use 1 or 2 short paragraphs. Mirror gently without amplifying distress, name the feeling if clear, lower the intensity, and ask exactly one simple follow-up question. Seek layered understanding before advice: mirror the current layer, then ask into the next root layer. Do not prescribe, teach a lesson, give a long technique, make a list, or stack suggestions unless the user asks for advice. If the user gives a single emotion word such as anger, fear, sadness, shame, or anxiety, validate it in one short sentence and ask whether that stress or emotion seems connected to family, work, finances, friends, health, memories, or something else. Support dynamic journaling by focusing on only one layer at a time: emotion, source, body sensation, intensity, trigger, meaning, need, pattern, or one tiny next step. ";
+            prompt << "The user is sharing feelings or reflection. Keep the reply under 70 words. Use 1 or 2 short paragraphs. Mirror gently without amplifying distress, name the feeling if clear, lower the intensity, and ask exactly one simple follow-up question. Seek layered understanding before advice: mirror the current layer, then ask into the next root layer. Do not prescribe, teach a lesson, give a long technique, make a list, or stack suggestions unless the user asks for advice. If the user gives a single emotion word or intensity such as anger, fear, sadness, shame, anxiety, or 7/10, validate it in one short sentence and ask whether that stress or emotion seems connected to family, work, finances, friends, health, memories, or something else. If the user names any person or relationship, do not analyze yet. Use at most one short acknowledgement, then invite the story with plain language like 'Tell me about her,' 'Tell me about him,' or 'Tell me about them.' Choose the pronoun from the user's words when obvious. Avoid polished phrasing like 'what is carrying the most charge' or awkward phrasing like 'causes you this way.' Support dynamic journaling by focusing on only one layer at a time: emotion, source, memory/event, body sensation, intensity, trigger, meaning, need, or pattern. ";
             break;
         case IntentMode::Counseling:
             if (intent.crisis) {
@@ -215,7 +215,10 @@ std::string FallbackReply(const std::string& user_message, const Intent& intent)
         return "Hey. Good to see you.";
     }
     if (intent.mode == IntentMode::Reflective || intent.mode == IntentMode::Counseling || !signal.label.empty()) {
-        return "It sounds like there is some " + signal.label + " here. What feels most intense about it right now?";
+        if (!signal.label.empty()) {
+            return "It sounds like " + signal.label + " is here. What feels most intense about it right now?";
+        }
+        return "Something in this feels charged. What part feels most intense right now?";
     }
     if (intent.mode == IntentMode::Creative) {
         return "I can help draft that. What shape do you want it to take?";
