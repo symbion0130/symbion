@@ -121,9 +121,10 @@ Privacy posture:
 
 ## Counseling Source Corpus
 
-`docs/source/MasterDocument.docx` is imported into SQLite as `counseling_sources` chunks.
-The importer uses standard-library DOCX XML extraction, chunks paragraphs,
-tags each chunk, and records:
+`docs/source/MasterDocument.docx` is extracted with
+`scripts/extract-master-doc.ps1` into `docs/source/MasterDocument.txt`.
+The native C++ runtime imports that text into SQLite as `counseling_sources`
+chunks at startup, rebuilds a local FTS index, tags each chunk, and records:
 
 - `tags`: grounding, grief, forgiveness, boundaries, repair, Christian framing,
   anxiety, shame, trauma, and related support labels.

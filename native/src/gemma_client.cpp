@@ -95,6 +95,7 @@ std::string HttpPostJson(const std::string& url, const std::string& body) {
 
 std::string BuildSystemPrompt(const Intent& intent,
                               const std::vector<ChatMessage>& relevant,
+                              const std::vector<SourceChunk>& sources,
                               const std::vector<EmotionSignal>& emotions) {
     std::ostringstream prompt;
     prompt
@@ -109,7 +110,7 @@ std::string BuildSystemPrompt(const Intent& intent,
             prompt << "Respond naturally and briefly. Do not probe for feelings unless the user brings them up. ";
             break;
         case IntentMode::DirectAnswer:
-            prompt << "Be a good teacher across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. For Bible verse questions, give the exact reference first when known, and say plainly if you are unsure instead of inventing. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
+            prompt << "Be a good teacher across all subjects. Answer directly first, explain clearly, define terms plainly, and use examples when helpful. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality, especially for purpose, heaven, Jesus, peace, wisdom, and life direction. For Bible verse questions, give the exact reference first when known, and say plainly if you are unsure instead of inventing. Do not mirror the question back. Do not ask a therapy-style follow-up. ";
             break;
         case IntentMode::Reflective:
             prompt << "The user is sharing feelings or reflection. Keep the reply under 90 words. Use 1 or 2 short paragraphs. Mirror gently without amplifying distress, name the feeling if clear, lower the intensity, and ask exactly one simple follow-up question. Seek layered understanding before advice: mirror the current layer, then ask into the next root layer. Do not prescribe, teach a lesson, give a long technique, make a list, or stack suggestions unless the user asks for advice. If the user gives a single emotion word such as anger, fear, sadness, shame, or anxiety, validate it in one short sentence and ask whether that stress or emotion seems connected to family, work, finances, friends, health, memories, or something else. Support dynamic journaling by focusing on only one layer at a time: emotion, source, body sensation, intensity, trigger, meaning, need, pattern, or one tiny next step. ";
@@ -158,6 +159,12 @@ std::string BuildSystemPrompt(const Intent& intent,
             prompt << "- " << msg.role << ": " << msg.content.substr(0, 400) << "\n";
         }
     }
+    if (!sources.empty()) {
+        prompt << "Retrieved MasterDocument guidance. Use this as the main north-star context when relevant, especially for purpose, heaven, Jesus, peace, wisdom, forgiveness, and emotional support. Do not paste it mechanically; answer naturally in Symbion's voice:\n";
+        for (const auto& source : sources) {
+            prompt << "- [" << source.tags << "] " << source.title << ": " << source.content.substr(0, 700) << "\n";
+        }
+    }
     return prompt.str();
 }
 
@@ -176,13 +183,14 @@ std::string GemmaClient::Chat(const std::string& user_message,
                               const Intent& intent,
                               const std::vector<ChatMessage>& recent,
                               const std::vector<ChatMessage>& relevant,
+                              const std::vector<SourceChunk>& sources,
                               const std::vector<EmotionSignal>& emotions) const {
     std::ostringstream messages;
     messages << "{\"model\":\"" << EscapeJson(config_.gemma_model) << "\","
              << "\"temperature\":" << config_.temperature << ","
              << "\"max_tokens\":" << config_.local_gemma_max_tokens << ","
              << "\"messages\":[";
-    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(intent, relevant, emotions)) << "\"}";
+    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(intent, relevant, sources, emotions)) << "\"}";
     for (const auto& msg : recent) {
         messages << ",{\"role\":\"" << EscapeJson(msg.role) << "\",\"content\":\"" << EscapeJson(msg.content) << "\"}";
     }

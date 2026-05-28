@@ -10,6 +10,8 @@ if (!(Test-Path $cmake)) {
     $cmake = "cmake"
 }
 
+& (Join-Path $PSScriptRoot "extract-master-doc.ps1")
+
 $configureArgs = @(
     "-S", (Join-Path $repo "native"),
     "-B", (Join-Path $repo "native\build"),

@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <iostream>
 #include <sstream>
 #include <unordered_set>
 
@@ -15,6 +17,7 @@ bool Exec(sqlite3* db, const char* sql) {
     char* error = nullptr;
     const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &error);
     if (error) {
+        std::cerr << "SQLite exec error: " << error << "\nSQL: " << sql << "\n";
         sqlite3_free(error);
     }
     return rc == SQLITE_OK;
@@ -45,6 +48,96 @@ void BindText(sqlite3_stmt* stmt, int index, const std::string& value) {
 std::string ColumnText(sqlite3_stmt* stmt, int index) {
     const unsigned char* text = sqlite3_column_text(stmt, index);
     return text ? reinterpret_cast<const char*>(text) : "";
+}
+
+std::string JoinTermsForFts(const std::vector<std::string>& terms) {
+    std::ostringstream query;
+    bool first = true;
+    for (const auto& term : terms) {
+        if (!first) query << " OR ";
+        first = false;
+        query << term << "*";
+    }
+    return query.str();
+}
+
+void AddUnique(std::vector<std::string>& terms, const std::string& term) {
+    if (std::find(terms.begin(), terms.end(), term) == terms.end()) terms.push_back(term);
+}
+
+std::vector<std::string> ExpandSourceTerms(const std::string& query, std::vector<std::string> terms) {
+    const std::string lower = Lower(query);
+    if (ContainsAny(lower, {"reason for life", "meaning of life", "purpose of life", "my purpose", "life purpose"})) {
+        AddUnique(terms, "purpose");
+        AddUnique(terms, "jesus");
+        AddUnique(terms, "serve");
+        AddUnique(terms, "peace");
+    }
+    if (ContainsAny(lower, {"heaven", "eternal life", "afterlife"})) {
+        AddUnique(terms, "heaven");
+        AddUnique(terms, "eternal");
+        AddUnique(terms, "kingdom");
+    }
+    if (ContainsAny(lower, {"anxiety", "stress", "anger", "afraid", "fear", "calm down"})) {
+        AddUnique(terms, "peace");
+        AddUnique(terms, "calm");
+        AddUnique(terms, "emotion");
+    }
+    if (ContainsAny(lower, {"forgive", "forgiveness", "resentment"})) {
+        AddUnique(terms, "forgive");
+        AddUnique(terms, "repair");
+        AddUnique(terms, "boundary");
+    }
+    return terms;
+}
+
+std::string TagsFor(const std::string& text) {
+    const std::string lower = Lower(text);
+    std::vector<std::string> tags;
+    auto add = [&](const std::string& tag) {
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) tags.push_back(tag);
+    };
+    if (ContainsAny(lower, {"jesus", "christ", "god", "holy spirit", "prayer", "pray"})) add("christian");
+    if (ContainsAny(lower, {"heaven", "eternal", "treasure", "kingdom"})) add("heaven");
+    if (ContainsAny(lower, {"purpose", "meaning", "reason for life", "serve", "help others"})) add("purpose");
+    if (ContainsAny(lower, {"peace", "calm", "stillness", "contentment", "destress"})) add("peace");
+    if (ContainsAny(lower, {"anger", "hate", "frustrat", "resent"})) add("anger");
+    if (ContainsAny(lower, {"anxiety", "stress", "fear", "panic"})) add("anxiety");
+    if (ContainsAny(lower, {"forgive", "forgiveness", "repair", "repent"})) add("forgiveness");
+    if (ContainsAny(lower, {"boundary", "boundaries", "safe", "safety"})) add("boundaries");
+    if (ContainsAny(lower, {"grief", "loss", "tears", "sorrow"})) add("grief");
+    if (ContainsAny(lower, {"journal", "meditat", "mindful", "emotion"})) add("emotional_processing");
+    if (tags.empty()) add("general_wisdom");
+
+    std::ostringstream out;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (i > 0) out << ",";
+        out << tags[i];
+    }
+    return out.str();
+}
+
+std::string IntensityFor(const std::string& text) {
+    const std::string lower = Lower(text);
+    return ContainsAny(lower, {
+        "demon", "demonic", "spiritual warfare", "narcissist", "jezebel",
+        "kingdom of darkness", "enemy obsession", "persecution"
+    }) ? "high" : "normal";
+}
+
+std::string SafetyClassFor(const std::string& text) {
+    const std::string lower = Lower(text);
+    return ContainsAny(lower, {
+        "suicide", "self-harm", "kill myself", "end my life", "violence",
+        "immediate danger"
+    }) ? "crisis" : "support";
+}
+
+bool LooksLikeTitle(const std::string& line) {
+    if (line.size() > 140) return false;
+    const std::string lower = Lower(line);
+    return line.find('?') != std::string::npos ||
+           ContainsAny(lower, {"trajectory", "purpose", "heaven", "guide", "prayer", "hope", "peace"});
 }
 
 }  // namespace
@@ -87,7 +180,24 @@ bool MemoryStore::EnsureSchema() {
                      "source_text TEXT NOT NULL,"
                      "created_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_emotions_time "
-                     "ON native_emotion_signals(created_at);");
+                     "ON native_emotion_signals(created_at);") &&
+           Exec(db_, "DROP TABLE IF EXISTS counseling_sources_fts;") &&
+           Exec(db_, "DROP TABLE IF EXISTS counseling_sources;") &&
+           Exec(db_, "CREATE TABLE IF NOT EXISTS counseling_sources ("
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     "source_path TEXT NOT NULL,"
+                     "source_order INTEGER NOT NULL,"
+                     "title TEXT NOT NULL,"
+                     "content TEXT NOT NULL,"
+                     "tags TEXT NOT NULL,"
+                     "intensity TEXT NOT NULL,"
+                     "safety_class TEXT NOT NULL,"
+                     "preference TEXT NOT NULL,"
+                     "updated_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_counseling_sources_order "
+                     "ON counseling_sources(source_order);") &&
+           Exec(db_, "CREATE VIRTUAL TABLE IF NOT EXISTS counseling_sources_fts "
+                     "USING fts5(title, content, tags);");
 }
 
 bool MemoryStore::SaveMessage(const std::string& session_id, const std::string& role, const std::string& content) {
@@ -115,6 +225,95 @@ bool MemoryStore::SaveEmotion(const std::string& session_id, const std::string& 
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     return ok;
+}
+
+bool MemoryStore::ImportCounselingSource(const std::filesystem::path& text_path) {
+    if (!db_ || !std::filesystem::exists(text_path)) return false;
+
+    std::ifstream input(text_path, std::ios::binary);
+    if (!input) return false;
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+        if (!line.empty()) lines.push_back(line);
+    }
+    if (lines.empty()) return false;
+
+    Exec(db_, "BEGIN;");
+    Exec(db_, "DELETE FROM counseling_sources;");
+    Exec(db_, "DELETE FROM counseling_sources_fts;");
+
+    sqlite3_stmt* insert_source = nullptr;
+    sqlite3_stmt* insert_fts = nullptr;
+    const char* source_sql =
+        "INSERT INTO counseling_sources(source_path, source_order, title, content, tags, intensity, safety_class, preference) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
+    const char* fts_sql =
+        "INSERT INTO counseling_sources_fts(rowid, title, content, tags) VALUES(?, ?, ?, ?);";
+    if (sqlite3_prepare_v2(db_, source_sql, -1, &insert_source, nullptr) != SQLITE_OK ||
+        sqlite3_prepare_v2(db_, fts_sql, -1, &insert_fts, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(insert_source);
+        sqlite3_finalize(insert_fts);
+        Exec(db_, "ROLLBACK;");
+        return false;
+    }
+
+    const std::string source_path = text_path.string();
+    std::string title = "MasterDocument";
+    std::string chunk;
+    int order = 0;
+    int imported = 0;
+    auto flush = [&]() {
+        if (chunk.empty()) return;
+        const std::string tags = TagsFor(title + " " + chunk);
+        const std::string intensity = IntensityFor(chunk);
+        const std::string safety = SafetyClassFor(chunk);
+        const std::string preference = intensity == "normal" && safety == "support" ? "gentle_practical" : "restricted";
+
+        sqlite3_reset(insert_source);
+        sqlite3_clear_bindings(insert_source);
+        BindText(insert_source, 1, source_path);
+        sqlite3_bind_int(insert_source, 2, order++);
+        BindText(insert_source, 3, title);
+        BindText(insert_source, 4, chunk);
+        BindText(insert_source, 5, tags);
+        BindText(insert_source, 6, intensity);
+        BindText(insert_source, 7, safety);
+        BindText(insert_source, 8, preference);
+        if (sqlite3_step(insert_source) != SQLITE_DONE) return;
+        const sqlite3_int64 rowid = sqlite3_last_insert_rowid(db_);
+
+        sqlite3_reset(insert_fts);
+        sqlite3_clear_bindings(insert_fts);
+        sqlite3_bind_int64(insert_fts, 1, rowid);
+        BindText(insert_fts, 2, title);
+        BindText(insert_fts, 3, chunk);
+        BindText(insert_fts, 4, tags);
+        sqlite3_step(insert_fts);
+        ++imported;
+        chunk.clear();
+    };
+
+    for (const auto& raw : lines) {
+        if (LooksLikeTitle(raw)) {
+            flush();
+            title = raw.substr(0, 180);
+            continue;
+        }
+        if (!chunk.empty() && chunk.size() + raw.size() > 1100) {
+            flush();
+        }
+        if (!chunk.empty()) chunk += "\n";
+        chunk += raw;
+    }
+    flush();
+
+    sqlite3_finalize(insert_source);
+    sqlite3_finalize(insert_fts);
+    Exec(db_, "COMMIT;");
+    return imported > 0;
 }
 
 std::vector<ChatMessage> MemoryStore::RecentMessages(const std::string& session_id, int limit) const {
@@ -157,6 +356,43 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
         if (ContainsAny(Lower(msg.content), terms)) {
             out.push_back(std::move(msg));
         }
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<SourceChunk> MemoryStore::SearchCounselingSources(const std::string& query,
+                                                              bool include_high_intensity,
+                                                              int limit) const {
+    std::vector<SourceChunk> out;
+    if (!db_ || limit <= 0) return out;
+    const auto terms = ExpandSourceTerms(query, QueryTerms(query));
+    if (terms.empty()) return out;
+    const std::string match = JoinTermsForFts(terms);
+    if (match.empty()) return out;
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT s.title, s.content, s.tags, s.intensity, s.safety_class "
+        "FROM counseling_sources_fts f "
+        "JOIN counseling_sources s ON s.id=f.rowid "
+        "WHERE counseling_sources_fts MATCH ? "
+        "AND (?=1 OR s.intensity!='high') "
+        "AND s.safety_class='support' "
+        "ORDER BY CASE s.preference WHEN 'gentle_practical' THEN 0 ELSE 1 END, bm25(counseling_sources_fts) "
+        "LIMIT ?;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    BindText(stmt, 1, match);
+    sqlite3_bind_int(stmt, 2, include_high_intensity ? 1 : 0);
+    sqlite3_bind_int(stmt, 3, limit);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        out.push_back({
+            ColumnText(stmt, 0),
+            ColumnText(stmt, 1),
+            ColumnText(stmt, 2),
+            ColumnText(stmt, 3),
+            ColumnText(stmt, 4),
+        });
     }
     sqlite3_finalize(stmt);
     return out;

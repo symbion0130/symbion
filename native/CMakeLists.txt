@@ -47,6 +47,9 @@ target_compile_definitions(symbion_native PRIVATE
     _UNICODE
     SYMBION_NATIVE_DEFAULT_URL=L\"${SYMBION_NATIVE_DEFAULT_URL}\"
 )
+target_compile_definitions(symbion_backend PRIVATE
+    SQLITE_ENABLE_FTS5
+)
 
 if(MSVC)
     target_compile_options(symbion_native PRIVATE /W4 /permissive-)

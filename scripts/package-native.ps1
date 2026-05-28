@@ -15,6 +15,8 @@ if (!(Test-Path (Join-Path $build "symbion_backend.exe"))) {
     throw "symbion_backend.exe is missing. Run .\scripts\build-native.ps1 first."
 }
 
+& (Join-Path $PSScriptRoot "extract-master-doc.ps1")
+
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
 
@@ -25,6 +27,8 @@ Copy-Item (Join-Path $build "symbion_backend.exe") $stage
 Copy-Item (Join-Path $build "WebView2Loader.dll") $stage -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $repo "native\README.md") $stage
 Copy-Item (Join-Path $repo "config") (Join-Path $stage "config") -Recurse
+New-Item -ItemType Directory -Path (Join-Path $stage "docs\source") -Force | Out-Null
+Copy-Item (Join-Path $repo "docs\source\MasterDocument.txt") (Join-Path $stage "docs\source\MasterDocument.txt")
 Copy-Item (Join-Path $repo "native\web") (Join-Path $stage "web") -Recurse
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
 Remove-Item -LiteralPath $stage -Recurse -Force

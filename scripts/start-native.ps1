@@ -10,6 +10,8 @@ if (!(Test-Path $exe)) {
     throw "Native shell is not built. Run: cmake --build native\build --config Release --target symbion_native"
 }
 
+& (Join-Path $PSScriptRoot "extract-master-doc.ps1")
+
 $args = @()
 if ($Url.Trim()) {
     $args += "--url"
