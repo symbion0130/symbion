@@ -157,6 +157,24 @@ std::string KnownDirectAnswer(const std::string& message) {
     return {};
 }
 
+std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
+    if (intent.mode != IntentMode::Social) return {};
+    const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"})) {
+        return "That's the good stuff. We take a calm win when it shows up.";
+    }
+    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return "I'm good, man. Steady, awake, hanging in the pocket.";
+    }
+    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello") {
+        return "Hey. Good to see you.";
+    }
+    if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy"})) {
+        return "Hey, my guy. I'm here.";
+    }
+    return {};
+}
+
 std::string QuickEverydayAnswer(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::DirectAnswer && intent.mode != IntentMode::Task &&
         intent.mode != IntentMode::Creative) return {};
@@ -336,7 +354,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto emotions = memory_.RecentEmotionSignals(8);
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
-    std::string answer = RelationshipStoryInvite(user_message, intent);
+    std::string answer = QuickSocialAnswer(user_message, intent);
+    if (answer.empty()) {
+        answer = RelationshipStoryInvite(user_message, intent);
+    }
     if (answer.empty()) {
         answer = ChargedDoorMirror(user_message, intent);
     }
