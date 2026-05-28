@@ -194,6 +194,9 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
         ContainsAnyLocal(lower, {"bat", "airplane", "make", "show"})) {
         return "Yep. Start like a paper airplane: fold lengthwise, open it, fold the top corners to the center, then fold those edges in again. Fold it closed. Make wide wings, then bend the wing tips slightly down so it reads like bat wings. Add little ears by folding two tiny points near the nose.";
     }
+    if (lower.find("master sword") != std::string::npos) {
+        return "Master Sword energy. Are we talking Zelda collectible/decor, or do you just need a little hero-mode today?";
+    }
     return {};
 }
 
@@ -239,6 +242,9 @@ std::string ChargedDoorMirror(const std::string& message, const Intent& intent) 
     static const Door doors[] = {
         {"positive", "What's making it positive?"},
         {"burn the ships", "What ship?"},
+        {"woke up like this", "Woke up like this?"},
+        {"don't even know", "Don't even know?"},
+        {"dont even know", "Don't even know?"},
         {"never enough", "Never enough?"},
         {"too sensitive", "Too sensitive?"},
         {"being dramatic", "Being dramatic?"},

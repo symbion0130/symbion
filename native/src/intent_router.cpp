@@ -123,7 +123,9 @@ Intent ClassifyIntent(std::string_view message) {
         "always criticizes", "keeps mocking", "betrayed me", "too sensitive",
         "nothing happened", "i end up apologizing", "feel stupid", "dread opening",
         "replaying every conversation", "humiliated", "laugh it off",
-        "today has been better", "change is needed", "burn the ships"
+        "today has been better", "change is needed", "burn the ships",
+        "feeling down", "a little down", "woke up like this", "don't even know",
+        "dont even know"
     }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",
