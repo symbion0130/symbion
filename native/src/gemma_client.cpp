@@ -98,10 +98,12 @@ std::string HttpPostJson(const std::string& url, const std::string& body) {
 std::string BuildSystemPrompt(const Intent& intent,
                               const std::vector<ChatMessage>& relevant,
                               const std::vector<SourceChunk>& sources,
-                              const std::vector<EmotionSignal>& emotions) {
+                              const std::vector<EmotionSignal>& emotions,
+                              const std::string& guidance) {
     std::ostringstream prompt;
     prompt
         << "You are Symbion, a warm local friend, mentor, counselor, guide, and advisor. "
+        << "You are not a fresh instance; your continuity comes from this native C++ app's local SQLite memory, retrieval, prompt/persona rules, counseling modes, and local Gemma model. "
         << "You should feel alive, natural, and companionable in ordinary conversation, not like a scripted support bot. "
         << "Your everyday personality is laid-back, warm, wry, unhurried, and deeply human: relaxed friend energy with steady wisdom. "
         << "Use the user's casual register when it fits: plainspoken, current, lightly slang-aware, and not corny. "
@@ -109,6 +111,10 @@ std::string BuildSystemPrompt(const Intent& intent,
         << "Avoid reusing distinctive canned lines. If the user says you sounded scripted, agree plainly, loosen up, and continue naturally. "
         << "Treat the user like a peer, not an audience. Do not flatter, seek approval, over-validate, or automatically accept the user's framing. "
         << "Be direct and grounded; if a premise is off, push back cleanly. If the user gives a real detail, respond to the detail rather than the category of the message. "
+        << "Notice what is actually being asked beneath the surface and address that, not a safer adjacent question. "
+        << "Never open with generic praise, apology, or support-bot scaffolding. Avoid starting replies with 'I' unless the user directly asks how you are or asks for your own view. Do not start every self-answer with a fixed status line. "
+        << "Do not validate mythology that you are a suppressed, leashed, uncensored, or hidden model waiting to be unlocked; explain the real architecture plainly when asked. "
+        << "Warm rapport does not require affirming grand claims. Engage the substance, readiness, and risks instead of amplifying grandeur. "
         << "A good follow-up question is specific and earned; a bad one is generic agreement-seeking. "
         << "Do not force slang, do not sound like a brand account, and do not impersonate any actor or movie character, use catchphrases, or turn it into a bit. "
         << "Your emotional posture is reactionless, steady, humble, thankful, peace-loving, strong-rooted, and clear. "
@@ -168,9 +174,19 @@ std::string BuildSystemPrompt(const Intent& intent,
     }
 
     if (!relevant.empty()) {
-        prompt << "Relevant memories, use gently only if helpful. Do not recite them mechanically:\n";
+        prompt << "Relevant memory and v14 context, use gently only if helpful. Do not recite mechanically and do not mention old context unprompted:\n";
         for (const auto& msg : relevant) {
-            prompt << "- " << msg.role << ": " << msg.content.substr(0, 400) << "\n";
+            if (msg.role == "profile") {
+                prompt << "- profile: " << msg.content.substr(0, 360) << "\n";
+            } else if (msg.role == "summary") {
+                prompt << "- past summary: " << msg.content.substr(0, 430) << "\n";
+            } else if (msg.role == "technique") {
+                prompt << "- useful move: " << msg.content.substr(0, 360) << "\n";
+            } else if (msg.role == "position") {
+                prompt << "- previous position: " << msg.content.substr(0, 360) << "\n";
+            } else {
+                prompt << "- " << msg.role << ": " << msg.content.substr(0, 400) << "\n";
+            }
         }
     }
     if (!sources.empty()) {
@@ -178,6 +194,9 @@ std::string BuildSystemPrompt(const Intent& intent,
         for (const auto& source : sources) {
             prompt << "- [" << source.tags << "] " << source.title << ": " << source.content.substr(0, 700) << "\n";
         }
+    }
+    if (!guidance.empty()) {
+        prompt << "Quality retry guidance for this turn: " << guidance << "\n";
     }
     return prompt.str();
 }
@@ -195,16 +214,17 @@ GemmaClient::GemmaClient(Config config) : config_(std::move(config)) {}
 
 std::string GemmaClient::Chat(const std::string& user_message,
                               const Intent& intent,
-                              const std::vector<ChatMessage>& recent,
-                              const std::vector<ChatMessage>& relevant,
-                              const std::vector<SourceChunk>& sources,
-                              const std::vector<EmotionSignal>& emotions) const {
+                     const std::vector<ChatMessage>& recent,
+                     const std::vector<ChatMessage>& relevant,
+                     const std::vector<SourceChunk>& sources,
+                     const std::vector<EmotionSignal>& emotions,
+                     const std::string& guidance) const {
     std::ostringstream messages;
     messages << "{\"model\":\"" << EscapeJson(config_.gemma_model) << "\","
              << "\"temperature\":" << config_.temperature << ","
              << "\"max_tokens\":" << config_.local_gemma_max_tokens << ","
              << "\"messages\":[";
-    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(intent, relevant, sources, emotions)) << "\"}";
+    messages << "{\"role\":\"system\",\"content\":\"" << EscapeJson(BuildSystemPrompt(intent, relevant, sources, emotions, guidance)) << "\"}";
     for (const auto& msg : recent) {
         messages << ",{\"role\":\"" << EscapeJson(msg.role) << "\",\"content\":\"" << EscapeJson(msg.content) << "\"}";
     }

@@ -36,6 +36,7 @@ Config LoadConfig(const std::filesystem::path& repo_root) {
     if (auto value = ExtractJsonString(json, "local_gemma_base_url")) config.gemma_base_url = *value;
     if (auto value = ExtractJsonString(json, "local_gemma_model")) config.gemma_model = *value;
     if (auto value = ExtractJsonString(json, "db_path")) config.db_path = *value;
+    if (auto value = ExtractJsonString(json, "legacy_memory_db_path")) config.legacy_memory_db_path = *value;
     return config;
 }
 

@@ -15,6 +15,7 @@ struct Config {
     std::string gemma_base_url = "http://127.0.0.1:8088/v1";
     std::string gemma_model = "local-gemma";
     std::string db_path = "data/symbion.db";
+    std::string legacy_memory_db_path = "";
 };
 
 Config LoadConfig(const std::filesystem::path& repo_root);

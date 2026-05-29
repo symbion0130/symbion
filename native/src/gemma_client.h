@@ -18,7 +18,8 @@ public:
                      const std::vector<ChatMessage>& recent,
                      const std::vector<ChatMessage>& relevant,
                      const std::vector<SourceChunk>& sources,
-                     const std::vector<EmotionSignal>& emotions) const;
+                     const std::vector<EmotionSignal>& emotions,
+                     const std::string& guidance = "") const;
 
 private:
     Config config_;

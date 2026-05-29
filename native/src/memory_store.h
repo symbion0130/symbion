@@ -45,8 +45,10 @@ public:
     bool SaveMessage(const std::string& session_id, const std::string& role, const std::string& content);
     bool SaveEmotion(const std::string& session_id, const std::string& source_text, const EmotionSignal& signal);
     bool ImportCounselingSource(const std::filesystem::path& text_path);
+    bool ImportLegacyContext(const std::filesystem::path& legacy_db_path);
 
     std::vector<ChatMessage> RecentMessages(const std::string& session_id, int limit) const;
+    std::vector<ChatMessage> AmbientContext(int limit) const;
     std::vector<ChatMessage> RetrieveRelevant(const std::string& query, int limit) const;
     std::vector<SourceChunk> SearchCounselingSources(const std::string& query, bool include_high_intensity, int limit) const;
     std::vector<EmotionSignal> RecentEmotionSignals(int limit) const;

@@ -21,4 +21,12 @@ Invoke-RestMethod http://127.0.0.1:8000/api/messages/recent
 Invoke-RestMethod http://127.0.0.1:8000/api/emotions/recent
 ```
 
+Conversation routing smoke:
+
+```powershell
+.\scripts\smoke-conversation.ps1
+```
+
+The script posts isolated sessions to `/api/chat` and checks persona/routing regressions for social context, v14-style relational warmth, direct teaching, emotional mapping, crisis tone, MasterDocument-guided spiritual answers, and forget/wipe confirmation. It never confirms a full memory wipe.
+
 Python tests were removed with the legacy runtime. Checks now target the native backend and WebView2 shell.

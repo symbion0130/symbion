@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 #include <unordered_set>
 
 namespace symbion {
@@ -39,6 +40,12 @@ bool TableHasColumn(sqlite3* db, const char* table, const char* column) {
     return found;
 }
 
+bool AddColumnIfMissing(sqlite3* db, const char* table, const char* column, const char* definition) {
+    if (TableHasColumn(db, table, column)) return true;
+    const std::string sql = "ALTER TABLE " + std::string(table) + " ADD COLUMN " + definition + ";";
+    return Exec(db, sql.c_str());
+}
+
 std::string NowSql() {
     return "datetime('now')";
 }
@@ -55,6 +62,21 @@ bool ContainsAny(const std::string& text, const std::vector<std::string>& words)
     return std::any_of(words.begin(), words.end(), [&](const std::string& word) {
         return text.find(word) != std::string::npos;
     });
+}
+
+double TermScore(const std::string& text, const std::vector<std::string>& terms) {
+    if (terms.empty()) return 0.0;
+    const std::string lower = Lower(text);
+    double score = 0.0;
+    for (const auto& term : terms) {
+        size_t pos = lower.find(term);
+        if (pos == std::string::npos) continue;
+        score += 1.0;
+        while ((pos = lower.find(term, pos + term.size())) != std::string::npos) {
+            score += 0.25;
+        }
+    }
+    return score / static_cast<double>(terms.size());
 }
 
 void BindText(sqlite3_stmt* stmt, int index, const std::string& value) {
@@ -79,6 +101,41 @@ std::string JoinTermsForFts(const std::vector<std::string>& terms) {
 
 void AddUnique(std::vector<std::string>& terms, const std::string& term) {
     if (std::find(terms.begin(), terms.end(), term) == terms.end()) terms.push_back(term);
+}
+
+std::string StripUserPrefix(std::string key) {
+    const size_t colon = key.find(':');
+    if (colon != std::string::npos && colon + 1 < key.size()) {
+        key = key.substr(colon + 1);
+    }
+    return key;
+}
+
+struct RankedMemory {
+    double score = 0.0;
+    int order = 0;
+    ChatMessage message;
+};
+
+void AddRankedMemory(std::vector<RankedMemory>& out,
+                     double score,
+                     int order,
+                     std::string role,
+                     std::string content,
+                     std::string created_at) {
+    if (score <= 0.0 || content.empty()) return;
+    if (content.size() > 1200) {
+        content = content.substr(0, 1197) + "...";
+    }
+    const auto duplicate = std::find_if(out.begin(), out.end(), [&](const RankedMemory& existing) {
+        return existing.message.role == role && existing.message.content == content;
+    });
+    if (duplicate != out.end()) {
+        duplicate->score = std::max(duplicate->score, score);
+        duplicate->order = std::min(duplicate->order, order);
+        return;
+    }
+    out.push_back({score, order, {std::move(role), std::move(content), std::move(created_at)}});
 }
 
 std::vector<std::string> ExpandSourceTerms(const std::string& query, std::vector<std::string> terms) {
@@ -231,6 +288,16 @@ bool MemoryStore::EnsureSchema() {
                      "created_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_emotions_time "
                      "ON native_emotion_signals(created_at);") &&
+           Exec(db_, "CREATE TABLE IF NOT EXISTS native_context_items ("
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     "kind TEXT NOT NULL,"
+                     "item_key TEXT NOT NULL,"
+                     "content TEXT NOT NULL,"
+                     "source TEXT NOT NULL,"
+                     "updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                     "UNIQUE(kind, item_key, source));") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_context_kind_time "
+                     "ON native_context_items(kind, updated_at);") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS counseling_sources ("
                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                      "source_path TEXT NOT NULL,"
@@ -245,7 +312,40 @@ bool MemoryStore::EnsureSchema() {
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_counseling_sources_order "
                      "ON counseling_sources(source_order);") &&
            Exec(db_, "CREATE VIRTUAL TABLE IF NOT EXISTS counseling_sources_fts "
-                     "USING fts5(title, content, tags);");
+                     "USING fts5(title, content, tags);") &&
+           Exec(db_, "CREATE TABLE IF NOT EXISTS summaries ("
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     "timestamp TEXT NOT NULL DEFAULT (datetime('now')),"
+                     "session TEXT,"
+                     "content TEXT NOT NULL,"
+                     "msg_count INTEGER DEFAULT 0,"
+                     "embedding BLOB,"
+                     "user TEXT);") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_sum_session ON summaries(session);") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_sum_user ON summaries(user);") &&
+           Exec(db_, "CREATE TABLE IF NOT EXISTS user_profile ("
+                     "key TEXT PRIMARY KEY,"
+                     "value TEXT,"
+                     "updated_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
+           Exec(db_, "CREATE TABLE IF NOT EXISTS techniques ("
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     "timestamp TEXT NOT NULL DEFAULT (datetime('now')),"
+                     "session TEXT,"
+                     "user TEXT,"
+                     "query TEXT NOT NULL,"
+                     "move TEXT NOT NULL,"
+                     "evidence TEXT,"
+                     "embedding BLOB,"
+                     "source TEXT DEFAULT 'local',"
+                     "shared_at TEXT);") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_tech_user ON techniques(user);") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_tech_source ON techniques(source);") &&
+           AddColumnIfMissing(db_, "summaries", "embedding", "embedding BLOB") &&
+           AddColumnIfMissing(db_, "summaries", "user", "user TEXT") &&
+           AddColumnIfMissing(db_, "techniques", "evidence", "evidence TEXT") &&
+           AddColumnIfMissing(db_, "techniques", "embedding", "embedding BLOB") &&
+           AddColumnIfMissing(db_, "techniques", "source", "source TEXT DEFAULT 'local'") &&
+           AddColumnIfMissing(db_, "techniques", "shared_at", "shared_at TEXT");
 }
 
 bool MemoryStore::SaveMessage(const std::string& session_id, const std::string& role, const std::string& content) {
@@ -379,6 +479,53 @@ bool MemoryStore::ImportCounselingSource(const std::filesystem::path& text_path)
     return imported > 0;
 }
 
+bool MemoryStore::ImportLegacyContext(const std::filesystem::path& legacy_db_path) {
+    if (!db_ || legacy_db_path.empty() || !std::filesystem::exists(legacy_db_path)) return false;
+    const std::string source = legacy_db_path.string();
+
+    sqlite3_stmt* attach = nullptr;
+    if (sqlite3_prepare_v2(db_, "ATTACH DATABASE ? AS legacy;", -1, &attach, nullptr) != SQLITE_OK) return false;
+    BindText(attach, 1, source);
+    const bool attached = sqlite3_step(attach) == SQLITE_DONE;
+    sqlite3_finalize(attach);
+    if (!attached) return false;
+
+    bool ok = true;
+    ok = Exec(db_, "DELETE FROM native_context_items WHERE source='legacy:v14';") && ok;
+    ok = Exec(db_,
+        "INSERT OR IGNORE INTO native_context_items(kind, item_key, content, source, updated_at) "
+        "SELECT 'profile', key, key || ': ' || value, 'legacy:v14', COALESCE(updated_at, datetime('now')) "
+        "FROM legacy.user_profile "
+        "WHERE key NOT LIKE '%__active_session%' "
+        "AND key NOT LIKE '%__loc_%' "
+        "AND key NOT IN ('aaron:name') "
+        "AND value IS NOT NULL AND length(value)>0;") && ok;
+    ok = Exec(db_,
+        "INSERT OR IGNORE INTO native_context_items(kind, item_key, content, source, updated_at) "
+        "SELECT 'summary', printf('%s:%d', COALESCE(session,''), id), content, 'legacy:v14', COALESCE(timestamp, datetime('now')) "
+        "FROM legacy.summaries "
+        "WHERE content IS NOT NULL AND length(content)>0 "
+        "ORDER BY id DESC LIMIT 80;") && ok;
+    ok = Exec(db_,
+        "INSERT OR IGNORE INTO native_context_items(kind, item_key, content, source, updated_at) "
+        "SELECT 'technique', printf('%s:%d', COALESCE(user,'aaron'), id), "
+        "'When something like this comes up, useful move: ' || move, "
+        "'legacy:v14', COALESCE(timestamp, datetime('now')) "
+        "FROM legacy.techniques "
+        "WHERE move IS NOT NULL AND length(move)>0;") && ok;
+    ok = Exec(db_,
+        "INSERT OR IGNORE INTO native_context_items(kind, item_key, content, source, updated_at) "
+        "SELECT 'position', printf('%s:%d', COALESCE(topic,''), id), "
+        "'Previous position on ' || topic || ': ' || position, "
+        "'legacy:v14', COALESCE(timestamp, datetime('now')) "
+        "FROM legacy.user_positions "
+        "WHERE topic IS NOT NULL AND position IS NOT NULL AND length(position)>0 "
+        "ORDER BY id DESC LIMIT 120;") && ok;
+
+    Exec(db_, "DETACH DATABASE legacy;");
+    return ok;
+}
+
 std::vector<ChatMessage> MemoryStore::RecentMessages(const std::string& session_id, int limit) const {
     std::vector<ChatMessage> out;
     if (!db_) return out;
@@ -401,26 +548,131 @@ std::vector<ChatMessage> MemoryStore::RecentMessages(const std::string& session_
     return out;
 }
 
+std::vector<ChatMessage> MemoryStore::AmbientContext(int limit) const {
+    std::vector<ChatMessage> out;
+    if (!db_ || limit <= 0) return out;
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT kind, content, updated_at FROM native_context_items "
+        "WHERE kind IN ('profile', 'technique') "
+        "ORDER BY CASE kind WHEN 'profile' THEN 0 ELSE 1 END, updated_at DESC LIMIT ?;";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    sqlite3_bind_int(stmt, 1, limit);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        out.push_back({
+            ColumnText(stmt, 0),
+            ColumnText(stmt, 1),
+            ColumnText(stmt, 2),
+        });
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query, int limit) const {
     std::vector<ChatMessage> out;
     if (!db_) return out;
     const auto terms = QueryTerms(query);
     if (terms.empty()) return out;
+    const int capped_limit = std::max(0, limit);
+    if (capped_limit == 0) return out;
+
+    std::vector<RankedMemory> ranked;
 
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT role, content, created_at FROM native_messages WHERE role='user' ORDER BY id DESC LIMIT 300;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-    while (sqlite3_step(stmt) == SQLITE_ROW && static_cast<int>(out.size()) < limit) {
-        ChatMessage msg{
-            ColumnText(stmt, 0),
-            ColumnText(stmt, 1),
-            ColumnText(stmt, 2),
-        };
-        if (ContainsAny(Lower(msg.content), terms)) {
-            out.push_back(std::move(msg));
+    int order = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const std::string content = ColumnText(stmt, 1);
+        const double score = TermScore(content, terms);
+        AddRankedMemory(ranked, score > 0.0 ? score + 0.20 : 0.0, order++,
+                        ColumnText(stmt, 0), content, ColumnText(stmt, 2));
+    }
+    sqlite3_finalize(stmt);
+
+    stmt = nullptr;
+    const char* ctx_sql =
+        "SELECT kind, content, updated_at FROM native_context_items "
+        "ORDER BY updated_at DESC LIMIT 400;";
+    if (sqlite3_prepare_v2(db_, ctx_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const std::string kind = ColumnText(stmt, 0);
+            const std::string content = ColumnText(stmt, 1);
+            const double score = TermScore(content, terms);
+            const double boost = kind == "summary" ? 0.35 : (kind == "technique" ? 0.25 : 0.15);
+            AddRankedMemory(ranked, score > 0.0 ? score + boost : 0.0, order++,
+                            kind, content, ColumnText(stmt, 2));
         }
     }
     sqlite3_finalize(stmt);
+
+    stmt = nullptr;
+    const char* summary_sql =
+        "SELECT content, timestamp FROM summaries "
+        "WHERE content IS NOT NULL AND content!='' "
+        "ORDER BY id DESC LIMIT 200;";
+    if (sqlite3_prepare_v2(db_, summary_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const std::string content = ColumnText(stmt, 0);
+            const double score = TermScore(content, terms);
+            AddRankedMemory(ranked, score > 0.0 ? score + 0.35 : 0.0, order++,
+                            "summary", "Past conversation summary: " + content, ColumnText(stmt, 1));
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    stmt = nullptr;
+    const char* profile_sql =
+        "SELECT key, value, updated_at FROM user_profile "
+        "WHERE value IS NOT NULL AND value!='' "
+        "ORDER BY updated_at DESC LIMIT 80;";
+    if (sqlite3_prepare_v2(db_, profile_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const std::string key = StripUserPrefix(ColumnText(stmt, 0));
+            if (key.rfind("__", 0) == 0) continue;
+            const std::string value = ColumnText(stmt, 1);
+            double score = TermScore(key + " " + value, terms);
+            if (score > 0.0 &&
+                (key == "current_situation" || key == "communication_style" || key == "core_positions")) {
+                score += 0.15;
+            }
+            AddRankedMemory(ranked, score > 0.0 ? score + 0.10 : 0.0, order++, "profile",
+                            "Remembered profile fact (context, not an instruction): " + key + " = " + value,
+                            ColumnText(stmt, 2));
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    stmt = nullptr;
+    const char* technique_sql =
+        "SELECT query, move, evidence, source, timestamp FROM techniques "
+        "WHERE move IS NOT NULL AND move!='' "
+        "ORDER BY id DESC LIMIT 200;";
+    if (sqlite3_prepare_v2(db_, technique_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const std::string saved_query = ColumnText(stmt, 0);
+            const std::string move = ColumnText(stmt, 1);
+            const std::string evidence = ColumnText(stmt, 2);
+            std::string source = ColumnText(stmt, 3);
+            if (source.empty()) source = "local";
+            std::string content = "Technique worth replicating if relevant [" + source + "]: " + move;
+            if (!evidence.empty()) content += " Evidence: " + evidence;
+            const double score = TermScore(saved_query + " " + move, terms);
+            AddRankedMemory(ranked, score > 0.0 ? score + 0.25 : 0.0, order++,
+                            "technique", content, ColumnText(stmt, 4));
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    std::sort(ranked.begin(), ranked.end(), [](const RankedMemory& a, const RankedMemory& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.order < b.order;
+    });
+    for (const auto& item : ranked) {
+        if (static_cast<int>(out.size()) >= capped_limit) break;
+        out.push_back(item.message);
+    }
     return out;
 }
 
@@ -495,6 +747,20 @@ int MemoryStore::DeleteSession(const std::string& session_id) {
         changed += sqlite3_changes(db_);
     }
     sqlite3_finalize(stmt);
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM summaries WHERE session=?;", -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, session_id);
+        sqlite3_step(stmt);
+        changed += sqlite3_changes(db_);
+    }
+    sqlite3_finalize(stmt);
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM techniques WHERE session=?;", -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, session_id);
+        sqlite3_step(stmt);
+        changed += sqlite3_changes(db_);
+    }
+    sqlite3_finalize(stmt);
     return changed;
 }
 
@@ -515,6 +781,7 @@ int MemoryStore::DeleteMatching(const std::string& query) {
         }
     }
     sqlite3_finalize(select);
+    select = nullptr;
 
     sqlite3_stmt* del_msg = nullptr;
     if (sqlite3_prepare_v2(db_, "DELETE FROM native_messages WHERE content=?;", -1, &del_msg, nullptr) == SQLITE_OK) {
@@ -539,6 +806,96 @@ int MemoryStore::DeleteMatching(const std::string& query) {
         }
     }
     sqlite3_finalize(del_emotion);
+
+    std::vector<sqlite3_int64> context_ids;
+    if (sqlite3_prepare_v2(db_, "SELECT id, content FROM native_context_items ORDER BY id DESC LIMIT 500;", -1, &select, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(select) == SQLITE_ROW) {
+            const std::string content = ColumnText(select, 1);
+            if (ContainsAny(Lower(content), terms)) {
+                context_ids.push_back(sqlite3_column_int64(select, 0));
+            }
+        }
+    }
+    sqlite3_finalize(select);
+    select = nullptr;
+    std::vector<sqlite3_int64> summary_ids;
+    if (sqlite3_prepare_v2(db_, "SELECT id, content FROM summaries ORDER BY id DESC LIMIT 500;", -1, &select, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(select) == SQLITE_ROW) {
+            const std::string content = ColumnText(select, 1);
+            if (ContainsAny(Lower(content), terms)) {
+                summary_ids.push_back(sqlite3_column_int64(select, 0));
+            }
+        }
+    }
+    sqlite3_finalize(select);
+    select = nullptr;
+    std::vector<std::string> profile_keys;
+    if (sqlite3_prepare_v2(db_, "SELECT key, value FROM user_profile ORDER BY updated_at DESC LIMIT 300;", -1, &select, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(select) == SQLITE_ROW) {
+            const std::string key = ColumnText(select, 0);
+            const std::string value = ColumnText(select, 1);
+            if (ContainsAny(Lower(key + " " + value), terms)) {
+                profile_keys.push_back(key);
+            }
+        }
+    }
+    sqlite3_finalize(select);
+    select = nullptr;
+    std::vector<sqlite3_int64> technique_ids;
+    if (sqlite3_prepare_v2(db_, "SELECT id, query, move, evidence FROM techniques ORDER BY id DESC LIMIT 500;", -1, &select, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(select) == SQLITE_ROW) {
+            const std::string haystack = ColumnText(select, 1) + " " + ColumnText(select, 2) + " " + ColumnText(select, 3);
+            if (ContainsAny(Lower(haystack), terms)) {
+                technique_ids.push_back(sqlite3_column_int64(select, 0));
+            }
+        }
+    }
+    sqlite3_finalize(select);
+
+    sqlite3_stmt* del_id = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM native_context_items WHERE id=?;", -1, &del_id, nullptr) == SQLITE_OK) {
+        for (const auto id : context_ids) {
+            sqlite3_reset(del_id);
+            sqlite3_clear_bindings(del_id);
+            sqlite3_bind_int64(del_id, 1, id);
+            sqlite3_step(del_id);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_id);
+    del_id = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM summaries WHERE id=?;", -1, &del_id, nullptr) == SQLITE_OK) {
+        for (const auto id : summary_ids) {
+            sqlite3_reset(del_id);
+            sqlite3_clear_bindings(del_id);
+            sqlite3_bind_int64(del_id, 1, id);
+            sqlite3_step(del_id);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_id);
+    sqlite3_stmt* del_profile = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM user_profile WHERE key=?;", -1, &del_profile, nullptr) == SQLITE_OK) {
+        for (const auto& key : profile_keys) {
+            sqlite3_reset(del_profile);
+            sqlite3_clear_bindings(del_profile);
+            BindText(del_profile, 1, key);
+            sqlite3_step(del_profile);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_profile);
+    del_id = nullptr;
+    if (sqlite3_prepare_v2(db_, "DELETE FROM techniques WHERE id=?;", -1, &del_id, nullptr) == SQLITE_OK) {
+        for (const auto id : technique_ids) {
+            sqlite3_reset(del_id);
+            sqlite3_clear_bindings(del_id);
+            sqlite3_bind_int64(del_id, 1, id);
+            sqlite3_step(del_id);
+            changed += sqlite3_changes(db_);
+        }
+    }
+    sqlite3_finalize(del_id);
     return changed;
 }
 
@@ -549,6 +906,18 @@ int MemoryStore::WipeAll() {
         changed += sqlite3_changes(db_);
     }
     if (Exec(db_, "DELETE FROM native_emotion_signals;")) {
+        changed += sqlite3_changes(db_);
+    }
+    if (Exec(db_, "DELETE FROM native_context_items;")) {
+        changed += sqlite3_changes(db_);
+    }
+    if (Exec(db_, "DELETE FROM summaries;")) {
+        changed += sqlite3_changes(db_);
+    }
+    if (Exec(db_, "DELETE FROM user_profile;")) {
+        changed += sqlite3_changes(db_);
+    }
+    if (Exec(db_, "DELETE FROM techniques;")) {
         changed += sqlite3_changes(db_);
     }
     return changed;
