@@ -218,7 +218,13 @@ bool IsEmotionalContinuation(const std::string& message,
     if (recent.empty() || intent.forget || intent.wipe_all || lower.find('?') != std::string::npos) return false;
     if (intent.crisis || intent.emotional) return false;
     if (WordCount(lower) > 16) return false;
-    if (ContainsAnyLocal(lower, {"write ", "make ", "create ", "build ", "fix ", "install ", "run ", "open "})) {
+    if (ContainsAnyLocal(lower, {"write ", "make ", "create ", "build ", "fix ", "install ", "run ", "open ",
+                                 "teach ", "teach me", "tell me", "explain ", "define ", "what ", "where ",
+                                 "who ", "why ", "how ", "list ", "name "})) {
+        return false;
+    }
+    if (ContainsAnyLocal(lower, {"cookin", "cooking", "lets go", "let's go", "big w", "huge w",
+                                 "fire", "dope", "lit", "sick"})) {
         return false;
     }
     for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
@@ -334,23 +340,23 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
                                  "robotic response", "machine response"})) {
-        return "Yeah, fair. That was too canned. I'll loosen it up.";
-    }
-    if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
-        return "Yeah, that's the thing to tune. I need to catch the real signal first, then choose the tone.";
+        return "Fair. That was canned. The better move is to answer the actual detail, not the surface category.";
     }
     if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
         if (ContainsAnyLocal(lower, {"response style", "responses", "reply style"})) {
-            return "Yeah, I see it. You're working the response style, not just chatting. I'll treat this like tuning, not casual small talk.";
+            return "I see it. You're tuning response style, not just chatting. I should treat that as product work.";
         }
-        return "I see that. You've been putting real work into this. I'm good; let's make the next bit cleaner.";
+        return "I see the work. I'm good; let's make the next bit cleaner.";
+    }
+    if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
+        return "That's the thing to tune: catch the real signal first, then choose the tone.";
     }
     if (ContainsAnyLocal(lower, {"making some changes", "how you respond", "response style", "reply style"}) &&
         ContainsAnyLocal(lower, {"watching okc", "thunder", "game", "stomped"})) {
-        return "That sounds like a very you kind of night: tuning my response style while OKC gets worked in the background. I appreciate you putting the reps in on this.";
+        return "Response tuning with OKC getting worked in the background. That's a specific night. What part of the replies is bugging you most?";
     }
     if (ContainsAnyLocal(lower, {"making some changes", "how you respond", "response style", "reply style"})) {
-        return "I appreciate you working on that. Response style is subtle, but it matters a lot.";
+        return "Response style is subtle, but it matters. What's the miss you're seeing?";
     }
     if (ContainsAnyLocal(lower, {"good night so far", "good nite so far"})) {
         if (ContainsAnyLocal(lower, {"grandpa", "grandpas", "grandpa's"})) {
@@ -395,7 +401,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Good to hear. That's a win.";
     }
     if (ContainsAnyLocal(lower, {"we cookin", "cookin my guy", "cooking my guy"})) {
-        return "Let's go. This is coming together.";
+        return "Let's go. What's next?";
     }
     if (ContainsAnyLocal(lower, {"lolol", "lmaooo", "lmao", "haha"})) {
         return "Yeah, that got me too.";
@@ -454,6 +460,10 @@ std::string QuickContextualEmotionalAnswer(const std::string& message,
                                            const std::vector<ChatMessage>& recent) {
     if (intent.mode != IntentMode::Social || !RecentAssistantWasEmotional(recent)) return {};
     const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"cookin", "cooking", "lets go", "let's go", "big w", "huge w",
+                                 "fire", "dope", "lit", "sick"})) {
+        return {};
+    }
     if (lower.find("my guy") != std::string::npos) {
         return "Down to your bones?";
     }
@@ -477,14 +487,14 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
         return "Blackstar is not a standard everyday astronomy label. People usually mean either a theoretical **dark star**, a poetic way of talking about a **black hole**, or just a cool-sounding star idea. The real version closest to that vibe is a black hole system like **Cygnus X-1**.";
     }
     if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
-        return "Yeah, that's useful feedback. I should catch the main signal first, then choose the tone. If you're talking about the work, I need to acknowledge the work before I get casual.";
+        return "Useful feedback. I should catch the main signal first, then choose the tone. If you're talking about the work, I need to acknowledge the work before I get casual.";
     }
     if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
-        return "I see that. You're not just making conversation; you're pushing the system into shape. What part feels most off right now?";
+        return "You're not just making conversation; you're pushing the system into shape. What part feels most off right now?";
     }
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
                                  "robotic response", "machine response"})) {
-        return "Yeah, fair. That was too canned. I'll loosen it up.";
+        return "Fair. That was canned. The better move is to answer the actual detail, not the surface category.";
     }
     if (ContainsAnyLocal(lower, {"i feel sick", "i'm sick", "im sick", "i am sick", "feel sick",
                                  "getting sick", "nauseous", "fever", "sore throat"})) {
