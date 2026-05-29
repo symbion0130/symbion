@@ -14,6 +14,7 @@ add_executable(symbion_native WIN32
     src/main.cpp
     src/symbion_shell.cpp
     src/symbion_shell.h
+    src/symbion_native.rc
 )
 
 add_executable(symbion_backend

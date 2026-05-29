@@ -80,8 +80,14 @@ public:
     void Close();
     bool EnsureSchema();
 
-    bool SaveMessage(const std::string& session_id, const std::string& role, const std::string& content);
-    bool SaveEmotion(const std::string& session_id, const std::string& source_text, const EmotionSignal& signal);
+    bool SaveMessage(const std::string& session_id,
+                     const std::string& user,
+                     const std::string& role,
+                     const std::string& content);
+    bool SaveEmotion(const std::string& session_id,
+                     const std::string& user,
+                     const std::string& source_text,
+                     const EmotionSignal& signal);
     bool SaveEmotionCheckin(const EmotionCheckin& checkin);
     bool ImportCounselingSource(const std::filesystem::path& text_path);
     bool ImportLegacyContext(const std::filesystem::path& legacy_db_path);
@@ -104,12 +110,12 @@ public:
 
     std::vector<ChatMessage> RecentMessages(const std::string& session_id, int limit) const;
     std::vector<ChatMessage> RecentSessionSummaries(const std::string& session_id, int limit) const;
-    std::vector<ChatMessage> AmbientContext(int limit) const;
-    std::vector<ChatMessage> RetrieveRelevant(const std::string& query, int limit) const;
-    std::vector<SessionInfo> ListSessions(int limit) const;
-    std::optional<std::string> GetProfileFact(const std::string& key) const;
+    std::vector<ChatMessage> AmbientContext(const std::string& user, int limit) const;
+    std::vector<ChatMessage> RetrieveRelevant(const std::string& user, const std::string& query, int limit) const;
+    std::vector<SessionInfo> ListSessions(const std::string& user, int limit) const;
+    std::optional<std::string> GetProfileFact(const std::string& user, const std::string& key) const;
     std::vector<SourceChunk> SearchCounselingSources(const std::string& query, bool include_high_intensity, int limit) const;
-    std::vector<EmotionSignal> RecentEmotionSignals(int limit) const;
+    std::vector<EmotionSignal> RecentEmotionSignals(const std::string& user, int limit) const;
     std::vector<EmotionCheckin> RecentEmotionCheckins(const std::string& user,
                                                       int limit,
                                                       int days,

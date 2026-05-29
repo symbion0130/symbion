@@ -1,5 +1,7 @@
 #include "symbion_shell.h"
 
+#include "resource.h"
+
 #include <objbase.h>
 #include <shellapi.h>
 #include <winhttp.h>
@@ -818,7 +820,13 @@ bool SymbionShell::RegisterWindowClass(HINSTANCE instance) {
     WNDCLASSEXW window_class = {};
     window_class.cbSize = sizeof(window_class);
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    window_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_SYMBION));
+    window_class.hIconSm = static_cast<HICON>(LoadImageW(instance,
+                                                         MAKEINTRESOURCEW(IDI_SYMBION),
+                                                         IMAGE_ICON,
+                                                         GetSystemMetrics(SM_CXSMICON),
+                                                         GetSystemMetrics(SM_CYSMICON),
+                                                         LR_DEFAULTCOLOR));
     window_class.hInstance = instance;
     window_class.lpfnWndProc = SymbionShell::WindowProc;
     window_class.lpszClassName = kWindowClassName;
@@ -829,6 +837,7 @@ bool SymbionShell::RegisterWindowClass(HINSTANCE instance) {
 }
 
 bool SymbionShell::CreateMainWindow(HINSTANCE instance, int show_command) {
+    (void)show_command;
     constexpr int window_width = 1100;
     constexpr int window_height = 780;
     RECT work_area = {};
@@ -858,7 +867,17 @@ bool SymbionShell::CreateMainWindow(HINSTANCE instance, int show_command) {
         return false;
     }
 
-    ShowWindow(window, show_command);
+    HICON large_icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_SYMBION));
+    HICON small_icon = static_cast<HICON>(LoadImageW(instance,
+                                                    MAKEINTRESOURCEW(IDI_SYMBION),
+                                                    IMAGE_ICON,
+                                                    GetSystemMetrics(SM_CXSMICON),
+                                                    GetSystemMetrics(SM_CYSMICON),
+                                                    LR_DEFAULTCOLOR));
+    if (large_icon) SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+    if (small_icon) SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+
+    ShowWindow(window, SW_SHOWNORMAL);
     UpdateWindow(window);
     return true;
 }
@@ -1108,7 +1127,7 @@ void SymbionShell::StartTray() {
     tray_data_.uID = 1;
     tray_data_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     tray_data_.uCallbackMessage = kTrayMessage;
-    tray_data_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    tray_data_.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_SYMBION));
     wcsncpy_s(tray_data_.szTip, L"Symbion - connecting...", _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &tray_data_);
 }

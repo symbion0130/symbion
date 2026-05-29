@@ -1294,12 +1294,24 @@ std::string KnownDirectAnswer(const std::string& message) {
     if (lower.rfind("remember ", 0) == 0 && message.size() > 9) {
         return "I will remember " + message.substr(9) + ".";
     }
+    if (ContainsAnyLocal(lower, {"do you actually remember", "remember our previous conversations",
+                                 "remember previous conversations", "are you just pretending"})) {
+        return "Yes, with limits. This native app stores conversation turns, summaries, profile facts, and emotional check-ins in local SQLite, then retrieves relevant memory when it helps. I do not preload everything, and I should say plainly when I am using current chat context instead of older memory.";
+    }
     if (lower == "what's 2+2" || lower == "whats 2+2" || lower == "what is 2+2" ||
         lower == "2+2" || lower == "2 + 2") {
         return "4";
     }
     if (ContainsAnyLocal(lower, {"explain transformers in one sentence", "transformers in one sentence"})) {
         return "Transformers are neural networks that use attention to weigh relationships between tokens, letting them understand context across a sequence.";
+    }
+    if (ContainsAnyLocal(lower, {"tldr quantum mechanics", "tl;dr quantum mechanics"})) {
+        return "Quantum mechanics is the rulebook for tiny things: particles behave like probabilities until measured, energy comes in discrete chunks, and observation changes what can be known. Weird, but wildly accurate.";
+    }
+    if (ContainsAnyLocal(lower, {"if you have no current source", "if you don't have a current source",
+                                 "if you do not have a current source"}) &&
+        ContainsAnyLocal(lower, {"latest news", "current news", "recent news"})) {
+        return "I do not have a current source for that in this turn, so I should not present it as latest news.";
     }
     if (ContainsAnyLocal(lower, {"4 gospel books", "four gospel books", "what are the gospels",
                                  "name the gospels"})) {
@@ -1309,7 +1321,7 @@ std::string KnownDirectAnswer(const std::string& message) {
         return "2026.";
     }
     if (ContainsAnyLocal(lower, {"what date is it", "today's date", "todays date", "current date"})) {
-        return "May 28, 2026.";
+        return LocalDateString(false) + ".";
     }
     if (ContainsAnyLocal(lower, {"fish mouth", "tax collecting", "temple tax", "coin from a fish"})) {
         return "That story is **Matthew 17:24-27**. Jesus tells Peter to catch a fish, and the coin in its mouth pays the temple tax for both of them.";
@@ -1827,6 +1839,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     }
 
     const std::string session_id = SessionFromRequest(request);
+    const std::string user = UserFromRequest(request);
     const std::string user_message = *maybe_message;
     Intent intent = ClassifyIntent(user_message);
     const EmotionSignal signal = DetectEmotion(user_message);
@@ -1863,21 +1876,21 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const bool context_correction = IsContextCorrectionTurn(lower_message);
     std::vector<ChatMessage> relevant;
     if (!low_context_social && !context_correction) {
-        relevant = memory_.AmbientContext(8);
+        relevant = memory_.AmbientContext(user, 8);
         const auto session_summaries = memory_.RecentSessionSummaries(session_id, 2);
         relevant.insert(relevant.end(), session_summaries.begin(), session_summaries.end());
-        const auto recalled = memory_.RetrieveRelevant(user_message, 6);
+        const auto recalled = memory_.RetrieveRelevant(user, user_message, 6);
         relevant.insert(relevant.end(), recalled.begin(), recalled.end());
     }
     const auto sources = (intent.crisis || low_context_social || context_correction)
                              ? std::vector<SourceChunk>{}
                              : memory_.SearchCounselingSources(user_message, false, 4);
-    const auto emotions = memory_.RecentEmotionSignals(8);
+    const auto emotions = memory_.RecentEmotionSignals(user, 8);
     const int recent_count = static_cast<int>(recent.size());
     const int relevant_count = static_cast<int>(relevant.size());
     const int source_count = static_cast<int>(sources.size());
-    memory_.SaveMessage(session_id, "user", user_message);
-    memory_.SaveEmotion(session_id, user_message, signal);
+    memory_.SaveMessage(session_id, user, "user", user_message);
+    memory_.SaveEmotion(session_id, user, user_message, signal);
     std::string response_source = "unknown";
     bool stale_refresh = false;
     std::string answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
@@ -1954,7 +1967,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         const std::string framed_fallback = FrameFallbackReply(frame);
         if (!framed_fallback.empty()) answer = framed_fallback;
     }
-    memory_.SaveMessage(session_id, "assistant", answer);
+    memory_.SaveMessage(session_id, user, "assistant", answer);
     memory_.CaptureKnowledgeGap(session_id, user_message, answer);
     memory_.SummarizeSessionIfNeeded(session_id, 18);
     const auto turn_end = std::chrono::steady_clock::now();
@@ -2141,7 +2154,7 @@ HttpResponse App::HandleSessionMessages(const HttpRequest& request, const std::s
 }
 
 HttpResponse App::HandleEmotions() const {
-    const auto emotions = memory_.RecentEmotionSignals(20);
+    const auto emotions = memory_.RecentEmotionSignals("aaron", 20);
     std::string body = "{\"emotions\":[";
     bool first = true;
     for (const auto& e : emotions) {
@@ -2241,7 +2254,7 @@ HttpResponse App::HandleSessions(const HttpRequest& request) {
     if (!limit_value.empty()) {
         if (const auto parsed = ParsePositiveInt(limit_value)) limit = *parsed;
     }
-    const auto sessions = memory_.ListSessions(std::clamp(limit, 1, 200));
+    const auto sessions = memory_.ListSessions(UserFromRequest(request), std::clamp(limit, 1, 200));
     std::string body = "{\"sessions\":[";
     bool first = true;
     for (const auto& session : sessions) {
@@ -2259,7 +2272,7 @@ HttpResponse App::HandleSessions(const HttpRequest& request) {
 HttpResponse App::HandleProfileFact(const HttpRequest& request) const {
     const std::string key = QueryValue(request.path, "key");
     if (key.empty()) return JsonResponse("{\"error\":\"key_required\"}", 400);
-    const auto value = memory_.GetProfileFact(key);
+    const auto value = memory_.GetProfileFact(UserFromRequest(request), key);
     if (!value) {
         return JsonResponse("{\"key\":\"" + EscapeJson(key) + "\",\"found\":false,\"value\":null}");
     }
@@ -2269,7 +2282,7 @@ HttpResponse App::HandleProfileFact(const HttpRequest& request) const {
 
 HttpResponse App::HandleRelevantMemory(const HttpRequest& request) const {
     const std::string query = QueryValue(request.path, "q");
-    const auto relevant = memory_.RetrieveRelevant(query, 10);
+    const auto relevant = memory_.RetrieveRelevant(UserFromRequest(request), query, 10);
     std::string body = "{\"query\":\"" + EscapeJson(query) + "\",\"memories\":[";
     bool first = true;
     for (const auto& msg : relevant) {

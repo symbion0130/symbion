@@ -23,3 +23,7 @@
 - Added `scripts/eval-native-v14.ps1` to run v14 JSONL golden cases against the native `/api/chat` path without restoring Python.
 - Prevented low-signal social greetings and correction turns from pulling unrelated cross-session memories into the prompt.
 - Added JSON `\uXXXX` decoding so apostrophes and other escaped characters do not become literal `u0027` text in messages or session titles.
+- Removed stale merge-conflict markers from the native chat path and testing docs.
+- Threaded active user through native message saves, emotion saves, session listing, profile facts, and relevant-memory retrieval.
+- Made the native shell ignore accidental hidden startup flags so the main window opens visibly.
+- Embedded the Symbion `.ico` in the native shell and use it for the window, taskbar, and tray icon.

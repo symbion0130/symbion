@@ -529,8 +529,11 @@ bool MemoryStore::EnsureSchema() {
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_messages_session_time "
                      "ON native_messages(session_id, created_at);") &&
            AddColumnIfMissing(db_, "native_messages", "summarized", "summarized INTEGER NOT NULL DEFAULT 0") &&
+           AddColumnIfMissing(db_, "native_messages", "user", "user TEXT") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_messages_session_summarized "
                      "ON native_messages(session_id, summarized, id);") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_messages_user_time "
+                     "ON native_messages(user, created_at);") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS native_emotion_signals ("
                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                      "session_id TEXT NOT NULL,"
@@ -540,6 +543,9 @@ bool MemoryStore::EnsureSchema() {
                      "created_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_emotions_time "
                      "ON native_emotion_signals(created_at);") &&
+           AddColumnIfMissing(db_, "native_emotion_signals", "user", "user TEXT") &&
+           Exec(db_, "CREATE INDEX IF NOT EXISTS idx_native_emotions_user_time "
+                     "ON native_emotion_signals(user, created_at);") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS emotional_checkins ("
                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                      "timestamp TEXT NOT NULL DEFAULT (datetime('now')),"
@@ -654,34 +660,42 @@ bool MemoryStore::EnsureSchema() {
                      "ON knowledge_gaps(session, status, updated_at);");
 }
 
-bool MemoryStore::SaveMessage(const std::string& session_id, const std::string& role, const std::string& content) {
+bool MemoryStore::SaveMessage(const std::string& session_id,
+                              const std::string& user,
+                              const std::string& role,
+                              const std::string& content) {
     if (!db_) return false;
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT INTO native_messages(session_id, role, content) VALUES(?, ?, ?);";
+    const char* sql = "INSERT INTO native_messages(session_id, user, role, content) VALUES(?, ?, ?, ?);";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     BindText(stmt, 1, session_id);
-    BindText(stmt, 2, role);
-    BindText(stmt, 3, content);
+    BindText(stmt, 2, user.empty() ? "aaron" : user);
+    BindText(stmt, 3, role);
+    BindText(stmt, 4, content);
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     return ok;
 }
 
-bool MemoryStore::SaveEmotion(const std::string& session_id, const std::string& source_text, const EmotionSignal& signal) {
+bool MemoryStore::SaveEmotion(const std::string& session_id,
+                              const std::string& user,
+                              const std::string& source_text,
+                              const EmotionSignal& signal) {
     if (!db_ || signal.label.empty() || signal.intensity <= 0) return false;
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT INTO native_emotion_signals(session_id, label, intensity, source_text) VALUES(?, ?, ?, ?);";
+    const char* sql = "INSERT INTO native_emotion_signals(session_id, user, label, intensity, source_text) VALUES(?, ?, ?, ?, ?);";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     BindText(stmt, 1, session_id);
-    BindText(stmt, 2, signal.label);
-    sqlite3_bind_int(stmt, 3, signal.intensity);
-    BindText(stmt, 4, source_text);
+    BindText(stmt, 2, user.empty() ? "aaron" : user);
+    BindText(stmt, 3, signal.label);
+    sqlite3_bind_int(stmt, 4, signal.intensity);
+    BindText(stmt, 5, source_text);
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     if (ok) {
         EmotionCheckin checkin;
         checkin.session = session_id;
-        checkin.user = "aaron";
+        checkin.user = user.empty() ? "aaron" : user;
         checkin.emotion = signal.label;
         checkin.intensity = signal.intensity;
         checkin.note = source_text;
@@ -1222,16 +1236,17 @@ std::vector<ChatMessage> MemoryStore::RecentSessionSummaries(const std::string& 
     return out;
 }
 
-std::vector<SessionInfo> MemoryStore::ListSessions(int limit) const {
+std::vector<SessionInfo> MemoryStore::ListSessions(const std::string& user, int limit) const {
     std::vector<SessionInfo> out;
     if (!db_ || limit <= 0) return out;
     sqlite3_stmt* stmt = nullptr;
     const char* sql =
         "SELECT session_id, MAX(created_at) AS last_activity, COUNT(*) AS turns, "
         "(SELECT content FROM native_messages m2 WHERE m2.session_id=m.session_id AND role='user' ORDER BY id ASC LIMIT 1) AS title "
-        "FROM native_messages m GROUP BY session_id ORDER BY last_activity DESC LIMIT ?;";
+        "FROM native_messages m WHERE COALESCE(user,'aaron')=? GROUP BY session_id ORDER BY last_activity DESC LIMIT ?;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-    sqlite3_bind_int(stmt, 1, limit);
+    BindText(stmt, 1, user.empty() ? "aaron" : user);
+    sqlite3_bind_int(stmt, 2, limit);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         std::string title = ColumnText(stmt, 3);
         title = ClipText(title, 80);
@@ -1246,31 +1261,35 @@ std::vector<SessionInfo> MemoryStore::ListSessions(int limit) const {
     return out;
 }
 
-std::optional<std::string> MemoryStore::GetProfileFact(const std::string& key) const {
+std::optional<std::string> MemoryStore::GetProfileFact(const std::string& user, const std::string& key) const {
     if (!db_ || key.empty()) return std::nullopt;
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, "SELECT value FROM user_profile WHERE key=? OR key=? ORDER BY key=? DESC LIMIT 1;", -1, &stmt, nullptr) != SQLITE_OK) {
         return std::nullopt;
     }
+    const std::string effective_user = user.empty() ? "aaron" : user;
     BindText(stmt, 1, key);
-    BindText(stmt, 2, "aaron:" + key);
-    BindText(stmt, 3, "aaron:" + key);
+    BindText(stmt, 2, effective_user + ":" + key);
+    BindText(stmt, 3, effective_user + ":" + key);
     std::optional<std::string> value;
     if (sqlite3_step(stmt) == SQLITE_ROW) value = ColumnText(stmt, 0);
     sqlite3_finalize(stmt);
     return value;
 }
 
-std::vector<ChatMessage> MemoryStore::AmbientContext(int limit) const {
+std::vector<ChatMessage> MemoryStore::AmbientContext(const std::string& user, int limit) const {
     std::vector<ChatMessage> out;
     if (!db_ || limit <= 0) return out;
     sqlite3_stmt* stmt = nullptr;
+    const std::string effective_user = user.empty() ? "aaron" : user;
     const char* sql =
         "SELECT kind, content, updated_at FROM native_context_items "
         "WHERE kind IN ('profile', 'technique') "
+        "AND (item_key NOT LIKE '%:%' OR item_key LIKE ? || ':%') "
         "ORDER BY CASE kind WHEN 'profile' THEN 0 ELSE 1 END, updated_at DESC LIMIT ?;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-    sqlite3_bind_int(stmt, 1, limit);
+    BindText(stmt, 1, effective_user);
+    sqlite3_bind_int(stmt, 2, limit);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         out.push_back({
             ColumnText(stmt, 0),
@@ -1282,9 +1301,10 @@ std::vector<ChatMessage> MemoryStore::AmbientContext(int limit) const {
     return out;
 }
 
-std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query, int limit) const {
+std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& user, const std::string& query, int limit) const {
     std::vector<ChatMessage> out;
     if (!db_) return out;
+    const std::string effective_user = user.empty() ? "aaron" : user;
     const auto terms = QueryTerms(query);
     if (terms.empty()) return out;
     const int capped_limit = std::max(0, limit);
@@ -1295,8 +1315,9 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     sqlite3_stmt* stmt = nullptr;
     const char* sql =
         "SELECT role, content, created_at FROM native_messages "
-        "WHERE role='user' AND summarized=0 ORDER BY id DESC LIMIT 300;";
+        "WHERE role='user' AND summarized=0 AND COALESCE(user,'aaron')=? ORDER BY id DESC LIMIT 300;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    BindText(stmt, 1, effective_user);
     int order = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const std::string content = ColumnText(stmt, 1);
@@ -1309,8 +1330,10 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     stmt = nullptr;
     const char* ctx_sql =
         "SELECT kind, content, updated_at FROM native_context_items "
+        "WHERE item_key NOT LIKE '%:%' OR item_key LIKE ? || ':%' "
         "ORDER BY updated_at DESC LIMIT 400;";
     if (sqlite3_prepare_v2(db_, ctx_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, effective_user);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const std::string kind = ColumnText(stmt, 0);
             const std::string content = ColumnText(stmt, 1);
@@ -1326,8 +1349,10 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     const char* summary_sql =
         "SELECT content, timestamp FROM summaries "
         "WHERE content IS NOT NULL AND content!='' "
+        "AND COALESCE(user,'aaron')=? "
         "ORDER BY id DESC LIMIT 200;";
     if (sqlite3_prepare_v2(db_, summary_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, effective_user);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const std::string content = ColumnText(stmt, 0);
             const double score = TermScore(content, terms);
@@ -1341,8 +1366,10 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     const char* profile_sql =
         "SELECT key, value, updated_at FROM user_profile "
         "WHERE value IS NOT NULL AND value!='' "
+        "AND (key NOT LIKE '%:%' OR key LIKE ? || ':%') "
         "ORDER BY updated_at DESC LIMIT 80;";
     if (sqlite3_prepare_v2(db_, profile_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, effective_user);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const std::string key = StripUserPrefix(ColumnText(stmt, 0));
             if (key.rfind("__", 0) == 0) continue;
@@ -1363,8 +1390,10 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     const char* technique_sql =
         "SELECT query, move, evidence, source, timestamp FROM techniques "
         "WHERE move IS NOT NULL AND move!='' "
+        "AND COALESCE(user,'aaron')=? "
         "ORDER BY id DESC LIMIT 200;";
     if (sqlite3_prepare_v2(db_, technique_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, effective_user);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const std::string saved_query = ColumnText(stmt, 0);
             const std::string move = ColumnText(stmt, 1);
@@ -1383,8 +1412,9 @@ std::vector<ChatMessage> MemoryStore::RetrieveRelevant(const std::string& query,
     stmt = nullptr;
     const char* gap_sql =
         "SELECT topic, description, updated_at FROM knowledge_gaps "
-        "WHERE status='open' ORDER BY updated_at DESC LIMIT 120;";
+        "WHERE status='open' AND COALESCE(user,'aaron')=? ORDER BY updated_at DESC LIMIT 120;";
     if (sqlite3_prepare_v2(db_, gap_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        BindText(stmt, 1, effective_user);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const std::string topic = ColumnText(stmt, 0);
             const std::string description = ColumnText(stmt, 1);
@@ -1445,13 +1475,14 @@ std::vector<SourceChunk> MemoryStore::SearchCounselingSources(const std::string&
     return out;
 }
 
-std::vector<EmotionSignal> MemoryStore::RecentEmotionSignals(int limit) const {
+std::vector<EmotionSignal> MemoryStore::RecentEmotionSignals(const std::string& user, int limit) const {
     std::vector<EmotionSignal> out;
     if (!db_) return out;
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT label, intensity FROM native_emotion_signals ORDER BY id DESC LIMIT ?;";
+    const char* sql = "SELECT label, intensity FROM native_emotion_signals WHERE COALESCE(user,'aaron')=? ORDER BY id DESC LIMIT ?;";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-    sqlite3_bind_int(stmt, 1, limit);
+    BindText(stmt, 1, user.empty() ? "aaron" : user);
+    sqlite3_bind_int(stmt, 2, limit);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         out.push_back({
             ColumnText(stmt, 0),
