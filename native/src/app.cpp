@@ -281,6 +281,10 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
         return "Always.";
     }
+    if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
+                                 "robotic response", "machine response"})) {
+        return "Yeah, fair. That was too canned. I'll loosen it up.";
+    }
     if (lower == "guy") {
         return "Lol what's going on?";
     }
@@ -294,7 +298,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Fair enough. I'll follow your lead.";
     }
     if (ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
-        return "Not much. Hanging here, ready to be useful. What's going on?";
+        return "Not much, just here with you. What's going on?";
     }
     if (ContainsAnyLocal(lower, {"finally got", "got it installed", "app installed"})) {
         return "Nice, that took a minute. How's it looking?";
@@ -303,7 +307,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Good to hear. That's a win.";
     }
     if (ContainsAnyLocal(lower, {"we cookin", "cookin my guy", "cooking my guy"})) {
-        return "Let's go. We are absolutely cookin.";
+        return "Let's go. This is coming together.";
     }
     if (ContainsAnyLocal(lower, {"lolol", "lmaooo", "lmao", "haha"})) {
         return "Yeah, that got me too.";
@@ -339,13 +343,13 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (lower == "bet" || lower == "lit" || lower == "rad" || lower == "clean" ||
         lower == "based" || ContainsAnyLocal(lower, {"no cap", "big w", "huge w", "lets go", "let's go"})) {
-        return "Yep. We take that win.";
+        return "Yep. That's a win.";
     }
     if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"})) {
-        return "That's the good stuff. We take a calm win when it shows up.";
+        return "Good. Let that one be easy.";
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
-        return "I'm good, man. Steady, awake, hanging in the pocket.";
+        return "I'm good. What's up with you?";
     }
     if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello") {
         return "Hey. Good to see you.";
@@ -373,6 +377,10 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
         return "Fair. The router sets the lane: casual should sound casual, practical should be practical, and emotional stuff should slow down and map one door at a time. When it misses, it sounds scripted. That is exactly what we are tuning.";
+    }
+    if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
+                                 "robotic response", "machine response"})) {
+        return "Yeah, fair. That was too canned. I'll loosen it up.";
     }
     if (ContainsAnyLocal(lower, {"i feel sick", "i'm sick", "im sick", "i am sick", "feel sick",
                                  "getting sick", "nauseous", "fever", "sore throat"})) {
