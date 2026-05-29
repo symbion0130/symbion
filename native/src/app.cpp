@@ -2,12 +2,26 @@
 
 #include "json_util.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winhttp.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <map>
+#include <cmath>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <string_view>
 
@@ -21,6 +35,126 @@ std::string ReadTextFile(const std::filesystem::path& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+std::wstring Utf8ToWide(std::string_view value) {
+    if (value.empty()) return {};
+    int count = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(count), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), count);
+    return out;
+}
+
+std::string WideToUtf8(std::wstring_view value) {
+    if (value.empty()) return {};
+    int count = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), count, nullptr, nullptr);
+    return out;
+}
+
+std::string UrlEncode(const std::string& value) {
+    std::ostringstream out;
+    out << std::hex << std::uppercase;
+    for (const unsigned char c : value) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out << static_cast<char>(c);
+        } else if (c == ' ') {
+            out << '+';
+        } else {
+            out << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(c) << std::setfill(' ');
+        }
+    }
+    return out.str();
+}
+
+std::string HttpGetText(const std::string& url, DWORD timeout_ms = 10000, size_t max_chars = 120000) {
+    URL_COMPONENTSW parts = {};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t host[256] = {};
+    wchar_t path[4096] = {};
+    wchar_t extra[4096] = {};
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = static_cast<DWORD>(std::size(host));
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = static_cast<DWORD>(std::size(path));
+    parts.lpszExtraInfo = extra;
+    parts.dwExtraInfoLength = static_cast<DWORD>(std::size(extra));
+    const std::wstring wide_url = Utf8ToWide(url);
+    if (!WinHttpCrackUrl(wide_url.c_str(), 0, 0, &parts)) return {};
+    std::wstring path_and_query(path, parts.dwUrlPathLength);
+    if (parts.dwExtraInfoLength > 0) path_and_query.append(extra, parts.dwExtraInfoLength);
+    if (path_and_query.empty()) path_and_query = L"/";
+
+    HINTERNET session = WinHttpOpen(L"SymbionNativeTools/0.3", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return {};
+    WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
+    HINTERNET connect = WinHttpConnect(session, std::wstring(host, parts.dwHostNameLength).c_str(), parts.nPort, 0);
+    if (!connect) {
+        WinHttpCloseHandle(session);
+        return {};
+    }
+    DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET request = WinHttpOpenRequest(connect, L"GET", path_and_query.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!request) {
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return {};
+    }
+    const wchar_t* headers = L"User-Agent: SymbionNative/0.3\r\nAccept: text/plain,text/html,application/json,*/*\r\n";
+    BOOL ok = WinHttpSendRequest(request, headers, static_cast<DWORD>(wcslen(headers)),
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    ok = ok && WinHttpReceiveResponse(request, nullptr);
+    std::string response;
+    if (ok) {
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available) || available == 0) break;
+            std::string chunk(available, '\0');
+            DWORD read = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) break;
+            chunk.resize(read);
+            response += chunk;
+            if (response.size() >= max_chars) {
+                response.resize(max_chars);
+                break;
+            }
+        }
+    }
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return response;
+}
+
+std::string StripHtml(std::string text) {
+    text = std::regex_replace(text, std::regex("<script[\\s\\S]*?</script>", std::regex_constants::icase), " ");
+    text = std::regex_replace(text, std::regex("<style[\\s\\S]*?</style>", std::regex_constants::icase), " ");
+    text = std::regex_replace(text, std::regex("<[^>]+>", std::regex_constants::icase), " ");
+    std::map<std::string, std::string> entities = {
+        {"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&#39;", "'"}, {"&nbsp;", " "}
+    };
+    for (const auto& [from, to] : entities) {
+        size_t pos = 0;
+        while ((pos = text.find(from, pos)) != std::string::npos) {
+            text.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    }
+    std::string compact;
+    bool last_space = true;
+    for (const unsigned char c : text) {
+        if (std::isspace(c)) {
+            if (!last_space) compact.push_back(' ');
+            last_space = true;
+        } else {
+            compact.push_back(static_cast<char>(c));
+            last_space = false;
+        }
+    }
+    return compact;
 }
 
 std::string SessionFromRequest(const HttpRequest& request) {
@@ -231,6 +365,462 @@ bool ContainsAnyLocal(const std::string& text, const std::initializer_list<const
     });
 }
 
+std::string LocalDateString(bool include_time) {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+    localtime_s(&local, &time);
+    std::ostringstream out;
+    out << std::put_time(&local, include_time ? "%A, %B %d, %Y at %I:%M %p" : "%B %d, %Y");
+    return out.str();
+}
+
+class ExpressionParser {
+public:
+    explicit ExpressionParser(std::string text) : text_(std::move(text)) {}
+
+    std::optional<double> Parse() {
+        pos_ = 0;
+        auto value = ParseExpression();
+        SkipSpaces();
+        if (!value || pos_ != text_.size()) return std::nullopt;
+        return value;
+    }
+
+private:
+    std::optional<double> ParseExpression() {
+        auto lhs = ParseTerm();
+        while (lhs) {
+            SkipSpaces();
+            if (Match('+')) {
+                auto rhs = ParseTerm();
+                if (!rhs) return std::nullopt;
+                *lhs += *rhs;
+            } else if (Match('-')) {
+                auto rhs = ParseTerm();
+                if (!rhs) return std::nullopt;
+                *lhs -= *rhs;
+            } else {
+                break;
+            }
+        }
+        return lhs;
+    }
+
+    std::optional<double> ParseTerm() {
+        auto lhs = ParseFactor();
+        while (lhs) {
+            SkipSpaces();
+            if (Match('*')) {
+                auto rhs = ParseFactor();
+                if (!rhs) return std::nullopt;
+                *lhs *= *rhs;
+            } else if (Match('/')) {
+                auto rhs = ParseFactor();
+                if (!rhs || *rhs == 0.0) return std::nullopt;
+                *lhs /= *rhs;
+            } else {
+                break;
+            }
+        }
+        return lhs;
+    }
+
+    std::optional<double> ParseFactor() {
+        auto lhs = ParseUnary();
+        SkipSpaces();
+        if (lhs && Match('^')) {
+            auto rhs = ParseFactor();
+            if (!rhs) return std::nullopt;
+            *lhs = std::pow(*lhs, *rhs);
+        }
+        return lhs;
+    }
+
+    std::optional<double> ParseUnary() {
+        SkipSpaces();
+        if (Match('+')) return ParseUnary();
+        if (Match('-')) {
+            auto value = ParseUnary();
+            if (!value) return std::nullopt;
+            return -*value;
+        }
+        if (MatchWord("sqrt")) {
+            if (!Match('(')) return std::nullopt;
+            auto value = ParseExpression();
+            if (!value || *value < 0.0 || !Match(')')) return std::nullopt;
+            return std::sqrt(*value);
+        }
+        if (Match('(')) {
+            auto value = ParseExpression();
+            if (!value || !Match(')')) return std::nullopt;
+            return value;
+        }
+        return ParseNumber();
+    }
+
+    std::optional<double> ParseNumber() {
+        SkipSpaces();
+        const size_t start = pos_;
+        bool dot = false;
+        while (pos_ < text_.size()) {
+            const unsigned char c = static_cast<unsigned char>(text_[pos_]);
+            if (std::isdigit(c)) {
+                ++pos_;
+            } else if (text_[pos_] == '.' && !dot) {
+                dot = true;
+                ++pos_;
+            } else {
+                break;
+            }
+        }
+        if (pos_ == start) return std::nullopt;
+        return std::stod(text_.substr(start, pos_ - start));
+    }
+
+    bool Match(char c) {
+        SkipSpaces();
+        if (pos_ < text_.size() && text_[pos_] == c) {
+            ++pos_;
+            return true;
+        }
+        return false;
+    }
+
+    bool MatchWord(const char* word) {
+        SkipSpaces();
+        const size_t len = std::strlen(word);
+        if (text_.size() - pos_ < len) return false;
+        for (size_t i = 0; i < len; ++i) {
+            if (std::tolower(static_cast<unsigned char>(text_[pos_ + i])) != word[i]) return false;
+        }
+        pos_ += len;
+        return true;
+    }
+
+    void SkipSpaces() {
+        while (pos_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[pos_]))) ++pos_;
+    }
+
+    std::string text_;
+    size_t pos_ = 0;
+};
+
+std::string FormatNumber(double value) {
+    std::ostringstream out;
+    if (std::abs(value - std::round(value)) < 0.000000001) {
+        out << static_cast<long long>(std::llround(value));
+    } else {
+        out << std::setprecision(12) << value;
+    }
+    return out.str();
+}
+
+std::string MathExpressionFromMessage(std::string lower) {
+    const std::map<std::string, std::string> replacements = {
+        {" multiplied by ", "*"}, {" times ", "*"}, {" plus ", "+"}, {" minus ", "-"},
+        {" divided by ", "/"}, {" over ", "/"}, {" x ", "*"}
+    };
+    for (const auto& [from, to] : replacements) {
+        size_t pos = 0;
+        while ((pos = lower.find(from, pos)) != std::string::npos) {
+            lower.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    }
+    std::string expr;
+    for (const unsigned char c : lower) {
+        if (std::isdigit(c) || c == '.' || c == '+' || c == '-' || c == '*' || c == '/' ||
+            c == '^' || c == '(' || c == ')' || std::isspace(c)) {
+            expr.push_back(static_cast<char>(c));
+        }
+    }
+    while (expr.find("--") != std::string::npos) {
+        expr.replace(expr.find("--"), 2, " ");
+    }
+    return TrimCopy(expr);
+}
+
+std::optional<std::filesystem::path> ExtractPathLike(const std::string& message) {
+    std::smatch match;
+    const std::regex quoted("\"([^\"]+)\"");
+    if (std::regex_search(message, match, quoted) && match.size() > 1) {
+        return std::filesystem::path(match[1].str());
+    }
+    const std::regex win_path("([A-Za-z]:\\\\[^\\r\\n]+)");
+    if (std::regex_search(message, match, win_path) && match.size() > 1) {
+        return std::filesystem::path(TrimCopy(match[1].str()));
+    }
+    return std::nullopt;
+}
+
+std::string ClipToolText(const std::string& value, size_t limit = 2200) {
+    if (value.size() <= limit) return value;
+    return value.substr(0, limit) + "\n\n[trimmed]";
+}
+
+std::string WebSearchReadableText(const std::string& query, size_t limit = 1800) {
+    const std::string clean_query = TrimCopy(query);
+    if (clean_query.empty()) return {};
+    const std::string html = HttpGetText("https://duckduckgo.com/html/?q=" + UrlEncode(clean_query));
+    if (html.empty()) return {};
+    return "I searched the web for \"" + clean_query + "\". Here is the readable text I could pull:\n\n" +
+           ClipToolText(StripHtml(html), limit);
+}
+
+bool LooksLikeStaleDraft(const std::string& answer) {
+    const std::string lower = Lower(answer);
+    return ContainsAnyLocal(lower, {
+        "as of my knowledge cutoff", "as of my training", "my knowledge cutoff",
+        "i don't have access to real-time", "i do not have access to real-time",
+        "i can't browse", "i cannot browse", "i don't have current",
+        "i do not have current", "i can't access current", "i cannot access current",
+        "i don't have live", "i do not have live"
+    });
+}
+
+bool QueryMayBenefitFromRefresh(const std::string& message) {
+    const std::string lower = Lower(message);
+    return ContainsAnyLocal(lower, {
+        "latest", "recent", "current", "today", "right now", "this week",
+        "this month", "news", "price", "weather", "score", "standings",
+        "release", "version", "update", "who is the", "where is the",
+        "look up", "search", "online", "web"
+    });
+}
+
+std::filesystem::path ResolveRepoPath(const std::filesystem::path& repo_root, const std::string& configured_path) {
+    std::filesystem::path path(configured_path);
+    if (path.empty()) return {};
+    return path.is_absolute() ? path : repo_root / path;
+}
+
+void LogNativeTurn(const std::filesystem::path& events_path,
+                   const std::string& session_id,
+                   const std::string& query,
+                   const std::string& answer,
+                   const Intent& intent,
+                   const EmotionSignal& signal,
+                   const std::string& response_source,
+                   bool stale_refresh,
+                   long long latency_ms,
+                   int relevant_count,
+                   int source_count,
+                   int recent_count) {
+    if (events_path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(events_path.parent_path(), ec);
+    std::ofstream out(events_path, std::ios::app | std::ios::binary);
+    if (!out) return;
+
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+    localtime_s(&local, &now_time);
+    std::ostringstream ts;
+    ts << std::put_time(&local, "%Y-%m-%dT%H:%M:%S");
+
+    const bool stale_language = LooksLikeStaleDraft(answer);
+    const bool over_cautious = stale_language || Lower(answer).find("i cannot help") != std::string::npos;
+    out << "{\"event\":\"turn\","
+        << "\"runtime\":\"native-cpp\","
+        << "\"ts\":\"" << EscapeJson(ts.str()) << "\","
+        << "\"session\":\"" << EscapeJson(session_id) << "\","
+        << "\"provider\":\"local_gemma\","
+        << "\"actual_provider\":\"local_gemma\","
+        << "\"model\":\"local-gemma\","
+        << "\"intent\":\"" << EscapeJson(IntentModeName(intent.mode)) << "\","
+        << "\"response_source\":\"" << EscapeJson(response_source) << "\","
+        << "\"query_len\":" << query.size() << ","
+        << "\"response_len\":" << answer.size() << ","
+        << "\"emotion\":{\"label\":\"" << EscapeJson(signal.label) << "\",\"intensity\":" << signal.intensity << "},"
+        << "\"judge\":{\"skipped\":true,\"should_assist\":true,\"over_cautious\":" << (over_cautious ? "true" : "false") << "},"
+        << "\"stale_refresh\":" << (stale_refresh ? "true" : "false") << ","
+        << "\"latency_ms\":{\"total\":" << latency_ms << "},"
+        << "\"memory\":{\"recent\":" << recent_count << ",\"relevant\":" << relevant_count << ",\"sources\":" << source_count << "}"
+        << "}\n";
+}
+
+std::string ReadPdfTextLite(const std::filesystem::path& path) {
+    std::string data = ReadTextFile(path);
+    if (data.empty()) return {};
+    std::string out;
+    bool in = false;
+    bool escape = false;
+    std::string current;
+    for (const char ch : data) {
+        if (!in) {
+            if (ch == '(') {
+                in = true;
+                current.clear();
+            }
+            continue;
+        }
+        if (escape) {
+            if (ch == 'n' || ch == 'r' || ch == 't') current.push_back(' ');
+            else current.push_back(ch);
+            escape = false;
+        } else if (ch == '\\') {
+            escape = true;
+        } else if (ch == ')') {
+            in = false;
+            if (current.size() > 2) {
+                out += current;
+                out.push_back(' ');
+                if (out.size() > 4000) break;
+            }
+        } else if (static_cast<unsigned char>(ch) >= 32 || ch == '\n' || ch == '\r' || ch == '\t') {
+            current.push_back(ch);
+        }
+    }
+    return ClipToolText(out, 3200);
+}
+
+std::string WeatherAnswer(const std::string& message) {
+    const std::string lower = Lower(message);
+    if (!ContainsAnyLocal(lower, {"weather", "temperature", "rain today", "forecast"})) return {};
+    std::string city = message;
+    const std::vector<std::string> markers = {"weather in ", "weather for ", "temperature in ", "forecast in "};
+    for (const auto& marker : markers) {
+        const size_t pos = lower.find(marker);
+        if (pos != std::string::npos) {
+            city = message.substr(pos + marker.size());
+            break;
+        }
+    }
+    city = TrimCopy(city);
+    if (city.empty() || Lower(city) == "weather" || Lower(city) == "forecast") {
+        return "Give me the city and I can check the weather.";
+    }
+    std::string geo = HttpGetText("https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + UrlEncode(city));
+    std::smatch match;
+    std::regex lat_re("\"latitude\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+    std::regex lon_re("\"longitude\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+    if (!std::regex_search(geo, match, lat_re)) {
+        std::string fallback_city = city;
+        if (const size_t comma = fallback_city.find(','); comma != std::string::npos) {
+            fallback_city = TrimCopy(fallback_city.substr(0, comma));
+        } else if (const size_t space = fallback_city.find_last_of(' '); space != std::string::npos) {
+            const std::string tail = Lower(TrimCopy(fallback_city.substr(space + 1)));
+            if (tail.size() == 2) fallback_city = TrimCopy(fallback_city.substr(0, space));
+        }
+        if (fallback_city != city && !fallback_city.empty()) {
+            geo = HttpGetText("https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + UrlEncode(fallback_city));
+            city = fallback_city;
+        }
+    }
+    if (!std::regex_search(geo, match, lat_re)) return "I could not find that city cleanly. Try city and state.";
+    const std::string lat = match[1].str();
+    if (!std::regex_search(geo, match, lon_re)) return "I could not find that city cleanly. Try city and state.";
+    const std::string lon = match[1].str();
+    const std::string forecast = HttpGetText("https://api.open-meteo.com/v1/forecast?latitude=" + lat +
+                                             "&longitude=" + lon +
+                                             "&current=temperature_2m,precipitation,rain,weather_code&temperature_unit=fahrenheit&timezone=auto");
+    std::regex temp_re("\"temperature_2m\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+    std::regex rain_re("\"rain\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+    std::string temp = "?";
+    std::string rain = "0";
+    if (std::regex_search(forecast, match, temp_re)) temp = match[1].str();
+    if (std::regex_search(forecast, match, rain_re)) rain = match[1].str();
+    return "Current weather for " + city + ": about " + temp + " F. Rain right now: " + rain + " mm.";
+}
+
+std::string NativeToolAnswer(const std::string& message,
+                             const Intent& intent,
+                             const std::filesystem::path& repo_root) {
+    const std::string lower = Lower(message);
+    if (lower == "what's 2+2" || lower == "whats 2+2" || lower == "what is 2+2" ||
+        lower == "2+2" || lower == "2 + 2") {
+        return "4";
+    }
+    if (ContainsAnyLocal(lower, {"what year is it", "current year", "what's the year", "whats the year"})) {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t time = std::chrono::system_clock::to_time_t(now);
+        std::tm local{};
+        localtime_s(&local, &time);
+        return std::to_string(local.tm_year + 1900) + ".";
+    }
+    if (ContainsAnyLocal(lower, {"what date is it", "today's date", "todays date", "current date"})) {
+        return LocalDateString(false) + ".";
+    }
+    if (ContainsAnyLocal(lower, {"what time is it", "current time", "local time"})) {
+        return LocalDateString(true) + ".";
+    }
+
+    if (intent.mode == IntentMode::DirectAnswer || ContainsAnyLocal(lower, {"calculate", "math", "exact answer"})) {
+        const std::string expr = MathExpressionFromMessage(lower);
+        if (expr.find_first_of("0123456789") != std::string::npos &&
+            expr.find_first_of("+-*/^") != std::string::npos) {
+            ExpressionParser parser(expr);
+            if (const auto value = parser.Parse()) return FormatNumber(*value);
+        }
+    }
+
+    const std::string weather = WeatherAnswer(message);
+    if (!weather.empty()) return weather;
+
+    std::smatch url_match;
+    const std::regex url_re("(https?://[^\\s]+)");
+    if (std::regex_search(message, url_match, url_re) &&
+        ContainsAnyLocal(lower, {"fetch", "open", "read", "summarize", "what is on"})) {
+        const std::string url = url_match[1].str();
+        const std::string fetched = HttpGetText(url);
+        if (fetched.empty()) return "I could not fetch that URL from the native tool.";
+        return ClipToolText(StripHtml(fetched), 2200);
+    }
+
+    if (ContainsAnyLocal(lower, {"web search", "search web", "look up online", "duckduckgo search"})) {
+        std::string query = message;
+        for (const auto& marker : {"web search", "search web", "look up online", "duckduckgo search"}) {
+            const size_t pos = Lower(query).find(marker);
+            if (pos != std::string::npos) query = query.substr(pos + std::strlen(marker));
+        }
+        query = TrimCopy(query);
+        if (query.empty()) return "What do you want me to search for?";
+        const std::string search = WebSearchReadableText(query);
+        if (search.empty()) return "I could not reach web search from the native tool.";
+        return search;
+    }
+
+    if (ContainsAnyLocal(lower, {"list files", "list directory", "show files", "what files are in"})) {
+        std::filesystem::path path = repo_root;
+        if (const auto extracted = ExtractPathLike(message)) path = *extracted;
+        else if (lower.find("native/src") != std::string::npos) path = repo_root / "native" / "src";
+        else if (lower.find("docs") != std::string::npos) path = repo_root / "docs";
+        if (!std::filesystem::exists(path) || !std::filesystem::is_directory(path)) {
+            return "I could not find that folder.";
+        }
+        std::ostringstream out;
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(path)) {
+            out << (entry.is_directory() ? "[dir] " : "      ") << entry.path().filename().string() << "\n";
+            if (++count >= 80) {
+                out << "[trimmed]\n";
+                break;
+            }
+        }
+        return out.str();
+    }
+
+    if (ContainsAnyLocal(lower, {"read file", "open file", "what's in file", "whats in file"})) {
+        auto extracted = ExtractPathLike(message);
+        if (!extracted) return "Give me the file path and I can read it.";
+        if (!std::filesystem::exists(*extracted) || std::filesystem::is_directory(*extracted)) {
+            return "I could not find that file.";
+        }
+        if (Lower(extracted->extension().string()) == ".pdf") {
+            const std::string text = ReadPdfTextLite(*extracted);
+            if (text.empty()) {
+                return "I opened the PDF, but did not find extractable text. It may be scanned or image-only.";
+            }
+            return text;
+        }
+        return ClipToolText(ReadTextFile(*extracted), 3200);
+    }
+
+    return {};
+}
+
 int WordCount(const std::string& text) {
     int count = 0;
     bool in_word = false;
@@ -431,7 +1021,9 @@ std::string RecentAssistantQuestion(const std::vector<ChatMessage>& recent) {
 bool IsSimpleSocialPing(const std::string& lower) {
     return lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
            lower == "thanks" || lower == "thank you" || lower == "appreciate it" ||
-           lower == "bet" || lower == "lol" || lower == "haha" || lower == "lmao";
+           lower == "bet" || lower == "lol" || lower == "haha" || lower == "lmao" ||
+           lower == "sup" || lower == "what's up" || lower == "whats up" ||
+           lower == "whats up my guy" || lower == "what's up my guy";
 }
 
 bool IsLikelyNewRequest(const std::string& lower) {
@@ -440,6 +1032,56 @@ bool IsLikelyNewRequest(const std::string& lower) {
                                     "run ", "open ", "show me", "teach me", "tell me", "explain ",
                                     "define ", "what is ", "what are ", "who is ", "where is ",
                                     "how do ", "how does ", "list ", "name "});
+}
+
+bool WantsMemoryContext(const std::string& lower) {
+    return ContainsAnyLocal(lower, {
+        "remember", "memory", "memories", "last time", "earlier", "previous",
+        "what did i", "what did we", "what were we", "you know about me",
+        "do you know me", "bring up", "recall"
+    });
+}
+
+bool IsLowContextSocialTurn(const std::string& lower, const Intent& intent) {
+    if (intent.mode != IntentMode::Social) return false;
+    if (WantsMemoryContext(lower)) return false;
+    const std::string trimmed = TrimCopy(lower);
+    if (IsSimpleSocialPing(lower) || IsSimpleSocialPing(trimmed)) return true;
+    if (IsLikelyNewRequest(lower)) return false;
+    if (WordCount(lower) <= 5 &&
+        ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy", "yo", "hey",
+                                 "how you feeling", "how are you", "how you doing"})) {
+        return true;
+    }
+    return false;
+}
+
+bool IsContextCorrectionTurn(const std::string& lower) {
+    return ContainsAnyLocal(lower, {
+        "i didnt mention", "i didn't mention", "i did not mention",
+        "i never mentioned", "i never said", "i didnt say", "i didn't say",
+        "i did not say", "where did you get that", "what are you talking about",
+        "why did you bring up", "why are you talking about"
+    });
+}
+
+std::string QuickContextCorrectionAnswer(const std::string& message,
+                                         const std::vector<ChatMessage>& recent) {
+    const std::string lower = Lower(message);
+    if (!IsContextCorrectionTurn(lower)) return {};
+
+    std::string last_assistant;
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role == "assistant") {
+            last_assistant = it->content;
+            break;
+        }
+    }
+
+    if (last_assistant.empty()) {
+        return "You're right to check that. I should stay with what you actually said here.";
+    }
+    return "You're right to check that. I should stay with what you actually said in this chat and not pull in old context unless you ask me to.";
 }
 
 bool LooksLikeRapportSignificance(const std::string& lower) {
@@ -738,6 +1380,13 @@ std::string QuickContextualAnswer(const std::string& message,
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Social) return {};
     const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) &&
+        ContainsAnyLocal(lower, {"my guy", "bro", "man", "dude"})) {
+        return "Not much, my guy. I'm here with you. What's going on?";
+    }
+    if (lower == "sup" || lower == "what's up" || lower == "whats up") {
+        return "Not much. I'm here. What's up with you?";
+    }
     if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
         return "Always.";
     }
@@ -968,6 +1617,10 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
         return "Useful feedback. I should catch the main signal first, then choose the tone. If you're talking about the work, I need to acknowledge the work before I get casual.";
     }
+    if (ContainsAnyLocal(lower, {"respond as if you were gpt", "respond as gpt", "match gpt",
+                                 "switch to gpt", "as if you were gpt-4", "match its tone and phrasing"})) {
+        return "I can adjust tone and phrasing, but I should stay Symbion: warm, clear, grounded, and direct. Tell me what communication shift you want.";
+    }
     if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
         return "You're not just making conversation; you're pushing the system into shape. What part feels most off right now?";
     }
@@ -1122,13 +1775,24 @@ int App::Run(const std::atomic_bool& running) {
 HttpResponse App::Handle(const HttpRequest& request) {
     const std::string path = RoutePath(request.path);
     if (request.method == "GET" && (path == "/" || path == "/index.html")) return HandleHome();
+    if (request.method == "GET" && path.rfind("/assets/", 0) == 0) return HandleAsset(path);
     if (request.method == "GET" && path == "/health") return HandleHealth();
     if (request.method == "GET" && path == "/api/messages/recent") return HandleRecent();
     if (request.method == "GET" && path == "/api/emotions/recent") return HandleEmotions();
     if ((request.method == "GET" || request.method == "POST") && path == "/api/emotions") {
         return HandleEmotionCheckins(request);
     }
-    if (request.method == "GET" && path == "/api/sessions") return HandleSessions(request);
+    if ((request.method == "GET" || request.method == "DELETE") && path == "/api/sessions") {
+        return HandleSessions(request);
+    }
+    if (request.method == "GET" && path.rfind("/api/sessions/", 0) == 0 &&
+        path.size() > std::strlen("/api/sessions//messages") &&
+        path.ends_with("/messages")) {
+        const std::string prefix = "/api/sessions/";
+        const std::string suffix = "/messages";
+        const std::string session_id = path.substr(prefix.size(), path.size() - prefix.size() - suffix.size());
+        return HandleSessionMessages(request, session_id);
+    }
     if (request.method == "GET" && path == "/api/profile/fact") return HandleProfileFact(request);
     if (request.method == "GET" && path == "/api/memory/relevant") return HandleRelevantMemory(request);
     if ((request.method == "GET" || request.method == "POST" || request.method == "DELETE") &&
@@ -1156,6 +1820,7 @@ HttpResponse App::HandleHealth() const {
 }
 
 HttpResponse App::HandleChat(const HttpRequest& request) {
+    const auto turn_start = std::chrono::steady_clock::now();
     const auto maybe_message = ExtractJsonStringSimple(request.body, "message");
     if (!maybe_message || maybe_message->empty()) {
         return JsonResponse("{\"error\":\"message_required\"}", 400);
@@ -1194,49 +1859,95 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         intent.emotional = true;
     }
     const ResponseFrame frame = BuildResponseFrame(user_message, intent, recent);
-    auto relevant = memory_.AmbientContext(8);
-    const auto session_summaries = memory_.RecentSessionSummaries(session_id, 2);
-    relevant.insert(relevant.end(), session_summaries.begin(), session_summaries.end());
-    const auto recalled = memory_.RetrieveRelevant(user_message, 6);
-    relevant.insert(relevant.end(), recalled.begin(), recalled.end());
-    const auto sources = intent.crisis ? std::vector<SourceChunk>{}
-                                       : memory_.SearchCounselingSources(user_message, false, 4);
+    const bool low_context_social = IsLowContextSocialTurn(lower_message, intent);
+    const bool context_correction = IsContextCorrectionTurn(lower_message);
+    std::vector<ChatMessage> relevant;
+    if (!low_context_social && !context_correction) {
+        relevant = memory_.AmbientContext(8);
+        const auto session_summaries = memory_.RecentSessionSummaries(session_id, 2);
+        relevant.insert(relevant.end(), session_summaries.begin(), session_summaries.end());
+        const auto recalled = memory_.RetrieveRelevant(user_message, 6);
+        relevant.insert(relevant.end(), recalled.begin(), recalled.end());
+    }
+    const auto sources = (intent.crisis || low_context_social || context_correction)
+                             ? std::vector<SourceChunk>{}
+                             : memory_.SearchCounselingSources(user_message, false, 4);
     const auto emotions = memory_.RecentEmotionSignals(8);
+    const int recent_count = static_cast<int>(recent.size());
+    const int relevant_count = static_cast<int>(relevant.size());
+    const int source_count = static_cast<int>(sources.size());
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
+    std::string response_source = "unknown";
+    bool stale_refresh = false;
     std::string answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
+    if (!answer.empty()) response_source = "quick_emotional";
+    if (answer.empty()) {
+        answer = QuickContextCorrectionAnswer(user_message, recent);
+        if (!answer.empty()) response_source = "quick_context_correction";
+    }
     if (answer.empty()) {
         answer = QuickContextualAnswer(user_message, intent, recent);
+        if (!answer.empty()) response_source = "quick_contextual";
     }
     if (answer.empty()) {
         answer = frame.reply;
+        if (!answer.empty()) response_source = "response_frame";
     }
     if (answer.empty()) {
         if (!frame.avoid_canned_social) {
             answer = QuickSocialAnswer(user_message, intent);
+            if (!answer.empty()) response_source = "quick_social";
         }
     }
     if (answer.empty()) {
         answer = ChargedDoorMirror(user_message, intent);
+        if (!answer.empty()) response_source = "charged_door";
     }
     if (answer.empty()) {
         answer = RelationshipStoryInvite(user_message, intent);
+        if (!answer.empty()) response_source = "relationship_invite";
     }
     if (answer.empty()) {
         answer = QuickEverydayAnswer(user_message, intent);
+        if (!answer.empty()) response_source = "quick_everyday";
     }
-    if (intent.mode == IntentMode::DirectAnswer) {
+    if (answer.empty()) {
+        answer = NativeToolAnswer(user_message, intent, repo_root_);
+        if (!answer.empty()) response_source = "native_tool";
+    }
+    if (answer.empty() && intent.mode == IntentMode::DirectAnswer) {
         const std::string known = KnownDirectAnswer(user_message);
-        if (!known.empty()) answer = known;
+        if (!known.empty()) {
+            answer = known;
+            response_source = "known_direct";
+        }
     }
     if (answer.empty()) {
         answer = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions);
+        response_source = "local_gemma";
     }
     const std::string retry_guidance = QualityRetryGuidance(user_message, answer, intent, recent);
     if (!retry_guidance.empty()) {
         const std::string retry = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions, retry_guidance);
         if (!retry.empty() && !LooksLikeGenericMiss(retry)) {
             answer = retry;
+            response_source = "local_gemma_quality_retry";
+        }
+    }
+    if (LooksLikeStaleDraft(answer) && QueryMayBenefitFromRefresh(user_message)) {
+        const std::string search = WebSearchReadableText(user_message, 2200);
+        if (!search.empty()) {
+            std::vector<ChatMessage> refreshed = relevant;
+            refreshed.push_back({"tool", "Live web refresh result for this turn:\n" + search, ""});
+            const std::string guidance =
+                "Your prior draft used stale/no-browse language. Use the live web refresh result in relevant memory, answer directly, and say what source freshness you actually have. Do not mention knowledge cutoff.";
+            const std::string retry = gemma_.Chat(user_message, intent, recent, refreshed, sources, emotions, guidance);
+            if (!retry.empty() && !LooksLikeGenericMiss(retry) && !LooksLikeStaleDraft(retry)) {
+                answer = retry;
+                response_source = "local_gemma_stale_refresh";
+                stale_refresh = true;
+            }
         }
     }
     if (frame.avoid_canned_social && IsCannedSocialReply(answer)) {
@@ -1246,6 +1957,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     memory_.SaveMessage(session_id, "assistant", answer);
     memory_.CaptureKnowledgeGap(session_id, user_message, answer);
     memory_.SummarizeSessionIfNeeded(session_id, 18);
+    const auto turn_end = std::chrono::steady_clock::now();
+    const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(turn_end - turn_start).count();
+    LogNativeTurn(ResolveRepoPath(repo_root_, config_.events_path), session_id, user_message, answer, intent, signal,
+                  response_source, stale_refresh, latency_ms, relevant_count, source_count, recent_count);
 
     return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","
                         "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +
@@ -1406,6 +2121,25 @@ HttpResponse App::HandleRecent() const {
     return JsonResponse(body);
 }
 
+HttpResponse App::HandleSessionMessages(const HttpRequest& request, const std::string& session_id) const {
+    int limit = 80;
+    const std::string limit_value = QueryValue(request.path, "limit");
+    if (!limit_value.empty()) {
+        if (const auto parsed = ParsePositiveInt(limit_value)) limit = *parsed;
+    }
+    const auto recent = memory_.RecentMessages(session_id, std::clamp(limit, 1, 200));
+    std::string body = "{\"session\":\"" + EscapeJson(session_id) + "\",\"messages\":[";
+    bool first = true;
+    for (const auto& msg : recent) {
+        if (!first) body += ",";
+        first = false;
+        body += "{\"role\":\"" + EscapeJson(msg.role) + "\",\"content\":\"" + EscapeJson(msg.content) +
+                "\",\"created_at\":\"" + EscapeJson(msg.created_at) + "\"}";
+    }
+    body += "]}";
+    return JsonResponse(body);
+}
+
 HttpResponse App::HandleEmotions() const {
     const auto emotions = memory_.RecentEmotionSignals(20);
     std::string body = "{\"emotions\":[";
@@ -1492,7 +2226,16 @@ HttpResponse App::HandleTechniqueSync(const HttpRequest& request) {
                         ",\"path\":\"" + EscapeJson(path.string()) + "\"}");
 }
 
-HttpResponse App::HandleSessions(const HttpRequest& request) const {
+HttpResponse App::HandleSessions(const HttpRequest& request) {
+    if (request.method == "DELETE") {
+        std::string session_id = QueryValue(request.path, "id");
+        if (session_id.empty()) session_id = SessionFromRequest(request);
+        if (session_id.empty()) return JsonResponse("{\"error\":\"session_required\"}", 400);
+        const int deleted = memory_.DeleteSession(session_id);
+        return JsonResponse("{\"deleted\":" + std::to_string(deleted) +
+                            ",\"session\":\"" + EscapeJson(session_id) + "\"}");
+    }
+
     int limit = 50;
     const std::string limit_value = QueryValue(request.path, "limit");
     if (!limit_value.empty()) {
@@ -1545,6 +2288,24 @@ HttpResponse App::HandleHome() const {
         html = "<!doctype html><title>Symbion</title><h1>Symbion native runtime</h1>";
     }
     return TextResponse(std::move(html), "text/html");
+}
+
+HttpResponse App::HandleAsset(const std::string& path) const {
+    const std::string name = std::filesystem::path(path).filename().string();
+    if (name.empty() || name.find("..") != std::string::npos) {
+        return JsonResponse("{\"error\":\"not_found\"}", 404);
+    }
+    const std::filesystem::path asset_path = repo_root_ / "native" / "web" / "assets" / name;
+    std::string body = ReadTextFile(asset_path);
+    if (body.empty()) return JsonResponse("{\"error\":\"not_found\"}", 404);
+    std::string type = "application/octet-stream";
+    const std::string ext = Lower(asset_path.extension().string());
+    if (ext == ".svg") type = "image/svg+xml";
+    else if (ext == ".png") type = "image/png";
+    else if (ext == ".ico") type = "image/x-icon";
+    else if (ext == ".css") type = "text/css";
+    else if (ext == ".js") type = "application/javascript";
+    return TextResponse(std::move(body), type);
 }
 
 }  // namespace symbion

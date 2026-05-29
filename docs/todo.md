@@ -7,6 +7,14 @@ This file tracks the current ship scope only. Future/backlog work lives in
 
 Current open item groups: 0.
 
+## Latest D Drive V14 Carry-Forward
+
+- [x] Add v14-style native JSONL turn telemetry for latency, response source, stale refresh, emotion, and memory counts.
+- [x] Add one-shot stale-answer refresh through native lightweight web search.
+- [x] Add PowerShell-native v14 golden-case eval runner without restoring Python.
+- [x] Port additional v14 persona honesty clauses into the Local Gemma system prompt.
+- [x] Rebuild native C++ Release binaries after the integration.
+
 ## Latest V14 Integration Pass
 
 - [x] Port more v14-style evaluation cases into the native smoke suite.
@@ -158,8 +166,8 @@ Current open item groups: 0.
 
 ## Current Open Items
 
-- [ ] Fix direct date-awareness in native chat context.
-  - [ ] `.\scripts\smoke-conversation.ps1` currently fails the expanded v14 restraint case because `what year is it` returns stale years instead of `2026`.
+- [x] Fix direct date-awareness in native chat context.
+  - [x] `.\scripts\smoke-conversation.ps1` covers the expanded v14 restraint case for `what year is it`.
 - [x] Track emotional analytics signals in SQLite.
   - [x] Emotion over time.
   - [x] Stress over time.

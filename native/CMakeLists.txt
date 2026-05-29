@@ -37,6 +37,8 @@ add_executable(symbion_backend
 
 target_compile_features(symbion_native PRIVATE cxx_std_20)
 target_compile_features(symbion_backend PRIVATE cxx_std_20)
+target_compile_definitions(symbion_native PRIVATE NOMINMAX)
+target_compile_definitions(symbion_backend PRIVATE NOMINMAX)
 target_include_directories(symbion_backend PRIVATE
     src
     vendor/sqlite/sqlite-amalgamation-3530100
@@ -66,7 +68,7 @@ target_link_libraries(symbion_native PRIVATE
     winhttp
 )
 
-target_link_libraries(symbion_backend PRIVATE ws2_32 winhttp)
+target_link_libraries(symbion_backend PRIVATE ws2_32 winhttp bcrypt)
 
 if(SYMBION_NATIVE_ENABLE_WEBVIEW2)
     set(_webview2_roots)

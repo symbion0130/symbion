@@ -814,6 +814,7 @@ LRESULT SymbionShell::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
 }
 
 bool SymbionShell::RegisterWindowClass(HINSTANCE instance) {
+    static HBRUSH dark_background = CreateSolidBrush(RGB(5, 5, 8));
     WNDCLASSEXW window_class = {};
     window_class.cbSize = sizeof(window_class);
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -821,22 +822,33 @@ bool SymbionShell::RegisterWindowClass(HINSTANCE instance) {
     window_class.hInstance = instance;
     window_class.lpfnWndProc = SymbionShell::WindowProc;
     window_class.lpszClassName = kWindowClassName;
-    window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    window_class.hbrBackground = dark_background;
 
     const ATOM atom = RegisterClassExW(&window_class);
     return atom != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
 bool SymbionShell::CreateMainWindow(HINSTANCE instance, int show_command) {
+    constexpr int window_width = 1100;
+    constexpr int window_height = 780;
+    RECT work_area = {};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0)) {
+        work_area = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+    const int work_width = work_area.right - work_area.left;
+    const int work_height = work_area.bottom - work_area.top;
+    const int x = work_area.left + std::max(0, (work_width - window_width) / 2);
+    const int y = work_area.top + std::max(0, (work_height - window_height) / 2);
+
     HWND window = CreateWindowExW(
         0,
         kWindowClassName,
         L"Symbion",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        1100,
-        780,
+        x,
+        y,
+        window_width,
+        window_height,
         nullptr,
         nullptr,
         instance,
@@ -894,6 +906,7 @@ void SymbionShell::BuildMenu() {
 
 void SymbionShell::InitializeWebView() {
 #if SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS
+    SetEnvironmentVariableW(L"WEBVIEW2_DEFAULT_BACKGROUND_COLOR", L"FF050508");
     webview_->loader = LoadLibraryW(L"WebView2Loader.dll");
     if (!webview_->loader) {
         SetStatus(L"WebView2 SDK loader was not found. Add WebView2Loader.dll beside this executable.");
@@ -929,6 +942,15 @@ void SymbionShell::InitializeWebView() {
                             }
 
                             webview_->controller = controller;
+                            Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+                            if (SUCCEEDED(webview_->controller.As(&controller2)) && controller2) {
+                                COREWEBVIEW2_COLOR dark = {};
+                                dark.A = 255;
+                                dark.R = 5;
+                                dark.G = 5;
+                                dark.B = 8;
+                                controller2->put_DefaultBackgroundColor(dark);
+                            }
                             webview_->controller->get_CoreWebView2(&webview_->webview);
                             ResizeWebView();
                             if (webview_->webview) {

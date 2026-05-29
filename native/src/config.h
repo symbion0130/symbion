@@ -15,6 +15,7 @@ struct Config {
     std::string gemma_base_url = "http://127.0.0.1:8088/v1";
     std::string gemma_model = "local-gemma";
     std::string db_path = "data/symbion.db";
+    std::string events_path = "data/symbion_events.jsonl";
     std::string legacy_memory_db_path = "";
     std::string shared_learnings_path = "";
 };

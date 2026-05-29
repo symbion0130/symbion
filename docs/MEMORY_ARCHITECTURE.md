@@ -1,6 +1,6 @@
 # Symbion Memory Architecture
 
-Status: current architecture plus next-version backlog, based on
+Status: current native C++ SQLite architecture plus retained legacy notes where they still explain imported data.
 The previous Python memory implementation was removed from the active runtime on 2026-05-27. Native C++ SQLite memory is now active.
 
 ## Native Port Targets
@@ -11,9 +11,17 @@ The previous Python memory implementation was removed from the active runtime on
 - `/api/emotions/recent` retrieves recent emotional signals.
 - `/api/emotions` records and retrieves first-class emotional check-ins.
 - `/api/sessions` lists recent native chat sessions for resume/navigation surfaces.
+- `/api/sessions/{id}/messages` reloads one session on demand without making old chats the launch default.
 - `/api/profile/fact?key=...` reads one exact profile fact without loading the full profile.
 - `/api/techniques/sync` imports/exports shared technique learnings with caps and marker rejection.
 - `/api/chat` retrieves recent and relevant memory on demand before calling Local Gemma.
+- Native Tier 1/Tier 2 tools answer exact math/date/time, local file and directory reads, URL fetch/search, weather, and text-based PDF extraction before falling through to Local Gemma.
+- Native turn telemetry is appended to `data/symbion_events.jsonl` with intent,
+  response source, latency, memory/source counts, emotion signal, and stale
+  refresh status.
+- If a Local Gemma answer shows stale/no-browse language on a current-looking
+  query, the backend can run a lightweight web search and retry once with the
+  search result as turn-local context.
 - Relevant recall now prefers the user's own prior words, not older assistant replies.
 - The current turn is stored after retrieval so the memory layer does not simply echo the sentence the user just typed.
 - Old memories should be reopened softly, only when they reduce stress or increase clarity.
@@ -23,7 +31,14 @@ The previous Python memory implementation was removed from the active runtime on
 - Long native sessions now create rolling same-session summaries so older turns can stay available without preloading the full transcript.
 - Promoted response moves are stored in `techniques` through chat commands and `/api/techniques`.
 - Shared technique moves can be imported/exported through `shared_learnings.md`; imported moves are marked `source='shared'`.
+- Shared technique hashes use `sha256(user + 0x1f + query + 0x1f + move)[:12]`, matching the v14 implementation for cross-machine dedupe.
 - Uncertain native answers can capture open `knowledge_gaps` for later review instead of pretending the answer was complete.
+
+## Native Tool Tiers
+
+Tier 1 tools are local, deterministic helpers that should stay fast: date/time, exact arithmetic, recent session loading, profile fact lookup, memory relevance lookup, local file reads, and directory listing.
+
+Tier 2 tools are explicit deeper lookups that may touch the network or larger files: URL fetch, lightweight web search, Open-Meteo weather lookup, and text-based PDF extraction. They run before Local Gemma only when the user asks for that kind of concrete lookup, so counseling and persona flow stay model-led.
 
 ## Current SQLite Memory Surface
 

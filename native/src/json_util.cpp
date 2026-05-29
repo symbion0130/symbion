@@ -15,6 +15,26 @@ std::optional<size_t> FindJsonValueStart(const std::string& json, const std::str
     return pos;
 }
 
+int HexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+void AppendUtf8(std::string& out, unsigned int codepoint) {
+    if (codepoint <= 0x7F) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FF) {
+        out.push_back(static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+}
+
 }  // namespace
 
 std::string EscapeJson(std::string_view value) {
@@ -54,6 +74,29 @@ std::string JsonUnescape(std::string_view value) {
             case 'n': out.push_back('\n'); break;
             case 'r': out.push_back('\r'); break;
             case 't': out.push_back('\t'); break;
+            case 'u': {
+                if (i + 4 >= value.size()) {
+                    out.push_back('u');
+                    break;
+                }
+                unsigned int codepoint = 0;
+                bool valid = true;
+                for (size_t j = 0; j < 4; ++j) {
+                    const int hex = HexValue(value[i + 1 + j]);
+                    if (hex < 0) {
+                        valid = false;
+                        break;
+                    }
+                    codepoint = (codepoint << 4) | static_cast<unsigned int>(hex);
+                }
+                if (!valid) {
+                    out.push_back('u');
+                    break;
+                }
+                i += 4;
+                AppendUtf8(out, codepoint);
+                break;
+            }
             default: out.push_back(next); break;
         }
     }

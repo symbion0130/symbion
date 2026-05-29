@@ -2,6 +2,12 @@
 
 #include "sqlite3.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -60,7 +66,37 @@ std::string StableHash(std::string_view value) {
 }
 
 std::string TechniqueHash(const std::string& user, const std::string& query, const std::string& move) {
-    return StableHash(user + "\x1f" + query + "\x1f" + move).substr(0, 12);
+    const std::string material = user + "\x1f" + query + "\x1f" + move;
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    DWORD object_size = 0;
+    DWORD data_size = 0;
+    DWORD hash_size = 0;
+    std::vector<unsigned char> object;
+    std::vector<unsigned char> digest;
+    std::string out;
+
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0 &&
+        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                          reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size), &data_size, 0) == 0 &&
+        BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH,
+                          reinterpret_cast<PUCHAR>(&hash_size), sizeof(hash_size), &data_size, 0) == 0) {
+        object.resize(object_size);
+        digest.resize(hash_size);
+        if (BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0) == 0 &&
+            BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(material.data())),
+                           static_cast<ULONG>(material.size()), 0) == 0 &&
+            BCryptFinishHash(hash, digest.data(), hash_size, 0) == 0) {
+            std::ostringstream hex;
+            for (const unsigned char byte : digest) {
+                hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+            }
+            out = hex.str().substr(0, 12);
+        }
+    }
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    return out.empty() ? StableHash(material).substr(0, 12) : out;
 }
 
 bool ContainsInjectionMarker(const std::string& text) {

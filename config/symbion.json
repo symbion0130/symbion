@@ -38,6 +38,7 @@
   "proactive_interval_minutes": 0,
   "peer_token_streaming": true,
   "db_path": "data/symbion.db",
+  "events_path": "data/symbion_events.jsonl",
   "legacy_memory_db_path": "D:\\symbion\\symbion.db",
   "shared_learnings_path": "C:\\Users\\aaron\\OneDrive\\Symbion\\sync\\shared_learnings.md",
   "log_path": "symbion_transparency.log",

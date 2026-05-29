@@ -23,6 +23,10 @@ Config lives at `config\symbion.json`. Runtime data lives under `data\`.
 Invoke-RestMethod http://127.0.0.1:8000/health
 Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"I feel anxious"}'
 Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"forget that memory"}'
+Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body '{"message":"what is 8472 multiplied by 91349 -- exact answer please"}'
+Invoke-RestMethod http://127.0.0.1:8000/api/sessions
+.\scripts\smoke-conversation.ps1
+.\scripts\eval-native-v14.ps1 -Limit 40
 ```
 
 ## Package

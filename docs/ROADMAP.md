@@ -56,11 +56,11 @@ Future backlog for work that is not required for the current next-version ship.
 
 - [ ] Decide next version name and numbering.
 - [ ] Decide whether the next public version is v15 or a larger rewrite branch.
-- [ ] Decide long-term support window for:
-  - [ ] Terminal mode.
-  - [ ] Current FastAPI web mode.
-  - [x] Electron shell.
-  - [x] Tracked Python backend source.
-  - [x] Stale installer and sync scripts.
+- [x] Decide current runtime direction.
+  - [x] Native C++/WebView2 is the active app path.
+  - [x] Electron shell is deprecated/removed from tracked app code.
+  - [x] Tracked Python backend source is deprecated/removed from tracked app code.
+  - [x] Stale installer and sync scripts are removed.
+- [ ] Decide whether a native terminal/debug mode is still useful.
 - [ ] Decide if spiritual mode should become an explicit user setting.
 - [ ] Decide whether emotional graphs stay in the chat sidebar or move to a separate dashboard.
