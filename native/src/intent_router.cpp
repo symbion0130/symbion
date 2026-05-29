@@ -30,14 +30,16 @@ bool IsGreetingOnly(const std::string& text) {
 
 bool LooksLikeSocialChat(const std::string& text) {
     return IsGreetingOnly(text) || ContainsAny(text, {
-        "what's up", "whats up", "sup", "my guy", "how are you",
+        "what's up", "whats up", "sup", "my guy", "guy", "how are you",
         "how you doing", "how you feeling", "how's it going", "hows it going",
         "what you up to", "what are you up to", "whatcha up to",
         "chillin", "chilling", "just hanging", "hanging out", "good day",
         "good vibes", "vibing", "taking it easy", "all good", "appreciate",
         "thanks", "thank you", "big dog", "we cookin", "cookin my guy",
         "lolol", "lmao", "fit check", "vibe check", "looking good so far",
-        "finally got", "got it installed", "app installed"
+        "finally got", "got it installed", "app installed", "not important for now",
+        "shipping code", "just sitting here", "watching the rain", "change the subject",
+        "fair enough", "deff", "whataburger"
     });
 }
 

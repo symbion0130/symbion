@@ -281,6 +281,18 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
         return "Always.";
     }
+    if (lower == "guy") {
+        return "Lol what's going on?";
+    }
+    if (ContainsAnyLocal(lower, {"not important for now", "not important rn"})) {
+        return "Fair enough. What's next?";
+    }
+    if (ContainsAnyLocal(lower, {"shipping code", "shipped code"})) {
+        return "Nice. What got fixed?";
+    }
+    if (ContainsAnyLocal(lower, {"change the subject"})) {
+        return "Fair enough. I'll follow your lead.";
+    }
     if (ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
         return "Not much. Hanging here, ready to be useful. What's going on?";
     }
@@ -299,6 +311,15 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (ContainsAnyLocal(lower, {"ran thru", "ran through"}) &&
         ContainsAnyLocal(lower, {"burger", "food", "lunch", "dinner"})) {
         return "That disappeared fast. You must've been starving.";
+    }
+    if (ContainsAnyLocal(lower, {"whataburger"})) {
+        return "Solid choice. Whataburger hits different.";
+    }
+    if (ContainsAnyLocal(lower, {"watching the rain", "sitting here watching the rain"})) {
+        return "Nice. Rainy day quiet hits different.";
+    }
+    if (ContainsAnyLocal(lower, {"deff do", "def do", "definitely do"})) {
+        return "Can't argue with that.";
     }
     if (ContainsAnyLocal(lower, {"fit check", "vibe check"})) {
         return "Fits. Clean.";
