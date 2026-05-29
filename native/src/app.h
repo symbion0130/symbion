@@ -23,8 +23,14 @@ private:
     HttpResponse HandleHealth() const;
     HttpResponse HandleChat(const HttpRequest& request);
     HttpResponse HandleForget(const HttpRequest& request);
+    HttpResponse HandleTechniques(const HttpRequest& request);
+    HttpResponse HandleTechniqueCommand(const std::string& session_id, const std::string& message);
+    HttpResponse HandleTechniqueSync(const HttpRequest& request);
+    HttpResponse HandleSessions(const HttpRequest& request) const;
+    HttpResponse HandleProfileFact(const HttpRequest& request) const;
     HttpResponse HandleRecent() const;
     HttpResponse HandleEmotions() const;
+    HttpResponse HandleEmotionCheckins(const HttpRequest& request);
     HttpResponse HandleRelevantMemory(const HttpRequest& request) const;
     HttpResponse HandleHome() const;
 

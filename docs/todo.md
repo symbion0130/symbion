@@ -7,6 +7,17 @@ This file tracks the current ship scope only. Future/backlog work lives in
 
 Current open item groups: 0.
 
+## Latest V14 Integration Pass
+
+- [x] Port more v14-style evaluation cases into the native smoke suite.
+- [x] Add promoted-technique support for `promote this`, `show techniques`, and `delete technique <id>`.
+- [x] Add same-session rolling summaries for long conversations.
+- [x] Capture knowledge gaps from uncertain answers so missing topics can be followed up later.
+- [x] Add social/persona regression coverage so the v14 warmth does not collapse into canned replies.
+- [x] Rebuild native C++ Release binaries.
+- [x] Fix direct date-awareness in native chat context; expanded v14 smoke expects `2026` for `what year is it`.
+- [x] Re-run the expanded native conversation smoke after the date-awareness fix.
+
 ## Current Scope Summary
 
 - [x] Local Gemma is the default LLM provider.
@@ -147,6 +158,8 @@ Current open item groups: 0.
 
 ## Current Open Items
 
+- [ ] Fix direct date-awareness in native chat context.
+  - [ ] `.\scripts\smoke-conversation.ps1` currently fails the expanded v14 restraint case because `what year is it` returns stale years instead of `2026`.
 - [x] Track emotional analytics signals in SQLite.
   - [x] Emotion over time.
   - [x] Stress over time.

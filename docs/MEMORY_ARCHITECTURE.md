@@ -9,6 +9,10 @@ The previous Python memory implementation was removed from the active runtime on
 - `native_emotion_signals` stores detected emotional labels and intensity.
 - `/api/messages/recent` retrieves recent conversation history.
 - `/api/emotions/recent` retrieves recent emotional signals.
+- `/api/emotions` records and retrieves first-class emotional check-ins.
+- `/api/sessions` lists recent native chat sessions for resume/navigation surfaces.
+- `/api/profile/fact?key=...` reads one exact profile fact without loading the full profile.
+- `/api/techniques/sync` imports/exports shared technique learnings with caps and marker rejection.
 - `/api/chat` retrieves recent and relevant memory on demand before calling Local Gemma.
 - Relevant recall now prefers the user's own prior words, not older assistant replies.
 - The current turn is stored after retrieval so the memory layer does not simply echo the sentence the user just typed.
@@ -16,6 +20,10 @@ The previous Python memory implementation was removed from the active runtime on
 - Natural forget requests such as "forget this", "delete that memory", and "clear this chat" remove stored chat history and matching emotion signals.
 - Full resets such as "wipe all memory", "forget everything", and "reset memory" remove all native messages and emotion history.
 - Full resets require a second confirmation message, such as "yes", before any data is wiped.
+- Long native sessions now create rolling same-session summaries so older turns can stay available without preloading the full transcript.
+- Promoted response moves are stored in `techniques` through chat commands and `/api/techniques`.
+- Shared technique moves can be imported/exported through `shared_learnings.md`; imported moves are marked `source='shared'`.
+- Uncertain native answers can capture open `knowledge_gaps` for later review instead of pretending the answer was complete.
 
 ## Current SQLite Memory Surface
 
@@ -100,6 +108,10 @@ Field notes:
 Current retrieval behavior:
 
 - Always user-scope check-ins.
+- Native `GET /api/emotions` returns recent check-ins and supports `limit`,
+  `days`, `emotion`, and active-user scoping.
+- Native `POST /api/emotions` records explicit check-ins without replacing
+  `native_emotion_signals`.
 - Do not inject the emotional archive into every prompt.
 - Search check-ins through the on-demand `search_emotional_history` tool.
 - Never use check-ins for cross-user retrieval unless the active user explicitly
