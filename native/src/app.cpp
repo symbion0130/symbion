@@ -285,6 +285,15 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
                                  "robotic response", "machine response"})) {
         return "Yeah, fair. That was too canned. I'll loosen it up.";
     }
+    if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
+        return "Yeah, that's the thing to tune. I need to catch the real signal first, then choose the tone.";
+    }
+    if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
+        if (ContainsAnyLocal(lower, {"response style", "responses", "reply style"})) {
+            return "Yeah, I see it. You're working the response style, not just chatting. I'll treat this like tuning, not casual small talk.";
+        }
+        return "I see that. You've been putting real work into this. I'm good; let's make the next bit cleaner.";
+    }
     if (lower == "guy") {
         return "Lol what's going on?";
     }
@@ -377,6 +386,12 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
         return "Fair. The router sets the lane: casual should sound casual, practical should be practical, and emotional stuff should slow down and map one door at a time. When it misses, it sounds scripted. That is exactly what we are tuning.";
+    }
+    if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
+        return "Yeah, that's useful feedback. I should catch the main signal first, then choose the tone. If you're talking about the work, I need to acknowledge the work before I get casual.";
+    }
+    if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
+        return "I see that. You're not just making conversation; you're pushing the system into shape. What part feels most off right now?";
     }
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
                                  "robotic response", "machine response"})) {
