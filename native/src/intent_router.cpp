@@ -37,6 +37,22 @@ bool LooksLikeSocialChat(const std::string& text) {
     });
 }
 
+bool LooksLikePositiveSlang(const std::string& text) {
+    if (ContainsAny(text, {"i feel sick", "i'm sick", "im sick", "feel sick", "getting sick"})) {
+        return false;
+    }
+    return text == "sick" || text == "fire" || text == "dope" || text == "lit" ||
+           text == "bet" || text == "rad" || text == "clean" || text == "based" ||
+           ContainsAny(text, {
+               "that's sick", "thats sick", "that is sick", "this is sick", "so sick",
+               "pretty sick", "sick man", "sick dude", "sick my guy", "sick bro",
+               "that's fire", "thats fire", "that is fire", "this is fire",
+               "that's dope", "thats dope", "that is dope", "this is dope",
+               "that's lit", "thats lit", "that is lit", "this is lit",
+               "no cap", "big w", "huge w", "lets go", "let's go"
+           });
+}
+
 bool LooksLikeDirectQuestion(const std::string& text) {
     return ContainsAny(text, {
         "what is", "what are", "who is", "who was", "where is", "where was",
@@ -59,6 +75,14 @@ bool LooksLikePracticalLife(const std::string& text) {
         "hungry", "lunch", "dinner", "breakfast", "restaurant", "food",
         "protein", "local spot", "nearby", "paper bat", "folded bat", "paper folded",
         "like an airplane", "origami"
+    });
+}
+
+bool LooksLikePhysicalIllness(const std::string& text) {
+    return ContainsAny(text, {
+        "i feel sick", "i'm sick", "im sick", "i am sick", "feel sick",
+        "getting sick", "got sick", "throwing up", "nauseous", "fever",
+        "sore throat", "head cold", "flu", "stomach bug"
     });
 }
 
@@ -110,7 +134,8 @@ Intent ClassifyIntent(std::string_view message) {
     intent.wipe_all = LooksLikeWipeAll(text);
     intent.forget = intent.wipe_all || LooksLikeForget(text);
     intent.asks_for_list = ContainsAny(text, {"list", "what are the", "name the", "give me the"});
-    intent.emotional = !LooksLikePracticalLife(text) && ContainsAny(text, {
+    const bool physical_illness = LooksLikePhysicalIllness(text);
+    intent.emotional = !LooksLikePracticalLife(text) && !physical_illness && ContainsAny(text, {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",
         "i'm anxious", "im anxious", "i am anxious", "i'm scared", "im scared",
         "overwhelmed", "stress", "stressed", "lonely", "anger", "angry", "hurt", "grief", "ashamed",
@@ -162,10 +187,12 @@ Intent ClassifyIntent(std::string_view message) {
     } else if (intent.emotional || trauma_related) {
         intent.emotional = true;
         intent.mode = IntentMode::Reflective;
-    } else if (LooksLikeSocialChat(text)) {
+    } else if (LooksLikeSocialChat(text) || LooksLikePositiveSlang(text)) {
         intent.mode = IntentMode::Social;
     } else if (LooksLikeCreative(text)) {
         intent.mode = IntentMode::Creative;
+    } else if (physical_illness) {
+        intent.mode = IntentMode::DirectAnswer;
     } else if (LooksLikeTask(text) && LooksLikePracticalLife(text)) {
         intent.mode = IntentMode::Task;
     } else if (LooksLikeDirectQuestion(text) || text.find('?') != std::string::npos) {

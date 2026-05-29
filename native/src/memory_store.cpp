@@ -577,7 +577,10 @@ EmotionSignal DetectEmotion(std::string_view text) {
         signal = {"anger", 7};
     } else if (ContainsAny(lower, {"overwhelmed", "stressed", "too much", "burned out"})) {
         signal = {"overwhelm", 6};
-    } else if (ContainsAny(lower, {"happy", "grateful", "better", "proud", "hopeful", "positive"})) {
+    } else if (ContainsAny(lower, {"happy", "grateful", "better", "proud", "hopeful", "positive",
+                                   "that's sick", "thats sick", "that is sick", "this is sick",
+                                   "that's fire", "thats fire", "that's dope", "thats dope",
+                                   "big w", "huge w", "lets go", "let's go"})) {
         signal = {"positive", 5};
     }
     if (ContainsAny(lower, {"extremely", "unbearable", "can't", "cannot", "really"})) {

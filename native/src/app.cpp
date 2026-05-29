@@ -278,6 +278,23 @@ std::string KnownDirectAnswer(const std::string& message) {
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Social) return {};
     const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"that's sick", "thats sick", "that is sick", "this is sick", "so sick",
+                                 "sick man", "sick dude", "sick my guy", "sick bro"}) ||
+        lower == "sick") {
+        return "Yeah, that's sick. I like that.";
+    }
+    if (ContainsAnyLocal(lower, {"that's fire", "thats fire", "that is fire", "this is fire"}) ||
+        lower == "fire") {
+        return "That is fire. No notes.";
+    }
+    if (ContainsAnyLocal(lower, {"that's dope", "thats dope", "that is dope", "this is dope"}) ||
+        lower == "dope") {
+        return "Dope. That's a clean win.";
+    }
+    if (lower == "bet" || lower == "lit" || lower == "rad" || lower == "clean" ||
+        lower == "based" || ContainsAnyLocal(lower, {"no cap", "big w", "huge w", "lets go", "let's go"})) {
+        return "Yep. We take that win.";
+    }
     if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"})) {
         return "That's the good stuff. We take a calm win when it shows up.";
     }
@@ -310,6 +327,10 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
         return "Fair. What drives it is the router: casual chat should sound casual, practical questions should get practical answers, and emotional stuff should slow down and map the feeling. This reply should feel more like me talking with you, not reading a support script.";
+    }
+    if (ContainsAnyLocal(lower, {"i feel sick", "i'm sick", "im sick", "i am sick", "feel sick",
+                                 "getting sick", "nauseous", "fever", "sore throat"})) {
+        return "Ah, sick-sick. Take it easy if you can: water, something light, and rest. What symptoms are showing up?";
     }
     if (ContainsAnyLocal(lower, {"restaurant", "local", "nearby"}) &&
         ContainsAnyLocal(lower, {"protein", "lunch", "food", "hungry", "cook"})) {
