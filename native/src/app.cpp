@@ -294,6 +294,19 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         }
         return "I see that. You've been putting real work into this. I'm good; let's make the next bit cleaner.";
     }
+    if (ContainsAnyLocal(lower, {"making some changes", "how you respond", "response style", "reply style"}) &&
+        ContainsAnyLocal(lower, {"watching okc", "thunder", "game", "stomped"})) {
+        return "That sounds like a very you kind of night: tuning my response style while OKC gets worked in the background. I appreciate you putting the reps in on this.";
+    }
+    if (ContainsAnyLocal(lower, {"making some changes", "how you respond", "response style", "reply style"})) {
+        return "I appreciate you working on that. Response style is subtle, but it matters a lot.";
+    }
+    if (ContainsAnyLocal(lower, {"good night so far", "good nite so far"})) {
+        if (ContainsAnyLocal(lower, {"grandpa", "grandpas", "grandpa's"})) {
+            return "Good, I'm glad the night's been decent. Going to your grandpa's tomorrow sounds like a nice shift of pace.";
+        }
+        return "Good, I'm glad the night's been decent. What's been making it good?";
+    }
     if (lower == "guy") {
         return "Lol what's going on?";
     }
@@ -354,7 +367,8 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         lower == "based" || ContainsAnyLocal(lower, {"no cap", "big w", "huge w", "lets go", "let's go"})) {
         return "Yep. That's a win.";
     }
-    if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"})) {
+    if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"}) &&
+        WordCount(lower) <= 6) {
         return "Good. Let that one be easy.";
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {

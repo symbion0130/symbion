@@ -41,7 +41,9 @@ bool LooksLikeSocialChat(const std::string& text) {
         "shipping code", "just sitting here", "watching the rain", "change the subject",
         "fair enough", "deff", "whataburger", "scripted response", "too scripted",
         "sounds scripted", "canned response", "robotic response", "machine response",
-        "working hard", "response style", "reply style", "conversation flow", "chat flow"
+        "working hard", "response style", "reply style", "conversation flow", "chat flow",
+        "making some changes", "how you respond", "watching okc", "thunder",
+        "good night so far", "good nite so far", "grandpa", "grandpas", "grandpa's"
     });
 }
 
