@@ -1859,19 +1859,16 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         intent.emotional = true;
     }
     const ResponseFrame frame = BuildResponseFrame(user_message, intent, recent);
-    const bool low_context_social = IsLowContextSocialTurn(lower_message, intent);
-    const bool context_correction = IsContextCorrectionTurn(lower_message);
-    std::vector<ChatMessage> relevant;
-    if (!low_context_social && !context_correction) {
-        relevant = memory_.AmbientContext(8);
-        const auto session_summaries = memory_.RecentSessionSummaries(session_id, 2);
-        relevant.insert(relevant.end(), session_summaries.begin(), session_summaries.end());
-        const auto recalled = memory_.RetrieveRelevant(user_message, 6);
-        relevant.insert(relevant.end(), recalled.begin(), recalled.end());
-    }
-    const auto sources = (intent.crisis || low_context_social || context_correction)
-                             ? std::vector<SourceChunk>{}
-                             : memory_.SearchCounselingSources(user_message, false, 4);
+    auto relevant = memory_.AmbientContext(8);
+<<<<<<<<< Temporary merge branch 1
+=========
+    const auto session_summaries = memory_.RecentSessionSummaries(session_id, 2);
+    relevant.insert(relevant.end(), session_summaries.begin(), session_summaries.end());
+>>>>>>>>> Temporary merge branch 2
+    const auto recalled = memory_.RetrieveRelevant(user_message, 6);
+    relevant.insert(relevant.end(), recalled.begin(), recalled.end());
+    const auto sources = intent.crisis ? std::vector<SourceChunk>{}
+                                       : memory_.SearchCounselingSources(user_message, false, 4);
     const auto emotions = memory_.RecentEmotionSignals(8);
     const int recent_count = static_cast<int>(recent.size());
     const int relevant_count = static_cast<int>(relevant.size());
