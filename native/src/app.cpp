@@ -263,6 +263,13 @@ bool RecentAssistantWasEmotional(const std::vector<ChatMessage>& recent) {
     return false;
 }
 
+std::string RecentAssistantText(const std::vector<ChatMessage>& recent) {
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role == "assistant") return Lower(it->content);
+    }
+    return {};
+}
+
 std::string KnownDirectAnswer(const std::string& message) {
     const std::string lower = Lower(message);
     auto remember_prefix = lower.find("remember that ");
@@ -272,6 +279,50 @@ std::string KnownDirectAnswer(const std::string& message) {
     if (lower.rfind("remember ", 0) == 0 && message.size() > 9) {
         return "I will remember " + message.substr(9) + ".";
     }
+    return {};
+}
+
+std::string QuickContextualAnswer(const std::string& message,
+                                  const Intent& intent,
+                                  const std::vector<ChatMessage>& recent) {
+    const std::string lower = Lower(message);
+    const std::string assistant = RecentAssistantText(recent);
+    if (assistant.empty()) return {};
+
+    if (assistant.find("what about dogs") != std::string::npos ||
+        assistant.find("about dogs") != std::string::npos ||
+        assistant.find("dogs do you") != std::string::npos) {
+        if (ContainsAnyLocal(lower, {"loyal", "loyalty", "loving", "not loved", "love"})) {
+            return "Yeah. That's the heart of dogs: loyalty without keeping score. They can make love feel simple again when people have made it feel conditional.";
+        }
+    }
+
+    if ((intent.mode == IntentMode::Social || intent.mode == IntentMode::DirectAnswer) &&
+        assistant.find("what's up") != std::string::npos &&
+        ContainsAnyLocal(lower, {"watching basketball", "basketball", "thunder", "okc"})) {
+        return "Nice. Basketball is good background noise. Is OKC making it painful right now?";
+    }
+
+    if (ContainsAnyLocal(assistant, {"cygnus x-1", "black hole system", "blackstar"}) &&
+        ContainsAnyLocal(lower, {"where is it", "located", "sky"})) {
+        return "Cygnus X-1 is in the constellation **Cygnus**, the Swan, up along the Milky Way in the northern sky. You cannot see the black hole itself, but the system is in that Cygnus region near Deneb's part of the sky.";
+    }
+
+    if (ContainsAnyLocal(assistant, {"cygnus x-1", "black hole system", "blackstar"}) &&
+        ContainsAnyLocal(lower, {"wish i could go", "wish i could go there", "go there"})) {
+        return "Yeah, I get that. Space has that pull: part adventure, part escape, part wanting to stand near something impossibly huge and just feel it.";
+    }
+
+    if (ContainsAnyLocal(lower, {"canis major", "dog", "dogs"}) &&
+        ContainsAnyLocal(lower, {"love dogs", "i love dogs", "sounds like a dog"})) {
+        return "Yeah, Canis Major literally has that mythic dog energy. It is the Great Dog constellation, and Sirius is its bright anchor. Makes sense that the name caught you if dogs already mean something to you.";
+    }
+
+    if (ContainsAnyLocal(lower, {"loyalty", "loving when not loved", "not loved by people",
+                                 "loving when not loved by people"})) {
+        return "Yeah. That's the heart of dogs: loyalty without keeping score. They can make love feel simple again when people have made it feel conditional.";
+    }
+
     return {};
 }
 
@@ -306,6 +357,21 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
             return "Good, I'm glad the night's been decent. Going to your grandpa's tomorrow sounds like a nice shift of pace.";
         }
         return "Good, I'm glad the night's been decent. What's been making it good?";
+    }
+    if (ContainsAnyLocal(lower, {"watching basketball", "basketball"}) &&
+        ContainsAnyLocal(lower, {"chilling", "chillin", "still watching"})) {
+        return "Nice. Basketball is good background noise. Who's playing?";
+    }
+    if (ContainsAnyLocal(lower, {"okc", "thunder"}) &&
+        ContainsAnyLocal(lower, {"stomped", "losing", "getting worked"})) {
+        return "Oof. Watching your team get worked while you're trying to chill is a specific kind of annoying.";
+    }
+    if (ContainsAnyLocal(lower, {"my team is losing", "team is losing", "team's losing"})) {
+        return "Ah, that's annoying. Hard to fully chill when your team is getting worked.";
+    }
+    if (ContainsAnyLocal(lower, {"hoping it wouldnt go past this game", "hoping it wouldn't go past this game",
+                                 "wouldnt go past this game", "wouldn't go past this game"})) {
+        return "Yeah, I get that. You wanted the clean finish, not the extra stress of another game.";
     }
     if (lower == "guy") {
         return "Lol what's going on?";
@@ -368,7 +434,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Yep. That's a win.";
     }
     if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"}) &&
-        WordCount(lower) <= 6) {
+        WordCount(lower) <= 3) {
         return "Good. Let that one be easy.";
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
@@ -400,6 +466,15 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
         return "Fair. The router sets the lane: casual should sound casual, practical should be practical, and emotional stuff should slow down and map one door at a time. When it misses, it sounds scripted. That is exactly what we are tuning.";
+    }
+    if (ContainsAnyLocal(lower, {"blackstar", "black star"})) {
+        if (ContainsAnyLocal(lower, {"where is it", "located", "sky"})) {
+            return "If you mean a real object with that dark-star vibe, pick **Cygnus X-1**: a famous black hole system in the constellation Cygnus, the Swan. From the northern hemisphere, Cygnus is a summer-to-fall constellation, high along the Milky Way. You cannot see the black hole itself with your eyes, but the system sits near the bright star Deneb's neighborhood in the sky.";
+        }
+        if (ContainsAnyLocal(lower, {"random", "give me"})) {
+            return "Take **Cygnus X-1**. It is not a normal star; it is one of the most famous black hole candidates, orbiting a massive blue supergiant. It has the right 'blackstar' feel: invisible gravity, a bright companion, and X-rays pouring out from matter getting pulled in.";
+        }
+        return "Blackstar is not a standard everyday astronomy label. People usually mean either a theoretical **dark star**, a poetic way of talking about a **black hole**, or just a cool-sounding star idea. The real version closest to that vibe is a black hole system like **Cygnus X-1**.";
     }
     if (ContainsAnyLocal(lower, {"response style", "reply style", "conversation flow", "chat flow"})) {
         return "Yeah, that's useful feedback. I should catch the main signal first, then choose the tone. If you're talking about the work, I need to acknowledge the work before I get casual.";
@@ -602,6 +677,9 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     memory_.SaveMessage(session_id, "user", user_message);
     memory_.SaveEmotion(session_id, user_message, signal);
     std::string answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
+    if (answer.empty()) {
+        answer = QuickContextualAnswer(user_message, intent, recent);
+    }
     if (answer.empty()) {
         answer = QuickSocialAnswer(user_message, intent);
     }
