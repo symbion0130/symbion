@@ -580,7 +580,8 @@ EmotionSignal DetectEmotion(std::string_view text) {
     } else if (ContainsAny(lower, {"happy", "grateful", "better", "proud", "hopeful", "positive",
                                    "that's sick", "thats sick", "that is sick", "this is sick",
                                    "that's fire", "thats fire", "that's dope", "thats dope",
-                                   "big w", "huge w", "lets go", "let's go"})) {
+                                   "big w", "huge w", "lets go", "let's go", "cookin",
+                                   "cooking", "clean win"})) {
         signal = {"positive", 5};
     }
     if (ContainsAny(lower, {"extremely", "unbearable", "can't", "cannot", "really"})) {

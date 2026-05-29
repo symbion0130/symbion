@@ -33,7 +33,9 @@ bool LooksLikeSocialChat(const std::string& text) {
         "what's up", "whats up", "sup", "my guy", "how are you",
         "how you doing", "how you feeling", "how's it going", "hows it going",
         "chillin", "chilling", "just hanging", "hanging out", "good day",
-        "good vibes", "vibing", "taking it easy", "all good"
+        "good vibes", "vibing", "taking it easy", "all good", "appreciate",
+        "thanks", "thank you", "big dog", "we cookin", "cookin my guy",
+        "lolol", "lmao", "fit check", "vibe check"
     });
 }
 
@@ -49,7 +51,8 @@ bool LooksLikePositiveSlang(const std::string& text) {
                "that's fire", "thats fire", "that is fire", "this is fire",
                "that's dope", "thats dope", "that is dope", "this is dope",
                "that's lit", "thats lit", "that is lit", "this is lit",
-               "no cap", "big w", "huge w", "lets go", "let's go"
+               "no cap", "big w", "huge w", "lets go", "let's go",
+               "cookin", "cooking", "clean win"
            });
 }
 
@@ -58,7 +61,8 @@ bool LooksLikeDirectQuestion(const std::string& text) {
         "what is", "what are", "who is", "who was", "where is", "where was",
         "when did", "when was", "why did", "how do", "how does", "how did",
         "tell me about", "explain", "summarize", "define", "which", "what verse",
-        "what chapter", "what book", "list", "name the", "give me"
+        "what chapter", "what book", "list", "name the", "give me",
+        "what you think", "what do you think", "thoughts"
     });
 }
 

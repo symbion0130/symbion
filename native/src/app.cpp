@@ -278,6 +278,22 @@ std::string KnownDirectAnswer(const std::string& message) {
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     if (intent.mode != IntentMode::Social) return {};
     const std::string lower = Lower(message);
+    if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
+        return "Always.";
+    }
+    if (ContainsAnyLocal(lower, {"we cookin", "cookin my guy", "cooking my guy"})) {
+        return "Let's go. We are absolutely cookin.";
+    }
+    if (ContainsAnyLocal(lower, {"lolol", "lmaooo", "lmao", "haha"})) {
+        return "Yeah, that got me too.";
+    }
+    if (ContainsAnyLocal(lower, {"ran thru", "ran through"}) &&
+        ContainsAnyLocal(lower, {"burger", "food", "lunch", "dinner"})) {
+        return "That disappeared fast. You must've been starving.";
+    }
+    if (ContainsAnyLocal(lower, {"fit check", "vibe check"})) {
+        return "Fits. Clean.";
+    }
     if (ContainsAnyLocal(lower, {"that's sick", "thats sick", "that is sick", "this is sick", "so sick",
                                  "sick man", "sick dude", "sick my guy", "sick bro"}) ||
         lower == "sick") {
@@ -326,7 +342,7 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
         intent.mode != IntentMode::Creative) return {};
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
-        return "Fair. What drives it is the router: casual chat should sound casual, practical questions should get practical answers, and emotional stuff should slow down and map the feeling. This reply should feel more like me talking with you, not reading a support script.";
+        return "Fair. The router sets the lane: casual should sound casual, practical should be practical, and emotional stuff should slow down and map one door at a time. When it misses, it sounds scripted. That is exactly what we are tuning.";
     }
     if (ContainsAnyLocal(lower, {"i feel sick", "i'm sick", "im sick", "i am sick", "feel sick",
                                  "getting sick", "nauseous", "fever", "sore throat"})) {
