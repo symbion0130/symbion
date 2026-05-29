@@ -281,6 +281,15 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
         return "Always.";
     }
+    if (ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
+        return "Not much. Hanging here, ready to be useful. What's going on?";
+    }
+    if (ContainsAnyLocal(lower, {"finally got", "got it installed", "app installed"})) {
+        return "Nice, that took a minute. How's it looking?";
+    }
+    if (ContainsAnyLocal(lower, {"looking good so far", "lookin good so far"})) {
+        return "Good to hear. That's a win.";
+    }
     if (ContainsAnyLocal(lower, {"we cookin", "cookin my guy", "cooking my guy"})) {
         return "Let's go. We are absolutely cookin.";
     }
@@ -321,7 +330,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Hey. Good to see you.";
     }
     if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy"})) {
-        return "Hey, my guy. I'm here.";
+        return "Hey, what's up?";
     }
     return {};
 }
