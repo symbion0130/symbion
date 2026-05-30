@@ -27,3 +27,4 @@
 - Threaded active user through native message saves, emotion saves, session listing, profile facts, and relevant-memory retrieval.
 - Made the native shell ignore accidental hidden startup flags so the main window opens visibly.
 - Embedded the Symbion `.ico` in the native shell and use it for the window, taskbar, and tray icon.
+- Warmed the social fast-paths so casual greetings, snacks, jokes, and response-style critiques keep more presence and continuity instead of flat support-bot replies.

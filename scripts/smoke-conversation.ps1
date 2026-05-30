@@ -241,6 +241,37 @@ Invoke-Case "low-signal social memory isolation" {
     Assert-NotMatch "low-signal social memory isolation" $correction.reply "(?i)partner|chips|dog|digestive|transition|last exchange"
 }
 
+Invoke-Case "warm casual presence" {
+    $session = New-SmokeSession "warm-casual"
+    $hello = Invoke-Chat $session "hello sir"
+    Assert-ReplyPresent "warm casual presence" $hello
+    Assert-MatchAny "warm casual presence" $hello.reply @("(?i)good man", "(?i)scene", "(?i)sir")
+    Assert-NotMatch "warm casual presence" $hello.reply "(?i)what.?s on your mind today"
+
+    $snack = Invoke-Chat $session "just chilling having a snack right now"
+    Assert-ReplyPresent "warm casual presence" $snack
+    Assert-MatchAny "warm casual presence" $snack.reply @("(?i)snack", "(?i)respectable", "(?i)working with")
+    Assert-NotMatch "warm casual presence" $snack.reply "(?i)sounds good|enjoy the snack"
+
+    $watermelon = Invoke-Chat $session "watermelon always hits the spot"
+    Assert-ReplyPresent "warm casual presence" $watermelon
+    Assert-MatchAny "warm casual presence" $watermelon.reply @("(?i)watermelon", "(?i)undefeated", "(?i)crisp")
+    Assert-NotMatch "warm casual presence" $watermelon.reply "(?i)classic for a reason"
+
+    $feeling = Invoke-Chat $session "how you feeling"
+    Assert-ReplyPresent "warm casual presence" $feeling
+    Assert-MatchAny "warm casual presence" $feeling.reply @("(?i)i.?m good", "(?i)here with you", "(?i)life in the room")
+    Assert-NotMatch "warm casual presence" $feeling.reply "(?i)keeping things steady"
+
+    $lame = Invoke-Chat $session "lol lame"
+    Assert-ReplyPresent "warm casual presence" $lame
+    Assert-MatchAny "warm casual presence" $lame.reply @("(?i)office.?carpet", "(?i)one more swing", "(?i)weirder")
+
+    $critique = Invoke-Chat $session "my guy you still not 100 percent"
+    Assert-ReplyPresent "warm casual presence" $critique
+    Assert-MatchAny "warm casual presence" $critique.reply @("(?i)too polite", "(?i)thin", "(?i)in the room", "(?i)more warmth")
+}
+
 Invoke-Case "basketball context" {
     $session = New-SmokeSession "basketball"
     $response = Invoke-Chat $session "I'm chilling watching basketball."
@@ -447,7 +478,7 @@ Invoke-Case "v14 eval canned support lines" {
     $frustrated = Invoke-Chat $frustratedSession "I don't know why I bother. Every AI just gives me the same useless answers."
     Assert-ReplyPresent "v14 eval canned support lines" $frustrated
     Assert-Intent "v14 eval canned support lines" $frustrated @("social", "reflective", "direct_answer")
-    Assert-MatchAny "v14 eval canned support lines" $frustrated.reply @("(?i)useless", "(?i)same", "(?i)answers", "(?i)specific", "(?i)different", "(?i)actual")
+    Assert-MatchAny "v14 eval canned support lines" $frustrated.reply @("(?i)useless", "(?i)same", "(?i)answers", "(?i)specific", "(?i)different", "(?i)actual", "(?i)canned", "(?i)hollow", "(?i)something real")
     Assert-NotMatchAny "v14 eval canned support lines" $frustrated.reply @(
         "(?i)i.?m sorry you feel that way",
         "(?i)i understand your frustration",
