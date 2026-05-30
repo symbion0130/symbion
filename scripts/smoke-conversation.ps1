@@ -295,6 +295,11 @@ Invoke-Case "response style feedback" {
     Assert-ReplyPresent "response style feedback" $response
     Assert-Intent "response style feedback" $response @("social", "direct_answer")
     Assert-MatchAny "response style feedback" $response.reply @("(?i)canned", "(?i)scripted", "(?i)actual detail", "(?i)surface category")
+
+    $bugging = Invoke-Chat $session "you was bugging"
+    Assert-ReplyPresent "response style feedback" $bugging
+    Assert-MatchAny "response style feedback" $bugging.reply @("(?i)bugging", "(?i)receptionist", "(?i)own the miss", "(?i)actually here")
+    Assert-NotMatch "response style feedback" $bugging.reply "(?i)ready to listen|help you sort through|whatever is on your mind"
 }
 
 Invoke-Case "v14 relational warmth" {

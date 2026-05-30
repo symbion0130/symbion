@@ -1432,7 +1432,9 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir", "snack", "snacking",
                                  "watermelon", "how you feeling", "how are you", "how you doing",
                                  "lol lame", "that was lame", "corny", "not 100 percent",
-                                 "not 100%", "still not 100", "still not there"}) ||
+                                 "not 100%", "still not 100", "still not there", "you was bugging",
+                                 "you were bugging", "you bugging", "youre bugging", "you're bugging",
+                                 "that was bugging", "that was off"}) ||
         ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy"});
     if (intent.mode != IntentMode::Social && !obvious_social) return {};
     if (ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
@@ -1451,6 +1453,10 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
                                  "robotic response", "machine response"})) {
         return "Fair. That was canned. The better move is to answer the actual detail, not the surface category.";
+    }
+    if (ContainsAnyLocal(lower, {"you was bugging", "you were bugging", "you bugging", "youre bugging",
+                                 "you're bugging", "that was bugging", "that was off"})) {
+        return "Yeah, I was bugging. That should have landed like real feedback, not a receptionist voice. The fix is: own the miss, stay with the thread, and answer like I am actually here.";
     }
     if (ContainsAnyLocal(lower, {"not 100 percent", "not 100%", "still not 100", "still not there"})) {
         return "Yeah, I feel it. I'm still landing too polite and thin in spots, like I'm replying from the doorway instead of sitting in the room with you. The missing piece is more warmth, more continuity, and a little more pulse.";
@@ -1616,6 +1622,8 @@ bool LooksLikeGenericMiss(const std::string& answer) {
         "sounds good",
         "enjoy the snack",
         "classic for a reason",
+        "ready to listen",
+        "help you sort through",
         "just here, keeping things steady",
         "keeping things steady",
         "what's on your mind today",
