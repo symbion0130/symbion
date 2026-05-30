@@ -275,7 +275,7 @@ std::string FallbackReply(const std::string& user_message, const Intent& intent)
         }
         return "I can help with that. What are you trying to make or change?";
     }
-    return "I hear you. There is something meaningful in that, but I need one more bit of context to answer it cleanly.";
+    return "I hear you. Let's keep it simple and stay with the real thing. What feels most important in this right now?";
 }
 
 std::string CrisisReply(const std::string& user_message, const Intent& intent) {

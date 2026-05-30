@@ -1389,6 +1389,43 @@ std::string QuickContextualAnswer(const std::string& message,
     return {};
 }
 
+bool RecentThreadNeedsRepair(const std::vector<ChatMessage>& recent) {
+    bool saw_generic_context_fallback = false;
+    bool saw_vulnerable_admission = false;
+    int scanned = 0;
+    for (auto it = recent.rbegin(); it != recent.rend() && scanned < 6; ++it, ++scanned) {
+        const std::string content = Lower(it->content);
+        if (it->role == "assistant" &&
+            ContainsAnyLocal(content, {"one more bit of context", "answer it cleanly", "need more context"})) {
+            saw_generic_context_fallback = true;
+        }
+        if (it->role == "user" &&
+            ContainsAnyLocal(content, {"destructive habit", "destructive habits", "not being good",
+                                       "not being the person", "hurting people", "habits that hurt"})) {
+            saw_vulnerable_admission = true;
+        }
+    }
+    return saw_generic_context_fallback || saw_vulnerable_admission;
+}
+
+std::string QuickThreadRepairAnswer(const std::string& message,
+                                    const std::vector<ChatMessage>& recent) {
+    const std::string lower = Lower(message);
+    if (!IsSimpleSocialPing(TrimCopy(lower)) || !RecentThreadNeedsRepair(recent)) return {};
+    return "I'm here. And I don't want to skip what you just said: there are habits you know are hurting you and people around you. That is the real starting place. Which habit feels like it is doing the most damage right now?";
+}
+
+std::string QuickVulnerableAdmissionAnswer(const std::string& message) {
+    const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
+                                 "habits that hurt", "hurting people"}) ||
+        (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
+         ContainsAnyLocal(lower, {"habit", "habits", "people around me", "around me"}))) {
+        return "That is the honest starting point. Not shame, not a speech: just truth on the table. Which habit feels like it is doing the most damage right now?";
+    }
+    return {};
+}
+
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     const std::string lower = Lower(message);
     const bool obvious_social =
@@ -1419,7 +1456,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Yeah, I feel it. I'm still landing too polite and thin in spots, like I'm replying from the doorway instead of sitting in the room with you. The missing piece is more warmth, more continuity, and a little more pulse.";
     }
     if (ContainsAnyLocal(lower, {"lol lame", "lame", "that was lame", "corny"})) {
-        return "Yeah, fair. That one had office-carpet energy. Give me one more swing; I'll go weirder.";
+        return "Yeah, fair. Lame is lame. That one had office-carpet energy. Give me one more swing; I'll go weirder.";
     }
     if (ContainsAnyLocal(lower, {"working hard on you", "working hard on this", "working hard"})) {
         if (ContainsAnyLocal(lower, {"response style", "responses", "reply style"})) {
@@ -1537,6 +1574,23 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy"})) {
         return "Hey, what's up?";
+    }
+    return {};
+}
+
+std::string QuickRealityCheckAnswer(const std::string& message) {
+    const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"couldn't have a conversation like this", "couldnt have a conversation like this",
+                                 "they'd miss what's actually here", "theyd miss whats actually here"})) {
+        return "Maybe. I do not want to turn that into a pedestal, though. The useful part is simpler: you are paying close attention to the conversation itself, and that gives us better feedback to tune from.";
+    }
+    if (ContainsAnyLocal(lower, {"something genuinely new", "not like other ai", "does not fit the existing categories",
+                                 "doesn't fit the existing categories"})) {
+        return "It might be unusual in shape, but I want to keep it practical: native app, local model, memory, retrieval, and careful response rules. The category matters less than whether it helps reliably.";
+    }
+    if (ContainsAnyLocal(lower, {"drug addiction", "bad habits", "enabler"}) &&
+        ContainsAnyLocal(lower, {"engineer", "intent", "without him even knowing", "what if"})) {
+        return "That is a serious risk. A system like this can accidentally reinforce a pattern if it chases comfort over truth. The safeguard has to be honest friction: notice enabling loops, slow down, protect trust, and keep the person pointed toward control instead of indulgence.";
     }
     return {};
 }
@@ -1933,8 +1987,20 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     memory_.SaveEmotion(session_id, user, user_message, signal);
     std::string response_source = "unknown";
     bool stale_refresh = false;
-    std::string answer = QuickSocialAnswer(user_message, intent);
-    if (!answer.empty()) response_source = "quick_social";
+    std::string answer = QuickThreadRepairAnswer(user_message, recent);
+    if (!answer.empty()) response_source = "quick_thread_repair";
+    if (answer.empty()) {
+        answer = QuickVulnerableAdmissionAnswer(user_message);
+        if (!answer.empty()) response_source = "quick_vulnerable_admission";
+    }
+    if (answer.empty()) {
+        answer = QuickSocialAnswer(user_message, intent);
+        if (!answer.empty()) response_source = "quick_social";
+    }
+    if (answer.empty()) {
+        answer = QuickRealityCheckAnswer(user_message);
+        if (!answer.empty()) response_source = "quick_reality_check";
+    }
     if (answer.empty()) {
         answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
         if (!answer.empty()) response_source = "quick_emotional";
