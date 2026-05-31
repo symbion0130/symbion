@@ -934,6 +934,8 @@ std::string GenericDoorMappingQuestion(const std::string& message, const Intent&
     return "What is \"" + phrase + "\" connected to?";
 }
 
+bool IsSimpleSocialPing(const std::string& lower);
+
 bool IsEmotionalContinuation(const std::string& message,
                              const Intent& intent,
                              const std::vector<ChatMessage>& recent) {
@@ -975,6 +977,48 @@ bool IsEmotionalContinuation(const std::string& message,
         });
     }
     return false;
+}
+
+bool RecentHasOpenEmotionalThread(const std::vector<ChatMessage>& recent) {
+    int scanned = 0;
+    for (auto it = recent.rbegin(); it != recent.rend() && scanned < 8; ++it, ++scanned) {
+        const std::string content = Lower(it->content);
+        if (it->role == "user" && ContainsAnyLocal(content, {
+                "i feel", "i'm feeling", "im feeling", "i am feeling",
+                "ashamed", "shame", "stuck", "not enough", "inadequate",
+                "destructive habit", "destructive habits", "habits that were destructive",
+                "not being good", "hurting people", "people around me",
+                "afraid", "anxious", "anxiety", "pressure", "wrong step",
+                "rough", "tired of", "uphill battle", "down to my bones",
+                "kill myself", "hurt myself", "want to die"
+            })) {
+            return true;
+        }
+        if (it->role == "assistant" && ContainsAnyLocal(content, {
+                "which habit", "most damage", "honest starting point",
+                "truth on the table", "what makes you feel", "what is it connected",
+                "what feels most intense", "what part feels", "what emotions",
+                "what feeling", "tell me about", "what does it feel like",
+                "is it connected to family", "family, work, finances",
+                "we can work through", "slowly and gently"
+            })) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShouldKeepEmotionalThread(const std::string& message,
+                               const Intent& intent,
+                               const std::vector<ChatMessage>& recent) {
+    if (recent.empty() || intent.forget || intent.wipe_all || intent.crisis || intent.emotional) return false;
+    if (intent.mode != IntentMode::Social) return false;
+    const std::string lower = TrimCopy(Lower(message));
+    if (!IsSimpleSocialPing(lower) &&
+        !ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy", "you good", "you there"})) {
+        return false;
+    }
+    return RecentHasOpenEmotionalThread(recent);
 }
 
 bool RecentAssistantWasEmotional(const std::vector<ChatMessage>& recent) {
@@ -1415,6 +1459,34 @@ std::string QuickThreadRepairAnswer(const std::string& message,
     return "I'm here. And I don't want to skip what you just said: there are habits you know are hurting you and people around you. That is the real starting place. Which habit feels like it is doing the most damage right now?";
 }
 
+std::string QuickStickyEmotionalThreadAnswer(const std::string& message,
+                                             const std::vector<ChatMessage>& recent) {
+    const std::string lower = TrimCopy(Lower(message));
+    if (!IsSimpleSocialPing(lower) &&
+        !ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy", "you good", "you there"})) {
+        return {};
+    }
+    if (!RecentHasOpenEmotionalThread(recent)) return {};
+    std::string last_user;
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role == "user") {
+            last_user = Lower(it->content);
+            break;
+        }
+    }
+    if (ContainsAnyLocal(last_user, {"destructive habit", "destructive habits", "not being good",
+                                     "hurting people", "people around me"})) {
+        return "I'm here. And I don't want to skip the real thread: the habits you said are hurting you and people around you. Which one feels like it is doing the most damage right now?";
+    }
+    if (ContainsAnyLocal(last_user, {"wrong step", "right step", "pressure", "afraid"})) {
+        return "I'm here. Let's stay with that pressure for a second: afraid of choosing the wrong first step. What option keeps coming up, even if you are not sure it is right?";
+    }
+    if (ContainsAnyLocal(last_user, {"ashamed", "shame", "stuck", "not enough", "inadequate"})) {
+        return "I'm here. That shame/stuck thread matters more than small talk right now. What part of it is most active?";
+    }
+    return "I'm here. Let's not lose the thread we were in. What part still feels most active right now?";
+}
+
 std::string QuickVulnerableAdmissionAnswer(const std::string& message) {
     const std::string lower = Lower(message);
     if (ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
@@ -1434,7 +1506,8 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
                                  "lol lame", "that was lame", "corny", "not 100 percent",
                                  "not 100%", "still not 100", "still not there", "you was bugging",
                                  "you were bugging", "you bugging", "youre bugging", "you're bugging",
-                                 "that was bugging", "that was off"}) ||
+                                 "that was bugging", "that was off", "scripted responses",
+                                 "keep getting scripted", "getting scripted", "tired of it"}) ||
         ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy"});
     if (intent.mode != IntentMode::Social && !obvious_social) return {};
     if (ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
@@ -1449,6 +1522,11 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
         return "Always.";
+    }
+    if (ContainsAnyLocal(lower, {"i keep getting scripted", "keep getting scripted", "scripted responses",
+                                 "getting tired of it", "tired of it"}) &&
+        ContainsAnyLocal(lower, {"scripted", "canned", "robotic", "response", "responses", "it"})) {
+        return "Yeah. That is not a one-off miss anymore; it is a pattern, and I get why it is wearing on you. The fix is not more apology language. I need to stop defaulting to safe helper phrases, stay with the exact thing you said, and give you a real response with some spine.";
     }
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted", "canned response",
                                  "robotic response", "machine response"})) {
@@ -1969,7 +2047,8 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     }
 
     const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
-    if (IsEmotionalContinuation(user_message, intent, recent)) {
+    if (ShouldKeepEmotionalThread(user_message, intent, recent) ||
+        IsEmotionalContinuation(user_message, intent, recent)) {
         intent.mode = IntentMode::Reflective;
         intent.emotional = true;
     }
@@ -1997,6 +2076,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     bool stale_refresh = false;
     std::string answer = QuickThreadRepairAnswer(user_message, recent);
     if (!answer.empty()) response_source = "quick_thread_repair";
+    if (answer.empty()) {
+        answer = QuickStickyEmotionalThreadAnswer(user_message, recent);
+        if (!answer.empty()) response_source = "quick_sticky_emotional_thread";
+    }
     if (answer.empty()) {
         answer = QuickVulnerableAdmissionAnswer(user_message);
         if (!answer.empty()) response_source = "quick_vulnerable_admission";

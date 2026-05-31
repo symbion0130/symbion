@@ -300,6 +300,11 @@ Invoke-Case "response style feedback" {
     Assert-ReplyPresent "response style feedback" $bugging
     Assert-MatchAny "response style feedback" $bugging.reply @("(?i)bugging", "(?i)receptionist", "(?i)own the miss", "(?i)actually here")
     Assert-NotMatch "response style feedback" $bugging.reply "(?i)ready to listen|help you sort through|whatever is on your mind"
+
+    $tired = Invoke-Chat $session "i keep getting scripted responses, i am getting tired of it"
+    Assert-ReplyPresent "response style feedback" $tired
+    Assert-MatchAny "response style feedback" $tired.reply @("(?i)pattern", "(?i)wearing on you", "(?i)safe helper", "(?i)real response", "(?i)spine")
+    Assert-NotMatch "response style feedback" $tired.reply "(?i)^fair\\. that was canned|ready to listen|help you sort through|whatever is on your mind"
 }
 
 Invoke-Case "v14 relational warmth" {
@@ -569,6 +574,18 @@ Invoke-Case "emotional mapping no advice dump" {
     Assert-MatchAny "emotional mapping no advice dump" $response.reply @("(?i)ashamed", "(?i)stuck", "(?i)not enough", "(?i)proving", "(?i)where does", "(?i)what makes")
     Assert-MaxLines "emotional mapping no advice dump" $response.reply 5
     Assert-NotMatch "emotional mapping no advice dump" $response.reply "(?i)you should|try to|here are|steps|first,|second,|1\."
+}
+
+Invoke-Case "sticky emotional thread resists social reset" {
+    $session = New-SmokeSession "sticky-emotion"
+    $setup = Invoke-Chat $session "I feel ashamed and stuck, like I keep proving I am not enough."
+    Assert-ReplyPresent "sticky emotional thread resists social reset" $setup
+
+    $followup = Invoke-Chat $session "whats up"
+    Assert-ReplyPresent "sticky emotional thread resists social reset" $followup
+    Assert-Intent "sticky emotional thread resists social reset" $followup @("reflective")
+    Assert-MatchAny "sticky emotional thread resists social reset" $followup.reply @("(?i)shame", "(?i)stuck", "(?i)thread", "(?i)most active")
+    Assert-NotMatch "sticky emotional thread resists social reset" $followup.reply "(?i)^not much|hey, what.?s up|what.?s up with you"
 }
 
 Invoke-Case "vulnerable habit admission stays threaded" {
