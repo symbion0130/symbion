@@ -28,12 +28,24 @@ bool IsGreetingOnly(const std::string& text) {
            text == "good morning" || text == "good afternoon" || text == "good evening";
 }
 
+bool IsExactSocialChat(const std::string& text) {
+    return IsGreetingOnly(text) ||
+           text == "what's up" || text == "whats up" || text == "sup" ||
+           text == "what's up my guy" || text == "whats up my guy" ||
+           text == "my guy" || text == "guy" ||
+           text == "how are you" || text == "how you doing" || text == "how you feeling" ||
+           text == "how's it going" || text == "hows it going" ||
+           text == "what you up to" || text == "what are you up to" || text == "whatcha up to" ||
+           text == "chillin" || text == "chilling" || text == "vibing" ||
+           text == "thanks" || text == "thank you" || text == "appreciate it" ||
+           text == "bet" || text == "fair enough" || text == "deff" ||
+           text == "you was bugging" || text == "you were bugging" ||
+           text == "you bugging" || text == "youre bugging" || text == "you're bugging";
+}
+
 bool LooksLikeSocialChat(const std::string& text) {
-    return IsGreetingOnly(text) || ContainsAny(text, {
-        "what's up", "whats up", "sup", "my guy", "guy", "how are you",
-        "how you doing", "how you feeling", "how's it going", "hows it going",
-        "what you up to", "what are you up to", "whatcha up to",
-        "chillin", "chilling", "just hanging", "hanging out", "good day",
+    return IsExactSocialChat(text) || ContainsAny(text, {
+        "just hanging", "hanging out", "good day",
         "good vibes", "vibing", "taking it easy", "all good", "appreciate",
         "thanks", "thank you", "big dog", "we cookin", "cookin my guy",
         "lolol", "lmao", "fit check", "vibe check", "looking good so far",
@@ -49,6 +61,43 @@ bool LooksLikeSocialChat(const std::string& text) {
         "watching basketball", "basketball", "my team is losing", "team is losing",
         "wouldnt go past this game", "wouldn't go past this game"
     });
+}
+
+bool LooksLikePositiveSlang(const std::string& text);
+
+bool LooksLikeSocialSignal(const std::string& text) {
+    return IsExactSocialChat(text) || LooksLikePositiveSlang(text) ||
+           ContainsAny(text, {"change the subject", "not important for now", "fair enough"});
+}
+
+bool LooksLikeOpenEmotionalThread(const std::string& text) {
+    return ContainsAny(text, {
+        "i feel", "i'm feeling", "im feeling", "i am feeling",
+        "ashamed", "shame", "stuck", "not enough", "inadequate",
+        "destructive habit", "destructive habits", "habits that were destructive",
+        "not being good", "hurting people", "people around me",
+        "afraid", "anxious", "anxiety", "pressure", "wrong step",
+        "rough", "uphill battle", "down to my bones", "kill myself",
+        "hurt myself", "want to die", "what makes you feel",
+        "what is it connected", "what feels most intense", "which habit",
+        "most damage", "truth on the table", "slowly and gently"
+    });
+}
+
+bool RecentHasOpenEmotionalThread(const std::vector<ChatMessage>& recent) {
+    int scanned = 0;
+    for (auto it = recent.rbegin(); it != recent.rend() && scanned < 6; ++it, ++scanned) {
+        if (LooksLikeOpenEmotionalThread(Lower(it->content))) return true;
+    }
+    return false;
+}
+
+bool PreviousUserWasSocialSignal(const std::vector<ChatMessage>& recent) {
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "user") continue;
+        return LooksLikeSocialSignal(Lower(it->content));
+    }
+    return false;
 }
 
 bool LooksLikePositiveSlang(const std::string& text) {
@@ -143,7 +192,7 @@ bool LooksLikePositiveCheckin(const std::string& text) {
 
 }  // namespace
 
-Intent ClassifyIntent(std::string_view message) {
+Intent ClassifyIntent(std::string_view message, const std::vector<ChatMessage>& recent) {
     const std::string text = Lower(message);
     Intent intent;
 
@@ -154,7 +203,7 @@ Intent ClassifyIntent(std::string_view message) {
     intent.emotional = !LooksLikePracticalLife(text) && !physical_illness && ContainsAny(text, {
         "i feel", "i'm feeling", "im feeling", "i am feeling", "i'm sad", "im sad",
         "i'm anxious", "im anxious", "i am anxious", "i'm scared", "im scared",
-        "overwhelmed", "stress", "stressed", "lonely", "anger", "angry", "hurt", "grief", "ashamed",
+        "overwhelmed", "stress", "stressed", "anxiety", "lonely", "anger", "angry", "hurt", "grief", "ashamed",
         "depressed", "hopeless", "panic", "afraid", "confused about my life",
         "talking down to me", "talks down to me", "disrespect", "disrespected",
         "worthless", "respect me", "respect from", "my mom", "my mother",
@@ -204,7 +253,12 @@ Intent ClassifyIntent(std::string_view message) {
         intent.emotional = true;
         intent.mode = IntentMode::Reflective;
     } else if (LooksLikeSocialChat(text) || LooksLikePositiveSlang(text)) {
-        intent.mode = IntentMode::Social;
+        if (RecentHasOpenEmotionalThread(recent) && !PreviousUserWasSocialSignal(recent)) {
+            intent.mode = IntentMode::Reflective;
+            intent.emotional = true;
+        } else {
+            intent.mode = IntentMode::Social;
+        }
     } else if (LooksLikeCreative(text)) {
         intent.mode = IntentMode::Creative;
     } else if (physical_illness) {
@@ -222,6 +276,11 @@ Intent ClassifyIntent(std::string_view message) {
     return intent;
 }
 
+Intent ClassifyIntent(std::string_view message) {
+    static const std::vector<ChatMessage> no_recent;
+    return ClassifyIntent(message, no_recent);
+}
+
 std::string IntentModeName(IntentMode mode) {
     switch (mode) {
         case IntentMode::Social: return "social";
@@ -231,7 +290,6 @@ std::string IntentModeName(IntentMode mode) {
         case IntentMode::Creative: return "creative";
         case IntentMode::Task: return "task";
         case IntentMode::Forget: return "forget";
-        case IntentMode::Clarify: return "clarify";
     }
     return "direct_answer";
 }

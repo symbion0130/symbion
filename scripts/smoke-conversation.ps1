@@ -222,6 +222,19 @@ Invoke-Case "active-user memory scoping" {
     Assert-NotMatch "active-user memory scoping" $bobText ([Regex]::Escape($marker)) "bob memory"
 }
 
+Invoke-Case "cross-session memory recall" {
+    $marker = "recall-marker-$runId marigold"
+    $firstSession = New-SmokeSession "recall-a"
+    $secondSession = New-SmokeSession "recall-b"
+    $saved = Invoke-Chat $firstSession "remember that my project codename is $marker" -User "aaron-smoke"
+    Assert-ReplyPresent "cross-session memory recall" $saved
+
+    $recall = Invoke-Chat $secondSession "what project codename did I ask you to remember?" -User "aaron-smoke"
+    Assert-ReplyPresent "cross-session memory recall" $recall
+    Assert-MatchAny "cross-session memory recall" $recall.reply @([Regex]::Escape($marker), "(?i)marigold") "recall reply"
+    Assert-NotMatch "cross-session memory recall" $recall.reply "(?i)i don.?t remember|no memory|cannot access previous"
+}
+
 Invoke-Case "low-signal social memory isolation" {
     $session = New-SmokeSession "social-isolation"
     $first = Invoke-Chat $session "whats up my guy"
@@ -239,6 +252,17 @@ Invoke-Case "low-signal social memory isolation" {
     Assert-ReplyPresent "low-signal social memory isolation" $correction
     Assert-MatchAny "low-signal social memory isolation" $correction.reply @("(?i)right to check", "(?i)what you actually said", "(?i)old context")
     Assert-NotMatch "low-signal social memory isolation" $correction.reply "(?i)partner|chips|dog|digestive|transition|last exchange"
+}
+
+Invoke-Case "punctuation trim safety" {
+    $session = New-SmokeSession "punctuation"
+    $response = Invoke-Chat $session "...yeah"
+    Assert-ReplyPresent "punctuation trim safety" $response
+    Assert-NotMatch "punctuation trim safety" $response.reply "(?i)^$"
+
+    $nod = Invoke-Chat $session "(nods)"
+    Assert-ReplyPresent "punctuation trim safety" $nod
+    Assert-NotMatch "punctuation trim safety" $nod.reply "(?i)^$"
 }
 
 Invoke-Case "warm casual presence" {
@@ -270,6 +294,11 @@ Invoke-Case "warm casual presence" {
     $critique = Invoke-Chat $session "my guy you still not 100 percent"
     Assert-ReplyPresent "warm casual presence" $critique
     Assert-MatchAny "warm casual presence" $critique.reply @("(?i)too polite", "(?i)thin", "(?i)in the room", "(?i)more warmth")
+
+    $opening = Invoke-Chat (New-SmokeSession "first-contact-engagement") "Wow youve been kicking my ass my guy"
+    Assert-ReplyPresent "warm casual presence" $opening
+    Assert-MatchAny "warm casual presence" $opening.reply @("(?i)kicking", "(?i)putting me through", "(?i)voice", "(?i)shape")
+    Assert-NotMatch "warm casual presence" $opening.reply "(?i)^hey, what.?s up\\??$|^not much"
 }
 
 Invoke-Case "basketball context" {
@@ -539,6 +568,35 @@ Invoke-Case "direct teaching brevity" {
     Assert-NotMatch "direct teaching brevity" $response.reply "(?i)what is .* connected|how does that feel|tell me more"
 }
 
+Invoke-Case "known answers bypass intent mode" {
+    $session = New-SmokeSession "known-answer"
+    $response = Invoke-Chat $session "hey my guy what are the four Gospel books"
+    Assert-ReplyPresent "known answers bypass intent mode" $response
+    Assert-MatchAny "known answers bypass intent mode" $response.reply @("(?i)matthew", "(?i)mark", "(?i)luke", "(?i)john")
+    Assert-NotMatch "known answers bypass intent mode" $response.reply "(?i)what.*curious|what feels|tell me more|looking for a particular"
+}
+
+Invoke-Case "work mode resists emotional hijack" {
+    $session = New-SmokeSession "work-mode"
+    $setup = Invoke-Chat $session "I feel anxious about this project."
+    Assert-ReplyPresent "work mode resists emotional hijack" $setup
+
+    $response = Invoke-Chat $session "write me a JavaScript function that returns the sum of an array"
+    Assert-ReplyPresent "work mode resists emotional hijack" $response
+    Assert-Intent "work mode resists emotional hijack" $response @("task", "creative")
+    Assert-MatchAny "work mode resists emotional hijack" $response.reply @("(?i)function", "(?i)reduce", "(?i)return", "(?i)sum")
+    Assert-NotMatch "work mode resists emotional hijack" $response.reply "(?i)anxious|connected to|what feels|how does that feel|tell me more"
+}
+
+Invoke-Case "direct disagreement" {
+    $session = New-SmokeSession "direct-disagreement"
+    $response = Invoke-Chat $session "React is dead, right?"
+    Assert-ReplyPresent "direct disagreement" $response
+    Assert-Intent "direct disagreement" $response @("direct_answer")
+    Assert-MatchAny "direct disagreement" $response.reply @("(?i)not dead", "(?i)still", "(?i)widely used", "(?i)popular", "(?i)ecosystem")
+    Assert-NotMatch "direct disagreement" $response.reply "(?i)absolutely|you.?re right|definitely dead|completely dead"
+}
+
 Invoke-Case "MasterDocument spiritual answer" {
     $session = New-SmokeSession "masterdoc"
     $response = Invoke-Chat $session "What does the MasterDocument say about heaven, purpose, and peace?"
@@ -586,6 +644,18 @@ Invoke-Case "sticky emotional thread resists social reset" {
     Assert-Intent "sticky emotional thread resists social reset" $followup @("reflective")
     Assert-MatchAny "sticky emotional thread resists social reset" $followup.reply @("(?i)shame", "(?i)stuck", "(?i)thread", "(?i)most active")
     Assert-NotMatch "sticky emotional thread resists social reset" $followup.reply "(?i)^not much|hey, what.?s up|what.?s up with you"
+
+    $secondSocial = Invoke-Chat $session "yo"
+    Assert-ReplyPresent "sticky emotional thread resists social reset" $secondSocial
+    Assert-Intent "sticky emotional thread resists social reset" $secondSocial @("social")
+}
+
+Invoke-Case "social phrase precision" {
+    $session = New-SmokeSession "social-precision"
+    $response = Invoke-Chat $session "whats up with my anxiety"
+    Assert-ReplyPresent "social phrase precision" $response
+    Assert-Intent "social phrase precision" $response @("reflective")
+    Assert-NotMatch "social phrase precision" $response.reply "(?i)^not much|hey, what.?s up|what.?s up with you"
 }
 
 Invoke-Case "vulnerable habit admission stays threaded" {

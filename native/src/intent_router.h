@@ -2,6 +2,9 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
+
+#include "memory_store.h"
 
 namespace symbion {
 
@@ -12,8 +15,7 @@ enum class IntentMode {
     Counseling,
     Creative,
     Task,
-    Forget,
-    Clarify
+    Forget
 };
 
 struct Intent {
@@ -27,6 +29,7 @@ struct Intent {
 };
 
 Intent ClassifyIntent(std::string_view message);
+Intent ClassifyIntent(std::string_view message, const std::vector<ChatMessage>& recent);
 std::string IntentModeName(IntentMode mode);
 
 }  // namespace symbion

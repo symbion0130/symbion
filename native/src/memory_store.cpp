@@ -261,12 +261,34 @@ bool AssistantSignalsKnowledgeGap(const std::string& text) {
     });
 }
 
+bool LooksEmotionallyImportantForSummary(const std::string& text) {
+    const std::string lower = Lower(text);
+    return ContainsAny(lower, {
+        "i feel", "i'm feeling", "im feeling", "i am feeling",
+        "ashamed", "shame", "stuck", "not enough", "inadequate",
+        "destructive habit", "destructive habits", "habits that were destructive",
+        "not being good", "hurting people", "people around me",
+        "afraid", "anxious", "anxiety", "pressure", "wrong step",
+        "rough", "uphill battle", "down to my bones", "kill myself",
+        "hurt myself", "want to die", "trauma", "ptsd", "abuse",
+        "which habit", "most damage", "truth on the table", "slowly and gently",
+        "what makes you feel", "what is it connected", "what feels most intense"
+    });
+}
+
 struct StoredMessage {
     sqlite3_int64 id = 0;
     std::string role;
     std::string content;
     std::string created_at;
 };
+
+std::string SummarySnippet(const StoredMessage& msg, size_t ordinary_limit) {
+    if (LooksEmotionallyImportantForSummary(msg.content)) {
+        return ClipText(msg.content, 300);
+    }
+    return FirstSentence(msg.content, ordinary_limit);
+}
 
 std::string JoinTopTerms(const std::vector<StoredMessage>& messages) {
     std::unordered_map<std::string, int> counts;
@@ -302,12 +324,12 @@ std::string BuildHeuristicSummary(const std::vector<StoredMessage>& messages) {
     for (const auto& msg : messages) {
         if (msg.role == "user") {
             if (LooksQuestionLike(msg.content) && open_questions.size() < 3) {
-                open_questions.push_back(FirstSentence(msg.content, 180));
+                open_questions.push_back(SummarySnippet(msg, 180));
             } else if (WordCountText(msg.content) >= 5 && user_details.size() < 4) {
-                user_details.push_back(FirstSentence(msg.content, 190));
+                user_details.push_back(SummarySnippet(msg, 190));
             }
         } else if (msg.role == "assistant" && assistant_moves.size() < 2) {
-            assistant_moves.push_back(FirstSentence(msg.content, 180));
+            assistant_moves.push_back(SummarySnippet(msg, 180));
         }
     }
 

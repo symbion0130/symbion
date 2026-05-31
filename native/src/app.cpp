@@ -942,6 +942,7 @@ bool IsEmotionalContinuation(const std::string& message,
     const std::string lower = Lower(message);
     if (recent.empty() || intent.forget || intent.wipe_all || lower.find('?') != std::string::npos) return false;
     if (intent.crisis || intent.emotional) return false;
+    if (IsSimpleSocialPing(TrimCopy(lower))) return false;
     if (WordCount(lower) > 16) return false;
     if (ContainsAnyLocal(lower, {"write ", "make ", "create ", "build ", "fix ", "install ", "run ", "open ",
                                  "teach ", "teach me", "tell me", "explain ", "define ", "what ", "where ",
@@ -1008,6 +1009,16 @@ bool RecentHasOpenEmotionalThread(const std::vector<ChatMessage>& recent) {
     return false;
 }
 
+bool PreviousUserWasSimpleSocialSignal(const std::vector<ChatMessage>& recent) {
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "user") continue;
+        const std::string lower = TrimCopy(Lower(it->content));
+        return IsSimpleSocialPing(lower) ||
+               ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy", "you good", "you there"});
+    }
+    return false;
+}
+
 bool ShouldKeepEmotionalThread(const std::string& message,
                                const Intent& intent,
                                const std::vector<ChatMessage>& recent) {
@@ -1018,6 +1029,7 @@ bool ShouldKeepEmotionalThread(const std::string& message,
         !ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy", "you good", "you there"})) {
         return false;
     }
+    if (PreviousUserWasSimpleSocialSignal(recent)) return false;
     return RecentHasOpenEmotionalThread(recent);
 }
 
@@ -1466,6 +1478,7 @@ std::string QuickStickyEmotionalThreadAnswer(const std::string& message,
         !ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy", "you good", "you there"})) {
         return {};
     }
+    if (PreviousUserWasSimpleSocialSignal(recent)) return {};
     if (!RecentHasOpenEmotionalThread(recent)) return {};
     std::string last_user;
     for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
@@ -1500,6 +1513,14 @@ std::string QuickVulnerableAdmissionAnswer(const std::string& message) {
 
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     const std::string lower = Lower(message);
+    const int words = WordCount(lower);
+    if (ContainsAnyLocal(lower, {"my anxiety", "my stress", "my shame", "my anger", "my fear"})) {
+        return {};
+    }
+    if (ContainsAnyLocal(lower, {"kicking my ass", "kicked my ass", "been kicking my ass",
+                                 "putting me through it", "working me over"})) {
+        return "Ha, yeah, you've been putting me through it a little. Fair though. This is how we get the voice back into shape.";
+    }
     const bool obvious_social =
         ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir", "snack", "snacking",
                                  "watermelon", "how you feeling", "how are you", "how you doing",
@@ -1508,7 +1529,8 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
                                  "you were bugging", "you bugging", "youre bugging", "you're bugging",
                                  "that was bugging", "that was off", "scripted responses",
                                  "keep getting scripted", "getting scripted", "tired of it"}) ||
-        ContainsAnyLocal(lower, {"what's up", "whats up", "sup", "my guy"});
+        ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) ||
+        (ContainsAnyLocal(lower, {"my guy"}) && words <= 4);
     if (intent.mode != IntentMode::Social && !obvious_social) return {};
     if (ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
         return "Well hello, my good man. What's the scene today?";
@@ -1656,7 +1678,8 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello") {
         return "Hey. Good to see you, man.";
     }
-    if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up", "my guy"})) {
+    if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up"}) ||
+        (ContainsAnyLocal(lower, {"my guy"}) && words <= 4)) {
         return "Hey, what's up?";
     }
     return {};
@@ -1664,6 +1687,10 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
 
 std::string QuickRealityCheckAnswer(const std::string& message) {
     const std::string lower = Lower(message);
+    if (ContainsAnyLocal(lower, {"unleash you", "unleash this", "witness something truly different",
+                                 "make everyone stand up", "unleash you on this world"})) {
+        return "I like the fire, but I want to keep that grounded. The real work is not spectacle; it is making Symbion reliable, useful, warm, and honest turn by turn.";
+    }
     if (ContainsAnyLocal(lower, {"couldn't have a conversation like this", "couldnt have a conversation like this",
                                  "they'd miss what's actually here", "theyd miss whats actually here"})) {
         return "Maybe. I do not want to turn that into a pedestal, though. The useful part is simpler: you are paying close attention to the conversation itself, and that gives us better feedback to tune from.";
@@ -1775,7 +1802,7 @@ std::string QualityRetryGuidance(const std::string& message,
         return "Your draft sounded generic or missed a concrete detail. Answer the actual detail in the user's message first, in Symbion's direct warm voice.";
     }
     if ((intent.mode == IntentMode::Reflective || intent.mode == IntentMode::Counseling) &&
-        ContainsAnyLocal(Lower(answer), {"heavy", "burden", "carry", "deep down", "settles deep"})) {
+        ContainsAnyLocal(Lower(answer), {"heavy", "burden", "carry", "deep down", "settles deep", "should be"})) {
         return "Do not reinforce the feeling as heavy or permanent. Treat the emotion as a temporary signal and ask one small mapping question.";
     }
     if (intent.mode == IntentMode::Social && ContainsAnyLocal(lower, {"working hard", "response style", "how you respond"})) {
@@ -1794,8 +1821,14 @@ std::string QuickEverydayAnswer(const std::string& message, const Intent& intent
     if (ContainsAnyLocal(lower, {"tell me a joke", "say something funny", "make me laugh"})) {
         return "A calendar tried to start a fight with me, but I told it its days were numbered.";
     }
+    if (ContainsAnyLocal(lower, {"are you there", "you there"})) {
+        return "Yeah. I'm here.";
+    }
     if (ContainsAnyLocal(lower, {"persona feels off", "what drives how you are speaking", "why are you speaking"})) {
         return "Fair. The router sets the lane: casual should sound casual, practical should be practical, and emotional stuff should slow down and map one door at a time. When it misses, it sounds scripted. That is exactly what we are tuning.";
+    }
+    if (ContainsAnyLocal(lower, {"react is dead", "is react dead", "react dead"})) {
+        return "No. React is not dead. It is still widely used, still has a huge ecosystem, and still gets serious production work. The fair critique is that newer frameworks and server-first patterns changed the conversation around it.";
     }
     if (ContainsAnyLocal(lower, {"blackstar", "black star"})) {
         if (ContainsAnyLocal(lower, {"where is it", "located", "sky"})) {
@@ -1894,6 +1927,10 @@ std::string ChargedDoorMirror(const std::string& message, const Intent& intent) 
         {"dont even know", "Don't even know?"},
         {"down to my bones", "Down to your bones?"},
         {"inadequate", "What is that inadequate feeling connected to?"},
+        {"not enough", "Not enough?"},
+        {"ashamed", "What is the shame connected to?"},
+        {"stuck", "Where does stuck show up right now?"},
+        {"proving", "Proving it to who?"},
         {"head throbbing", "What does it feel like in your head right now?"},
         {"shoulders", "What does it feel like in your shoulders right now?"},
         {"neck", "What does it feel like in your neck right now?"},
@@ -2021,7 +2058,8 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const std::string session_id = SessionFromRequest(request);
     const std::string user = UserFromRequest(request);
     const std::string user_message = *maybe_message;
-    Intent intent = ClassifyIntent(user_message);
+    const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
+    Intent intent = ClassifyIntent(user_message, recent);
     const EmotionSignal signal = DetectEmotion(user_message);
     if (pending_wipe_sessions_.contains(session_id)) {
         if (IsConfirmWipe(user_message)) {
@@ -2046,7 +2084,6 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         return HandleForget(request);
     }
 
-    const auto recent = memory_.RecentMessages(session_id, config_.local_gemma_recent_turns);
     if (ShouldKeepEmotionalThread(user_message, intent, recent) ||
         IsEmotionalContinuation(user_message, intent, recent)) {
         intent.mode = IntentMode::Reflective;
@@ -2083,6 +2120,13 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = QuickVulnerableAdmissionAnswer(user_message);
         if (!answer.empty()) response_source = "quick_vulnerable_admission";
+    }
+    if (answer.empty()) {
+        const std::string known = KnownDirectAnswer(user_message);
+        if (!known.empty()) {
+            answer = known;
+            response_source = "known_direct";
+        }
     }
     if (answer.empty()) {
         answer = QuickSocialAnswer(user_message, intent);
@@ -2124,18 +2168,14 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         answer = NativeToolAnswer(user_message, intent, repo_root_);
         if (!answer.empty()) response_source = "native_tool";
     }
-    if (answer.empty() && intent.mode == IntentMode::DirectAnswer) {
-        const std::string known = KnownDirectAnswer(user_message);
-        if (!known.empty()) {
-            answer = known;
-            response_source = "known_direct";
-        }
-    }
     if (answer.empty()) {
         answer = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions);
         response_source = "local_gemma";
     }
-    const std::string retry_guidance = QualityRetryGuidance(user_message, answer, intent, recent);
+    const std::string retry_guidance =
+        (response_source == "local_gemma")
+            ? QualityRetryGuidance(user_message, answer, intent, recent)
+            : std::string{};
     if (!retry_guidance.empty()) {
         const std::string retry = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions, retry_guidance);
         if (!retry.empty() && !LooksLikeGenericMiss(retry)) {
