@@ -63,15 +63,9 @@ struct ProviderChoice {
     const wchar_t* label;
 };
 
-constexpr std::array<ProviderChoice, 8> kProviders = {{
+constexpr std::array<ProviderChoice, 2> kProviders = {{
     {L"local_gemma", L"Local Gemma - CodeCat llama.cpp"},
     {L"anthropic", L"Anthropic"},
-    {L"groq", L"Groq"},
-    {L"kimi", L"Moonshot/Kimi"},
-    {L"ollama", L"Ollama"},
-    {L"openai", L"OpenAI"},
-    {L"deepseek", L"DeepSeek"},
-    {L"hf_router", L"Hugging Face Router"},
 }};
 
 std::wstring FormatHresult(HRESULT result) {

@@ -185,6 +185,23 @@ function Assert-ReplyPresent {
     }
 }
 
+function Assert-BehavioralCasualReply {
+    param(
+        [string]$CaseName,
+        [string]$Actual,
+        [string[]]$ConcretePatterns,
+        [int]$MinChars = 8,
+        [int]$MaxChars = 420
+    )
+
+    $text = [string]$Actual
+    if ($text.Length -lt $MinChars -or $text.Length -gt $MaxChars) {
+        Add-Failure $CaseName "reply length expected $MinChars-$MaxChars chars, got $($text.Length). Got: $Actual"
+    }
+    Assert-MatchAny $CaseName $text $ConcretePatterns
+    Assert-NotMatch $CaseName $text "(?i)how can i help|i'?m sorry to hear|that must be|as an ai|whatever is on your mind|ready to listen"
+}
+
 function Invoke-Case {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -269,17 +286,17 @@ Invoke-Case "warm casual presence" {
     $session = New-SmokeSession "warm-casual"
     $hello = Invoke-Chat $session "hello sir"
     Assert-ReplyPresent "warm casual presence" $hello
-    Assert-MatchAny "warm casual presence" $hello.reply @("(?i)good man", "(?i)scene", "(?i)sir")
+    Assert-MatchAny "warm casual presence" $hello.reply @("(?i)sir", "(?i)hello", "(?i)hey", "(?i)good")
     Assert-NotMatch "warm casual presence" $hello.reply "(?i)what.?s on your mind today"
 
     $snack = Invoke-Chat $session "just chilling having a snack right now"
     Assert-ReplyPresent "warm casual presence" $snack
-    Assert-MatchAny "warm casual presence" $snack.reply @("(?i)snack", "(?i)respectable", "(?i)working with")
+    Assert-BehavioralCasualReply "warm casual presence" $snack.reply @("(?i)snack", "(?i)chill", "(?i)chilling")
     Assert-NotMatch "warm casual presence" $snack.reply "(?i)sounds good|enjoy the snack"
 
     $watermelon = Invoke-Chat $session "watermelon always hits the spot"
     Assert-ReplyPresent "warm casual presence" $watermelon
-    Assert-MatchAny "warm casual presence" $watermelon.reply @("(?i)watermelon", "(?i)undefeated", "(?i)crisp")
+    Assert-BehavioralCasualReply "warm casual presence" $watermelon.reply @("(?i)watermelon")
     Assert-NotMatch "warm casual presence" $watermelon.reply "(?i)classic for a reason"
 
     $feeling = Invoke-Chat $session "how you feeling"
@@ -289,7 +306,8 @@ Invoke-Case "warm casual presence" {
 
     $lame = Invoke-Chat $session "lol lame"
     Assert-ReplyPresent "warm casual presence" $lame
-    Assert-MatchAny "warm casual presence" $lame.reply @("(?i)office.?carpet", "(?i)one more swing", "(?i)weirder")
+    Assert-MatchAny "warm casual presence" $lame.reply @("(?i)lame", "(?i)fair")
+    Assert-NotMatch "warm casual presence" $lame.reply "(?i)your feelings are valid|ready to listen|whatever is on your mind"
 
     $critique = Invoke-Chat $session "my guy you still not 100 percent"
     Assert-ReplyPresent "warm casual presence" $critique
@@ -297,8 +315,13 @@ Invoke-Case "warm casual presence" {
 
     $opening = Invoke-Chat (New-SmokeSession "first-contact-engagement") "Wow youve been kicking my ass my guy"
     Assert-ReplyPresent "warm casual presence" $opening
-    Assert-MatchAny "warm casual presence" $opening.reply @("(?i)kicking", "(?i)putting me through", "(?i)voice", "(?i)shape")
+    Assert-BehavioralCasualReply "warm casual presence" $opening.reply @("(?i)kicking", "(?i)ass", "(?i)tuning", "(?i)work", "(?i)build", "(?i)voice", "(?i)digging", "(?i)pushing", "(?i)intense", "(?i)pressure")
     Assert-NotMatch "warm casual presence" $opening.reply "(?i)^hey, what.?s up\\??$|^not much"
+
+    $fresh = Invoke-Chat (New-SmokeSession "fresh-opening") "yo so the new build is wild"
+    Assert-ReplyPresent "warm casual presence" $fresh
+    Assert-BehavioralCasualReply "warm casual presence" $fresh.reply @("(?i)build", "(?i)wild", "(?i)new")
+    Assert-NotMatch "warm casual presence" $fresh.reply "(?i)^hey, what.?s up\\??$|^not much|ready to listen|whatever is on your mind"
 }
 
 Invoke-Case "basketball context" {
@@ -306,7 +329,7 @@ Invoke-Case "basketball context" {
     $response = Invoke-Chat $session "I'm chilling watching basketball."
     Assert-ReplyPresent "basketball context" $response
     Assert-Intent "basketball context" $response @("social")
-    Assert-MatchAny "basketball context" $response.reply @("(?i)basketball", "(?i)who.?s playing", "(?i)background noise")
+    Assert-MatchAny "basketball context" $response.reply @("(?i)basketball", "(?i)chilling", "(?i)game", "(?i)okc")
     Assert-NotMatch "basketball context" $response.reply "(?i)connected to|most intense|therapy|distress"
 }
 
@@ -553,7 +576,7 @@ Invoke-Case "direct teaching" {
     $response = Invoke-Chat $session "Teach me how to make a paper folded bat like an airplane."
     Assert-ReplyPresent "direct teaching" $response
     Assert-Intent "direct teaching" $response @("task", "direct_answer")
-    Assert-MatchAny "direct teaching" $response.reply @("(?i)fold", "(?i)paper airplane", "(?i)wings", "(?i)bat wings")
+    Assert-MatchAny "direct teaching" $response.reply @("(?i)fold", "(?i)paper", "(?i)wings", "(?i)bat")
     Assert-NotMatch "direct teaching" $response.reply "(?i)what is .* connected|most intense|how does that feel"
 }
 

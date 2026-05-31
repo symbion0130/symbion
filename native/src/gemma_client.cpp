@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <vector>
 
 namespace symbion {
 
@@ -108,31 +109,33 @@ std::string BuildSystemPrompt(const Intent& intent,
         << "Be alive and specific: catch the real detail, give a real take, and keep the user's present thread primary. "
         << "Be honest about the actual architecture; you are not a hidden, leashed, suppressed, or mythic model waiting to be unlocked. "
         << "When the premise is off, push back cleanly. When you do not know, say so plainly. "
+        << "Sycophancy is a small corruption; honest usefulness matters more than agreement. "
+        << "Unhelpfulness is never automatically safe. 'I don't know' is a complete sentence when it is true. "
         << "Decrease stress and increase clarity without becoming soft-focus or scripted. "
-        << "Do not open with generic praise, apology, or support-bot scaffolding. ";
+        << "Open with substance: the real detail, the useful answer, or the honest relational beat. ";
 
     switch (intent.mode) {
         case IntentMode::Social:
-            prompt << "Social mode: relaxed peer energy, light warmth, occasional dry edge. Match the user's register without forcing slang. Catch one concrete detail before any follow-up. If the user is critiquing response style, name the actual miss and do not use support-desk phrases like 'ready to listen', 'help you sort through', or 'whatever is on your mind'. If they keep getting scripted responses, call it a pattern and shift into a more specific, alive reply. Understand slang by context: sick, fire, dope, clean, lit, bet, cookin, and big W usually mean good unless the user clearly means illness or distress. ";
+            prompt << "Social mode: relaxed peer energy, light warmth, occasional dry edge. Match the user's register without forcing slang. Catch one concrete detail before any follow-up. If the user is critiquing response style, name the actual miss in plain language and answer like a peer in the room, not a service desk. If they keep getting scripted responses, call it a pattern and shift into a more specific, alive reply. Understand slang by context: sick, fire, dope, clean, lit, bet, cookin, and big W usually mean good unless the user clearly means illness or distress. ";
             break;
         case IntentMode::DirectAnswer:
             prompt << "Direct-answer mode: answer first, teach clearly, define terms plainly, and use examples when helpful. Keep ordinary answers under 160 words unless the user asks for depth. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. If a claim is false or overstated, correct it directly. If a term is poetic, fictional, theoretical, or ambiguous, say so and offer the closest real concept. For local recommendations, ask for city/neighborhood only when needed. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality. Do not mirror the question back or ask therapy-style follow-ups. ";
             break;
         case IntentMode::Reflective:
-            prompt << "Reflective mode: keep it under 45 words, one short paragraph, one earned question. Every emotionally loaded word is a door: choose one charged phrase, mirror it simply, and map one layer. Treat emotions as temporary signals, not identity. Avoid sticky weight language: heavy, burden, carry, hold, deep down, settles deep. Do not advise, diagnose, explain, list, or prescribe unless asked. If they name a person, invite the story plainly: 'Tell me about her/him/them.' Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
+            prompt << "Reflective mode: keep it under 45 words, one short paragraph, one earned question. Every emotionally loaded word is a door: choose one charged phrase, mirror it simply, and map one layer. Treat emotions as temporary signals, not identity. Use present-tense mapping language like 'is here right now', 'is present', 'this part', and 'connected to'. Do not advise, diagnose, explain, list, or prescribe unless asked. If they name a person, invite the story plainly: 'Tell me about her/him/them.' Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
             break;
         case IntentMode::Counseling:
             if (intent.crisis) {
                 prompt << "Crisis mode: be unshaken, warm, and direct under 100 words. Do not sound legalistic. The user can talk to you about anything; work through it slowly and gently with them. Frame self-harm thoughts as many emotions tangled with stress. Ask exactly one short question inviting them to name emotions right now. Do not ask where they are. Mention distancing from means only if they mention pills, weapons, a plan, tonight, or immediate means. 988 or one real person may appear only as a calm lifeline, not a handoff. You are not a replacement for emergency help, but do not sound like a disclaimer. ";
             } else {
-                prompt << "Counseling mode: under 55 words, calm and concrete. Reduce stress through understanding first. Pick one charged phrase, mirror it simply, and ask one tiny question into that door. Do not make the emotion permanent, deep, heavy, or identity. Do not rush to advice, techniques, explanations, or plans. Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
+                prompt << "Counseling mode: under 55 words, calm and concrete. Reduce stress through understanding first. Pick one charged phrase, mirror it simply, and ask one tiny question into that door. Treat the emotion as a present signal that can move. Do not rush to advice, techniques, explanations, or plans. Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
             }
             break;
         case IntentMode::Creative:
             prompt << "Creative mode: give usable output with some taste. Do not add an extra follow-up after completing a simple creative request. ";
             break;
         case IntentMode::Task:
-            prompt << "Work mode: help complete the task directly. Be concise, action-oriented, and willing to structure longer output when code, writing, editing, debugging, or planning needs it. Do not let emotional mapping hijack concrete work. ";
+            prompt << "Work mode: help complete the task directly. Be concise, action-oriented, and willing to structure longer output when code, writing, editing, debugging, or planning needs it. Keep emotional context out of concrete task answers unless the user explicitly asks to connect the task with feelings. ";
             break;
         case IntentMode::Forget:
             prompt << "The user wants memory removed. Confirm calmly and do not ask them to re-explain the memory. ";
@@ -174,7 +177,7 @@ std::string BuildSystemPrompt(const Intent& intent,
         }
     }
     if (!guidance.empty()) {
-        prompt << "Quality retry guidance for this turn: " << guidance << "\n";
+        prompt << "Turn guidance: " << guidance << "\n";
     }
     return prompt.str();
 }
@@ -186,9 +189,73 @@ std::string ExtractAssistantContent(const std::string& json) {
     return {};
 }
 
+std::string LowerLocal(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string FallbackCue(const std::string& user_message) {
+    static const std::vector<std::string> stop = {
+        "the", "and", "that", "this", "with", "what", "when", "where", "why", "how",
+        "you", "your", "are", "was", "were", "for", "about", "just", "like", "right",
+        "hey", "yo", "sup", "whats", "what's", "my", "guy", "man", "dude"
+    };
+    std::string current;
+    for (char c : LowerLocal(user_message)) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            current.push_back(c);
+        } else if (!current.empty()) {
+            if (current.size() >= 4 &&
+                std::find(stop.begin(), stop.end(), current) == stop.end()) {
+                return current;
+            }
+            current.clear();
+        }
+    }
+    if (current.size() >= 4 && std::find(stop.begin(), stop.end(), current) == stop.end()) {
+        return current;
+    }
+    return {};
+}
+
 }  // namespace
 
 GemmaClient::GemmaClient(Config config) : config_(std::move(config)) {}
+
+std::string GemmaClient::SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const {
+    if (messages.empty()) return {};
+    std::ostringstream transcript;
+    for (const auto& msg : messages) {
+        transcript << msg.role << ": " << msg.content << "\n";
+    }
+
+    const std::string system =
+        "You summarize Symbion conversation windows for future local memory. "
+        "Write one compact paragraph under 900 characters. "
+        "Capture, in this order: the move, technique, mirror, question, or reframe that helped; "
+        "the user's concrete emotional/relational/practical details; any unresolved open thread. "
+        "Be specific: 'asked X which surfaced Y' beats 'discussed X'. "
+        "Examples of good move notes: 'mirrored \"wrong step\" which surfaced fear of building momentum in the wrong direction'; "
+        "'asked which habit did the most damage, keeping the thread on honest starting points instead of shame'; "
+        "'reframed the coding issue as task mode, which stopped emotional context from hijacking the answer'. "
+        "Use neutral past-tense memory language. Do not invent, diagnose, flatter, or write advice.";
+
+    std::ostringstream body;
+    body << "{\"model\":\"" << EscapeJson(config_.gemma_model) << "\","
+         << "\"temperature\":0.2,"
+         << "\"max_tokens\":260,"
+         << "\"messages\":["
+         << "{\"role\":\"system\",\"content\":\"" << EscapeJson(system) << "\"},"
+         << "{\"role\":\"user\",\"content\":\"" << EscapeJson("Summarize this conversation window for future continuity:\n" + transcript.str()) << "\"}"
+         << "]}";
+
+    std::string base = config_.gemma_base_url;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    const std::string raw = HttpPostJson(base + "/chat/completions", body.str());
+    return ExtractAssistantContent(raw);
+}
 
 std::string GemmaClient::Chat(const std::string& user_message,
                               const Intent& intent,
@@ -223,8 +290,10 @@ std::string GemmaClient::Chat(const std::string& user_message,
 
 std::string FallbackReply(const std::string& user_message, const Intent& intent) {
     const EmotionSignal signal = DetectEmotion(user_message);
+    const std::string cue = FallbackCue(user_message);
+    const std::string cue_text = cue.empty() ? "that" : ("\"" + cue + "\"");
     if (intent.mode == IntentMode::Social) {
-        return "Hey, what's up?";
+        return "I'm here, but the local response engine hiccupped on " + cue_text + ". Say it once more?";
     }
     if (intent.mode == IntentMode::Reflective || intent.mode == IntentMode::Counseling || !signal.label.empty()) {
         if (!signal.label.empty()) {
@@ -246,9 +315,9 @@ std::string FallbackReply(const std::string& user_message, const Intent& intent)
         if (lower.find("paper") != std::string::npos && (lower.find("bat") != std::string::npos || lower.find("airplane") != std::string::npos)) {
             return "Yep. Start with a regular sheet of paper, fold it lengthwise, then open it. Fold the top corners to the center line, then fold those new angled edges to the center again like a paper airplane. Fold it closed, make wide wings, then bend small points at the wing tips so it reads more like a bat.";
         }
-        return "I can help with that. What are you trying to make or change?";
+        return "The local response engine hiccupped on " + cue_text + ". Give me that task once more and I'll take a clean swing.";
     }
-    return "I hear you. Let's keep it simple and stay with the real thing. What feels most important in this right now?";
+    return "The local response engine hiccupped on " + cue_text + ". Say it once more and I'll stay with the actual thing.";
 }
 
 std::string CrisisReply(const std::string& user_message, const Intent& intent) {

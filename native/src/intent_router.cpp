@@ -50,16 +50,15 @@ bool LooksLikeSocialChat(const std::string& text) {
         "thanks", "thank you", "big dog", "we cookin", "cookin my guy",
         "lolol", "lmao", "fit check", "vibe check", "looking good so far",
         "finally got", "got it installed", "app installed", "not important for now",
-        "shipping code", "just sitting here", "watching the rain", "change the subject",
-        "fair enough", "deff", "whataburger", "scripted response", "too scripted",
+        "shipping code", "just sitting here", "watching ", "change the subject",
+        "fair enough", "deff", "burger", "scripted response", "too scripted",
         "sounds scripted", "scripted responses", "keep getting scripted", "getting scripted",
         "canned response", "canned responses", "robotic response", "machine response",
         "tired of it", "getting tired of it",
         "working hard", "response style", "reply style", "conversation flow", "chat flow",
-        "making some changes", "how you respond", "watching okc", "thunder",
-        "good night so far", "good nite so far", "grandpa", "grandpas", "grandpa's",
-        "watching basketball", "basketball", "my team is losing", "team is losing",
-        "wouldnt go past this game", "wouldn't go past this game"
+        "making some changes", "how you respond", "good night so far", "good nite so far",
+        "watching basketball", "basketball", "my team", "team is losing", "team's losing",
+        "the game", "the score", "wouldnt go past this game", "wouldn't go past this game"
     });
 }
 

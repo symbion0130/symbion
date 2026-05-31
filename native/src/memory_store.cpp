@@ -809,6 +809,10 @@ bool MemoryStore::DeleteTechnique(int id) {
     return deleted;
 }
 
+void MemoryStore::SetSummaryGenerator(const SummaryGenerator* generator) {
+    summary_generator_ = generator;
+}
+
 int MemoryStore::SummarizeSessionIfNeeded(const std::string& session_id, int threshold) {
     if (!db_ || session_id.empty()) return 0;
     threshold = std::max(8, threshold);
@@ -835,7 +839,18 @@ int MemoryStore::SummarizeSessionIfNeeded(const std::string& session_id, int thr
     if (summarize_count == 0) return 0;
 
     std::vector<StoredMessage> window(unsummarized.begin(), unsummarized.begin() + summarize_count);
-    const std::string summary = BuildHeuristicSummary(window);
+    std::string summary;
+    if (summary_generator_) {
+        std::vector<ChatMessage> summary_messages;
+        summary_messages.reserve(window.size());
+        for (const auto& msg : window) {
+            summary_messages.push_back({msg.role, msg.content, msg.created_at});
+        }
+        summary = summary_generator_->SummarizeSessionWindow(summary_messages);
+    }
+    if (summary.empty()) {
+        summary = BuildHeuristicSummary(window);
+    }
     if (summary.empty()) return 0;
 
     Exec(db_, "BEGIN;");

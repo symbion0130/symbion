@@ -9,7 +9,7 @@
 
 namespace symbion {
 
-class GemmaClient {
+class GemmaClient : public SummaryGenerator {
 public:
     explicit GemmaClient(Config config);
 
@@ -20,6 +20,7 @@ public:
                      const std::vector<SourceChunk>& sources,
                      const std::vector<EmotionSignal>& emotions,
                      const std::string& guidance = "") const;
+    std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const override;
 
 private:
     Config config_;

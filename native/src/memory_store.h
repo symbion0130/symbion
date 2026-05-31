@@ -68,6 +68,12 @@ struct SessionInfo {
     int turn_count = 0;
 };
 
+class SummaryGenerator {
+public:
+    virtual ~SummaryGenerator() = default;
+    virtual std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const = 0;
+};
+
 class MemoryStore {
 public:
     MemoryStore() = default;
@@ -79,6 +85,8 @@ public:
     bool Open(const std::filesystem::path& db_path);
     void Close();
     bool EnsureSchema();
+    // Caller retains ownership. The generator must outlive this MemoryStore.
+    void SetSummaryGenerator(const SummaryGenerator* generator);
 
     bool SaveMessage(const std::string& session_id,
                      const std::string& user,
@@ -128,6 +136,7 @@ public:
 
 private:
     sqlite3* db_ = nullptr;
+    const SummaryGenerator* summary_generator_ = nullptr;
 };
 
 EmotionSignal DetectEmotion(std::string_view text);
