@@ -47,8 +47,8 @@ Current open item groups: 0.
 - [x] Support streaming responses.
 - [x] Support non-streaming JSON-ish classifier calls without `response_format`.
 - [x] Health-check `/v1/models`.
-- [x] Read CodeCat config from `c:\projects\codecat\runtime\config\codecat.server.json`.
-- [x] Add optional autostart using `c:\projects\codecat\runtime\scripts\start-gemma.ps1`.
+- [x] Read CodeCat/local Gemma config from the configured local runtime path.
+- [x] Add optional autostart using the configured local Gemma start script.
 - [x] Expose local Gemma runtime status through `/api/local-gemma/status`.
 - [x] Add local Gemma to CLI provider choices.
 - [x] Add local Gemma to runtime `/provider`.

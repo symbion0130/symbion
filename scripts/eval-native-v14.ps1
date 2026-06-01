@@ -1,6 +1,6 @@
 param(
     [string]$BaseUrl = "http://127.0.0.1:8000",
-    [string]$GoldenRoot = "D:\symbion\evals",
+    [string]$GoldenRoot = "",
     [string[]]$GoldenFiles = @("golden_restraint.jsonl", "golden_tool_judgment.jsonl", "golden.jsonl"),
     [int]$Limit = 0,
     [int]$TimeoutSec = 120
@@ -8,6 +8,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+$defaultGoldenRoot = Join-Path $repo "evals"
+if (!$GoldenRoot.Trim()) {
+    $GoldenRoot = $defaultGoldenRoot
+}
 $eventsPath = Join-Path $repo "data\symbion_events.jsonl"
 $runId = "eval-v14-" + (Get-Date -Format "yyyyMMdd-HHmmss")
 $base = $BaseUrl.TrimEnd("/")

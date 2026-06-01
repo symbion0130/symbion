@@ -38,11 +38,12 @@ V14 golden-case regression smoke:
 .\scripts\eval-native-v14.ps1 -Limit 40
 ```
 
-The native eval runner reads the old v14 JSONL golden files from `D:\symbion\evals`
-when that drive is present. It checks restraint, banned canned phrases, required
-answer fragments, max line/character budgets, and rough tool-path expectations
-against native `/api/chat`. It is PowerShell-only and does not restore a Python
-runtime dependency.
+The native eval runner looks for JSONL golden files under `evals\` by default
+and falls back to a legacy local v14 eval directory when present. You can also
+pass `-GoldenRoot <path>` explicitly. It checks restraint, banned canned
+phrases, required answer fragments, max line/character budgets, and rough
+tool-path expectations against native `/api/chat`. It is PowerShell-only and
+does not restore a Python runtime dependency.
 
 Native tool smoke should include exact math/date, local directory listing, URL fetch, weather lookup, and session message reload:
 

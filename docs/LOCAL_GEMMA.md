@@ -7,7 +7,8 @@ Status: configured as the default provider in `config/symbion.json`. Native C++ 
 - Provider id: `local_gemma`
 - Base URL: `http://127.0.0.1:8088/v1`
 - Model id: `local-gemma`
-- Runtime: CodeCat `llama.cpp` server under `c:\projects\codecat\runtime`
+- Runtime: local OpenAI-compatible `llama.cpp` server. CodeCat runtime paths
+  can be configured locally through `config/symbion.json`.
 - Expected health probe: `GET /v1/models`
 
 ## Current Behavior
@@ -18,7 +19,13 @@ Gemma is now the default local-first responder. Cloud providers remain configure
 
 ## Startup And Status
 
-The current implementation health-checks `GET /v1/models`, reads `c:\projects\codecat\runtime\config\codecat.server.json`, checks whether the configured model path exists, and exposes `/api/local-gemma/status`. If `local_gemma_autostart` is enabled, Symbion can launch `runtime\scripts\start-gemma.ps1` and wait briefly for the server to warm. Status distinguishes warm, cold, offline/unhealthy, and model-path-missing states.
+The current implementation health-checks `GET /v1/models`, optionally reads a
+configured local Gemma runtime config, checks whether the configured model path
+exists when that information is available, and exposes `/api/local-gemma/status`.
+If `local_gemma_autostart` is enabled and `local_gemma_start_script` is set,
+Symbion can launch the local start script and wait briefly for the server to
+warm. Status distinguishes warm, cold, offline/unhealthy, and
+model-path-missing states.
 
 ## Prompt Budget
 

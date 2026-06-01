@@ -8,6 +8,16 @@ OpenAI-compatible `llama.cpp` server.
 The tracked runtime no longer depends on Electron or Python. Earlier Python
 versions informed the architecture, but the active app path is native C++.
 
+## Project Status
+
+Status: active native runtime, public documentation refreshed June 2026.
+
+The public repository is meant to show the current app structure and the work
+behind it: native Windows shell, C++ backend, SQLite memory, local model
+integration, deterministic tools, and regression coverage. Local databases,
+logs, packaged builds, private memories, and personal runtime paths are not
+tracked.
+
 ## Current Architecture
 
 - `symbion_native.exe`: Windows WebView2 shell with tray/lifecycle controls.
@@ -78,6 +88,17 @@ Invoke-RestMethod http://127.0.0.1:8000/api/chat -Method Post -ContentType 'appl
 
 The package script stages the native binaries, config, web UI, and source text
 needed by the runtime into `native/dist/`.
+
+## Public Repo Notes
+
+- `config/symbion.json` is a public-safe default config. Personal model paths,
+  legacy memory imports, sync paths, databases, logs, and generated packages
+  should stay local.
+- No release artifacts are published yet. Build from source for now.
+- License has not been selected yet; until a license is added, all rights are
+  reserved by default under GitHub's normal public-repository behavior.
+- Good GitHub topics for this repo: `ai-assistant`, `cpp`, `webview2`,
+  `sqlite`, `local-first`, `llama-cpp`, `gemma`, `windows`.
 
 ## Documentation
 
