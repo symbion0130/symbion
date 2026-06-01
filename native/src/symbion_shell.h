@@ -30,6 +30,7 @@ private:
     void BuildMenu();
     void InitializeWebView();
     void NavigateWebView(const std::wstring& url);
+    void ShowWebViewDiagnostic(const std::wstring& title, const std::wstring& detail);
     void ResizeWebView();
     void PaintPlaceholder();
     void SetStatus(std::wstring status);

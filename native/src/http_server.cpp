@@ -12,6 +12,7 @@
 #include <exception>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 namespace symbion {
 
@@ -102,6 +103,10 @@ std::string Serialize(const HttpResponse& response) {
 }
 
 void HandleClient(SOCKET client, const RouteHandler& handler) {
+    DWORD socket_timeout_ms = 5000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&socket_timeout_ms), sizeof(socket_timeout_ms));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&socket_timeout_ms), sizeof(socket_timeout_ms));
+
     std::string request;
     request.resize(65536);
     const int received = recv(client, request.data(), static_cast<int>(request.size()), 0);
@@ -179,7 +184,9 @@ int HttpServer::Run(const std::atomic_bool& running, const RouteHandler& handler
         if (ready <= 0) continue;
         SOCKET client = accept(server, nullptr, nullptr);
         if (client != INVALID_SOCKET) {
-            HandleClient(client, handler);
+            std::thread([client, handler]() {
+                HandleClient(client, handler);
+            }).detach();
         }
     }
 

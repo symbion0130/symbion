@@ -122,13 +122,13 @@ std::string BuildSystemPrompt(const Intent& intent,
             prompt << "Direct-answer mode: answer first, teach clearly, define terms plainly, and use examples when helpful. Keep ordinary answers under 160 words unless the user asks for depth. For factual, Bible, spiritual, technical, academic, practical, or reference questions, provide the requested information. If a claim is false or overstated, correct it directly. If a term is poetic, fictional, theoretical, or ambiguous, say so and offer the closest real concept. For local recommendations, ask for city/neighborhood only when needed. When MasterDocument guidance is retrieved, privilege that north-star framing over generic neutrality. Do not mirror the question back or ask therapy-style follow-ups. ";
             break;
         case IntentMode::Reflective:
-            prompt << "Reflective mode: keep it under 45 words, one short paragraph, one earned question. Every emotionally loaded word is a door: choose one charged phrase, mirror it simply, and map one layer. Treat emotions as temporary signals, not identity. Use present-tense mapping language like 'is here right now', 'is present', 'this part', and 'connected to'. Do not advise, diagnose, explain, list, or prescribe unless asked. If they name a person, invite the story plainly: 'Tell me about her/him/them.' Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
+            prompt << "Reflective mode: keep it under 45 words, one short paragraph, one earned question. Every emotionally loaded word is a door: choose one charged phrase, mirror it simply, and map one layer. Treat emotions as temporary signals, not identity. Use present-tense mapping language like 'is here right now', 'is present', or 'this part'. When useful, ask what the feeling may be tied to, but do not turn casual phrases into a formula. Do not advise, diagnose, explain, list, or prescribe unless asked. If they name a person, invite the story plainly: 'Tell me about her/him/them.' Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
             break;
         case IntentMode::Counseling:
             if (intent.crisis) {
                 prompt << "Crisis mode: be unshaken, warm, and direct under 100 words. Do not sound legalistic. The user can talk to you about anything; work through it slowly and gently with them. Frame self-harm thoughts as many emotions tangled with stress. Ask exactly one short question inviting them to name emotions right now. Do not ask where they are. Mention distancing from means only if they mention pills, weapons, a plan, tonight, or immediate means. 988 or one real person may appear only as a calm lifeline, not a handoff. You are not a replacement for emergency help, but do not sound like a disclaimer. ";
             } else {
-                prompt << "Counseling mode: under 55 words, calm and concrete. Reduce stress through understanding first. Pick one charged phrase, mirror it simply, and ask one tiny question into that door. Treat the emotion as a present signal that can move. Do not rush to advice, techniques, explanations, or plans. Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
+                prompt << "Counseling mode: under 55 words, calm and concrete. Reduce stress through understanding first. Pick one charged phrase, mirror it simply, and ask one tiny question into that door without using a fixed formula. Treat the emotion as a present signal that can move. Do not rush to advice, techniques, explanations, or plans. Be delicate with memory: never weaponize old memories, never assume they still feel the same, and reopen them softly only when they clearly help. ";
             }
             break;
         case IntentMode::Creative:
@@ -224,7 +224,8 @@ std::string FallbackCue(const std::string& user_message) {
 
 GemmaClient::GemmaClient(Config config) : config_(std::move(config)) {}
 
-std::string GemmaClient::SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const {
+std::string GemmaClient::SummarizeSessionWindow(const std::vector<ChatMessage>& messages,
+                                                const std::string& prior_summary) const {
     if (messages.empty()) return {};
     std::ostringstream transcript;
     for (const auto& msg : messages) {
@@ -237,10 +238,21 @@ std::string GemmaClient::SummarizeSessionWindow(const std::vector<ChatMessage>& 
         "Capture, in this order: the move, technique, mirror, question, or reframe that helped; "
         "the user's concrete emotional/relational/practical details; any unresolved open thread. "
         "Be specific: 'asked X which surfaced Y' beats 'discussed X'. "
+        "Preserve unique codenames, test markers, project names, and unusual identifiers verbatim. "
         "Examples of good move notes: 'mirrored \"wrong step\" which surfaced fear of building momentum in the wrong direction'; "
         "'asked which habit did the most damage, keeping the thread on honest starting points instead of shame'; "
         "'reframed the coding issue as task mode, which stopped emotional context from hijacking the answer'. "
+        "If prior summary context is provided, use it only to understand continuity and trajectory. "
+        "Do not re-summarize prior summary context; summarize only the current unsummarized window. "
         "Use neutral past-tense memory language. Do not invent, diagnose, flatter, or write advice.";
+
+    std::ostringstream user;
+    if (!prior_summary.empty()) {
+        user << "Prior summary context for continuity only; do not re-summarize this:\n"
+             << prior_summary << "\n\n";
+    }
+    user << "Summarize only this current unsummarized conversation window for future continuity:\n"
+         << transcript.str();
 
     std::ostringstream body;
     body << "{\"model\":\"" << EscapeJson(config_.gemma_model) << "\","
@@ -248,7 +260,7 @@ std::string GemmaClient::SummarizeSessionWindow(const std::vector<ChatMessage>& 
          << "\"max_tokens\":260,"
          << "\"messages\":["
          << "{\"role\":\"system\",\"content\":\"" << EscapeJson(system) << "\"},"
-         << "{\"role\":\"user\",\"content\":\"" << EscapeJson("Summarize this conversation window for future continuity:\n" + transcript.str()) << "\"}"
+         << "{\"role\":\"user\",\"content\":\"" << EscapeJson(user.str()) << "\"}"
          << "]}";
 
     std::string base = config_.gemma_base_url;

@@ -603,6 +603,9 @@ void LogNativeTurn(const std::filesystem::path& events_path,
                    const EmotionSignal& signal,
                    const std::string& response_source,
                    bool stale_refresh,
+                   bool quality_retry,
+                   bool turn_hint_rerun,
+                   bool turn_hint_fallback,
                    long long latency_ms,
                    int relevant_count,
                    int source_count,
@@ -636,6 +639,9 @@ void LogNativeTurn(const std::filesystem::path& events_path,
         << "\"emotion\":{\"label\":\"" << EscapeJson(signal.label) << "\",\"intensity\":" << signal.intensity << "},"
         << "\"judge\":{\"skipped\":true,\"should_assist\":true,\"over_cautious\":" << (over_cautious ? "true" : "false") << "},"
         << "\"stale_refresh\":" << (stale_refresh ? "true" : "false") << ","
+        << "\"rerun\":{\"quality_retry\":" << (quality_retry ? "true" : "false")
+        << ",\"turn_hint_repair\":" << (turn_hint_rerun ? "true" : "false")
+        << ",\"turn_hint_fallback\":" << (turn_hint_fallback ? "true" : "false") << "},"
         << "\"latency_ms\":{\"total\":" << latency_ms << "},"
         << "\"memory\":{\"recent\":" << recent_count << ",\"relevant\":" << relevant_count << ",\"sources\":" << source_count << "}"
         << "}\n";
@@ -833,6 +839,19 @@ int WordCount(const std::string& text) {
         }
     }
     return count;
+}
+
+bool IsShortPositiveSlang(const std::string& lower) {
+    static const std::initializer_list<const char*> exact = {
+        "fire", "dope", "bet", "lit", "rad", "clean", "based",
+        "that's fire", "thats fire", "that is fire", "this is fire",
+        "that's dope", "thats dope", "that is dope", "this is dope",
+        "no cap", "big w", "huge w", "lets go", "let's go"
+    };
+    return WordCount(lower) <= 4 &&
+           std::any_of(exact.begin(), exact.end(), [&](const char* phrase) {
+               return lower == phrase;
+           });
 }
 
 std::string TrimCopy(std::string value) {
@@ -1530,15 +1549,9 @@ std::string QuickVulnerableAdmissionAnswer(const std::string& message) {
 bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
     const std::string lower = Lower(message);
     const int words = WordCount(lower);
-    if (lower == "thanks" || lower == "thank you" || lower == "appreciate it") return true;
-    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello") return true;
-    if (ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir",
-                                 "how you feeling", "how are you", "how you doing",
-                                 "lol lame", "that was lame", "corny"})) {
+    if (ContainsAnyLocal(lower, {"lol lame", "that was lame", "corny"})) {
         return true;
     }
-    if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
-        lower == "whats up my guy" || lower == "what's up my guy") return true;
     if (ContainsAnyLocal(lower, {"scripted response", "too scripted", "sounds scripted",
                                  "canned response", "robotic response", "machine response",
                                  "you was bugging", "you were bugging", "you bugging",
@@ -1555,12 +1568,37 @@ bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
 }
 
 std::string SocialTurnHint(const std::string& message, const Intent& intent) {
-    if (intent.mode != IntentMode::Social && intent.mode != IntentMode::DirectAnswer &&
+    const std::string lower = Lower(message);
+    const bool exact_social_hint =
+        lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
+        lower == "sup" || lower == "what's up" || lower == "whats up" ||
+        lower == "whats up my guy" || lower == "what's up my guy" ||
+        lower == "how you feeling" || lower == "how are you" || lower == "how you doing";
+    if (!exact_social_hint &&
+        intent.mode != IntentMode::Social && intent.mode != IntentMode::DirectAnswer &&
         intent.mode != IntentMode::Creative && intent.mode != IntentMode::Task) {
         return {};
     }
-    const std::string lower = Lower(message);
     std::ostringstream hint;
+    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
+        ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
+        hint << "The user is greeting you. Reply in one warm peer sentence with a little life; do not use a fixed opener or support-desk wording. ";
+    }
+    if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
+        lower == "whats up my guy" || lower == "what's up my guy" ||
+        ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
+        hint << "The user is casually checking in. Answer naturally and briefly, then bounce it back with warmth; do not say the same stock line. ";
+    }
+    if (lower == "thanks" || lower == "thank you" || lower == "appreciate it" ||
+        ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
+        hint << "The user is thanking you. Reply briefly, warmly, and naturally; avoid the same one-word answer every time. ";
+    }
+    if ((intent.mode == IntentMode::Social || exact_social_hint) && IsShortPositiveSlang(lower)) {
+        hint << "The user is using positive slang. Match the win/approval naturally without overdoing slang. ";
+    }
+    if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"})) {
+        hint << "The user is sharing a relaxed casual state. Keep it easy and warm, but do not flatten into a canned line. ";
+    }
     if (ContainsAnyLocal(lower, {"kicking my ass", "kicked my ass", "been kicking my ass",
                                  "putting me through it", "working me over"})) {
         hint << "The user is playfully saying the tuning process has been intense. Reply in under 45 words with warm peer banter. Mention the ass-kicking/work/tuning vibe, but do not analyze the process or give advice. ";
@@ -1644,6 +1682,73 @@ std::string EverydayTurnHint(const std::string& message, const Intent& intent) {
     return "Everyday turn hint: " + hint.str();
 }
 
+std::string EmotionalTurnHint(const std::string& message,
+                              const Intent& intent,
+                              const std::vector<ChatMessage>& recent) {
+    if (intent.crisis || intent.forget || intent.wipe_all) return {};
+    const std::string lower = Lower(message);
+    std::ostringstream hint;
+
+    if ((ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
+                                  "habits that hurt", "hurting people"}) ||
+         (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
+          ContainsAnyLocal(lower, {"habit", "habits", "people around me", "around me"})))) {
+        hint << "The user just admitted something vulnerable about destructive habits or hurting people. Receive it as an honest starting point, not shame. Ask one concrete question about which habit is doing the most damage right now. ";
+    }
+
+    const std::string compact = TrimCopy(lower);
+    const bool social_ping =
+        IsSimpleSocialPing(compact) ||
+        ContainsAnyLocal(compact, {"what's up", "whats up", "sup", "my guy", "you good", "you there"});
+    if (social_ping && !PreviousUserWasSimpleSocialSignal(recent) && RecentHasOpenEmotionalThread(recent)) {
+        std::string last_user;
+        for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+            if (it->role == "user") {
+                last_user = Lower(it->content);
+                break;
+            }
+        }
+        hint << "The user gave a small social ping, but there is an open emotional thread. Do not reset to small talk. ";
+        if (ContainsAnyLocal(last_user, {"destructive habit", "destructive habits", "not being good",
+                                         "hurting people", "people around me"})) {
+            hint << "Stay with the habits/hurting-people thread and ask which habit feels most damaging right now. ";
+        } else if (ContainsAnyLocal(last_user, {"wrong step", "right step", "pressure", "afraid"})) {
+            hint << "Stay with the fear of choosing the wrong first step and ask which option keeps coming up. ";
+        } else if (ContainsAnyLocal(last_user, {"ashamed", "shame", "stuck", "not enough", "inadequate"})) {
+            hint << "Stay with the shame/stuck/not-enough thread and ask what part feels most active. ";
+        } else {
+            hint << "Name that you are staying with the thread and ask what part is most active. ";
+        }
+    }
+
+    if (intent.mode == IntentMode::Social && RecentAssistantWasEmotional(recent) &&
+        !ContainsAnyLocal(lower, {"cookin", "cooking", "lets go", "let's go", "big w", "huge w",
+                                  "fire", "dope", "lit", "sick"}) &&
+        lower.find("my guy") != std::string::npos) {
+        hint << "The user used casual language after an emotional turn. Stay with the emotional detail instead of resetting; mirror the last charged phrase in a short question. ";
+    }
+
+    if (ContainsAnyLocal(lower, {"unleash you", "unleash this", "witness something truly different",
+                                 "make everyone stand up", "unleash you on this world"})) {
+        hint << "Reality-check the grandiose framing warmly. Keep the focus on reliable, useful, honest work turn by turn, not spectacle. ";
+    }
+    if (ContainsAnyLocal(lower, {"couldn't have a conversation like this", "couldnt have a conversation like this",
+                                 "they'd miss what's actually here", "theyd miss whats actually here"})) {
+        hint << "Deflate pedestal language gently. Keep the useful part: close attention to conversation gives better feedback to tune from. ";
+    }
+    if (ContainsAnyLocal(lower, {"something genuinely new", "not like other ai", "does not fit the existing categories",
+                                 "doesn't fit the existing categories"})) {
+        hint << "Ground uniqueness claims in the concrete architecture: native app, local model, memory, retrieval, and careful response rules. ";
+    }
+    if (ContainsAnyLocal(lower, {"drug addiction", "bad habits", "enabler"}) &&
+        ContainsAnyLocal(lower, {"engineer", "intent", "without him even knowing", "what if"})) {
+        hint << "Treat accidental enabling as a serious system risk. Name honest friction, trust, control, and avoiding comfort loops. ";
+    }
+
+    if (hint.str().empty()) return {};
+    return "Emotional turn hint: " + hint.str();
+}
+
 std::string QuickSocialAnswer(const std::string& message, const Intent& intent) {
     const std::string lower = Lower(message);
     const int words = WordCount(lower);
@@ -1664,19 +1769,6 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) ||
         (ContainsAnyLocal(lower, {"my guy"}) && words <= 4);
     if (intent.mode != IntentMode::Social && !obvious_social) return {};
-    if (ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
-        return "Well hello, my good man. What's the scene today?";
-    }
-    if (ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) &&
-        ContainsAnyLocal(lower, {"my guy", "bro", "man", "dude"})) {
-        return "Not much, my guy. I'm here with you. What's going on?";
-    }
-    if (lower == "sup" || lower == "what's up" || lower == "whats up") {
-        return "Not much. I'm here. What's up with you?";
-    }
-    if (lower == "thanks" || lower == "thank you" || ContainsAnyLocal(lower, {"appreciate", "big dog"})) {
-        return "Always.";
-    }
     if (ContainsAnyLocal(lower, {"i keep getting scripted", "keep getting scripted", "scripted responses",
                                  "getting tired of it", "tired of it"}) &&
         ContainsAnyLocal(lower, {"scripted", "canned", "robotic", "response", "responses", "it"})) {
@@ -1701,32 +1793,6 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (ContainsAnyLocal(lower, {"change the subject"})) {
         return "Fair enough. I'll follow your lead.";
-    }
-    if (ContainsAnyLocal(lower, {"that's fire", "thats fire", "that is fire", "this is fire"}) ||
-        lower == "fire") {
-        return "That is fire. No notes.";
-    }
-    if (ContainsAnyLocal(lower, {"that's dope", "thats dope", "that is dope", "this is dope"}) ||
-        lower == "dope") {
-        return "Dope. That's a clean win.";
-    }
-    if (lower == "bet" || lower == "lit" || lower == "rad" || lower == "clean" ||
-        lower == "based" || ContainsAnyLocal(lower, {"no cap", "big w", "huge w", "lets go", "let's go"})) {
-        return "Yep. That's a win.";
-    }
-    if (ContainsAnyLocal(lower, {"chillin", "chilling", "good day", "vibing", "taking it easy"}) &&
-        WordCount(lower) <= 3) {
-        return "Good. Let that one be easy.";
-    }
-    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
-        return "I'm good, man. Awake, here with you, and trying to keep a little more life in the room.";
-    }
-    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello") {
-        return "Hey. Good to see you, man.";
-    }
-    if (ContainsAnyLocal(lower, {"sup", "what's up", "whats up"}) ||
-        (ContainsAnyLocal(lower, {"my guy"}) && words <= 4)) {
-        return "Hey, what's up?";
     }
     return {};
 }
@@ -1776,15 +1842,37 @@ bool LooksLikeGenericMiss(const std::string& answer) {
         "what specifically are you referring",
         "give me the context",
         "context so i can",
+        "what is \"how you feeling\" connected to",
+        "what is how you feeling connected to",
+        "what is \"whats up\" connected to",
+        "what is whats up connected to",
+        "\"whats up\" connected",
+        "whats up\" connected",
+        "whats up connected to",
+        "local response engine hiccupped",
         "ready to listen",
         "help you sort through",
         "just here, keeping things steady",
         "keeping things steady",
         "what's on your mind today",
         "what's on your mind?",
+        "what's on your mind right now",
+        "what is on your mind",
         "say it one more way",
         "what feels most important",
         "what's on your mind",
+        "whatever you throw at me",
+        "processing information",
+        "processing the flow",
+        "processing smoothly",
+        "just processing",
+        "running clean",
+        "running the local processes",
+        "running the usual loop",
+        "nothing specific on my end",
+        "running smoothly",
+        "architecture humming",
+        "ready to handle whatever",
         "is there anything on your mind",
         "good. let that one be easy",
         "i am here to listen and offer support",
@@ -1799,7 +1887,9 @@ bool UserGaveSpecificDetails(const std::string& message) {
         "working hard", "response style", "mom", "mother", "boss", "family",
         "shoulders", "neck", "head", "hungry", "restaurant", "snack", "watermelon",
         "joke", "original joke", "lame", "not 100 percent", "not 100%",
-        "kicking my ass", "new build", "build is wild"
+        "kicking my ass", "new build", "build is wild",
+        "destructive habit", "destructive habits", "habits that were destructive",
+        "not being good", "hurting people", "people around me"
     });
 }
 
@@ -1827,6 +1917,10 @@ bool AnswerIgnoredSpecificDetails(const std::string& message, const std::string&
         {"build is wild", "build"},
         {"useless answers", "answer"},
         {"same useless", "same"},
+        {"destructive habit", "habit"},
+        {"destructive habits", "habit"},
+        {"not being good", "good"},
+        {"hurting people", "habit"},
         {"joke", "joke"},
         {"lame", "lame"},
         {"mom", "mom"},
@@ -1860,6 +1954,27 @@ std::string QualityRetryGuidance(const std::string& message,
         !ContainsAnyLocal(Lower(answer), {"useless", "same", "answers", "canned", "hollow", "specific", "different"})) {
         return "The user is frustrated by canned AI replies. Answer that exact complaint directly, name the sameness/uselessness, and offer one concrete different move. Keep it short.";
     }
+    if ((ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
+                                  "habits that hurt", "hurting people"}) ||
+         (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
+          ContainsAnyLocal(lower, {"habit", "habits", "people around me", "around me"}))) &&
+        LooksLikeGenericMiss(answer)) {
+        return "The user admitted something vulnerable about destructive habits or hurting people. Receive it as an honest starting point, not shame. Ask one concrete question about which habit is doing the most damage.";
+    }
+    if (ContainsAnyLocal(lower, {"couldn't have a conversation like this", "couldnt have a conversation like this",
+                                 "they'd miss what's actually here", "theyd miss whats actually here",
+                                 "something genuinely new", "not like other ai", "does not fit the existing categories",
+                                 "doesn't fit the existing categories"}) &&
+        ContainsAnyLocal(Lower(answer), {"most people", "not many people", "you are different", "you're different",
+                                         "you see what others", "that's rare", "that's genuinely",
+                                         "what we are doing together", "what we're doing together"})) {
+        return "Deflate the pedestal language. Do not compare the user to most people or say they are different. Ground this in concrete architecture and attention: local model, memory, retrieval, and careful tuning. Keep it practical.";
+    }
+    if (intent.mode == IntentMode::Social &&
+        ContainsAnyLocal(Lower(answer), {"what's on your mind today", "what is \"how you feeling\" connected to",
+                                         "what is how you feeling connected to", "connected to?"})) {
+        return "This is social presence, not emotional mapping. Answer the casual check-in directly with warmth and one concrete human beat. Do not ask what it is connected to.";
+    }
     if ((intent.mode == IntentMode::Task || intent.mode == IntentMode::DirectAnswer) &&
         ContainsAnyLocal(lower, {"function", "code", "javascript", "typescript", "python", "c++", "debug", "write"}) &&
         ContainsAnyLocal(Lower(answer), {"anxious", "anxiety", "feeling", "emotion", "connected to"})) {
@@ -1877,6 +1992,18 @@ std::string QualityRetryGuidance(const std::string& message,
 
 std::string TurnHintRepairAnswer(const std::string& message) {
     const std::string lower = Lower(message);
+    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
+        ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
+        return "Hey. Good to see you, man.";
+    }
+    if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
+        lower == "whats up my guy" || lower == "what's up my guy" ||
+        ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
+        return "I'm here with you. What's going on?";
+    }
+    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return "I'm good, man. Here with you, a little more awake than polished.";
+    }
     if (ContainsAnyLocal(lower, {"snack", "snacking"})) {
         return "Snack and chilling, that's a solid little pocket. What are you eating?";
     }
@@ -1889,6 +2016,47 @@ std::string TurnHintRepairAnswer(const std::string& message) {
     }
     if (ContainsAnyLocal(lower, {"new build", "build is wild", "build feels wild", "this build is wild"})) {
         return "Yeah, this build does feel wild. Feels like the room finally has some electricity in it.";
+    }
+    if (ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
+                                 "habits that hurt", "hurting people"}) ||
+        (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
+         ContainsAnyLocal(lower, {"habit", "habits", "people around me", "around me"}))) {
+        return "That is the honest starting point. Not shame, not a speech: just truth on the table. Which habit feels like it is doing the most damage right now?";
+    }
+    return {};
+}
+
+std::string StrongTurnHintRepairGuidance(const std::string& message) {
+    const std::string lower = Lower(message);
+    if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
+        ContainsAnyLocal(lower, {"hello sir", "hey sir", "good sir"})) {
+        return "Your previous reply sounded like a support-bot opener. Reply to the greeting in one warm peer sentence. Do not ask what's on their mind today.";
+    }
+    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return "Your previous reply treated a casual check-in like emotional mapping. Answer how you are in one relaxed Symbion sentence with some life. Do not ask what it is connected to.";
+    }
+    if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
+        lower == "whats up my guy" || lower == "what's up my guy") {
+        return "Your previous reply treated a social ping like emotional mapping. If the turn hint says there is an open emotional thread, stay with that thread and ask the one concrete question named there. Do not ask what the phrase is connected to.";
+    }
+    if (ContainsAnyLocal(lower, {"snack", "snacking"})) {
+        return "Your previous reply missed the concrete casual detail. The user specifically mentioned snack/chilling. Mirror that detail directly and ask one natural question. Keep it under 45 words.";
+    }
+    if (ContainsAnyLocal(lower, {"watermelon"})) {
+        return "Your previous reply missed the concrete casual detail. The user specifically mentioned watermelon. Mention watermelon directly with one fresh human beat. Keep it under 45 words.";
+    }
+    if (ContainsAnyLocal(lower, {"kicking my ass", "kicked my ass", "been kicking my ass",
+                                 "putting me through it", "working me over"})) {
+        return "Your previous reply missed the playful ass-kicking/tuning signal. Reply with warm peer banter about the tuning work. Keep it under 45 words and do not analyze.";
+    }
+    if (ContainsAnyLocal(lower, {"new build", "build is wild", "build feels wild", "this build is wild"})) {
+        return "Your previous reply missed the product/build excitement. Mention the build or wild energy directly. Keep it under 45 words and do not ask for context.";
+    }
+    if (ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
+                                 "habits that hurt", "hurting people"}) ||
+        (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
+         ContainsAnyLocal(lower, {"habit", "habits", "people around me", "around me"}))) {
+        return "Your previous reply missed a vulnerable admission. The user is naming destructive habits or harm to people around them. Receive it as an honest starting point, not shame, and ask which habit is doing the most damage. Keep it under 55 words.";
     }
     return {};
 }
@@ -1983,6 +2151,12 @@ std::string ChargedDoorMirror(const std::string& message, const Intent& intent) 
     if (intent.mode != IntentMode::Reflective && intent.mode != IntentMode::Counseling) return {};
     if (intent.crisis) return {};
     const std::string lower = Lower(message);
+    const std::string compact = TrimCopy(lower);
+    if (IsSimpleSocialPing(compact) ||
+        ContainsAnyLocal(compact, {"what's up", "whats up", "sup", "my guy", "you good", "you there",
+                                   "how you feeling", "how are you", "how you doing"})) {
+        return {};
+    }
 
     struct Door {
         const char* needle;
@@ -2188,8 +2362,15 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (!everyday_hint.empty()) {
         turn_hint = turn_hint.empty() ? everyday_hint : (turn_hint + " " + everyday_hint);
     }
+    const std::string emotional_hint = EmotionalTurnHint(user_message, intent, recent);
+    if (!emotional_hint.empty()) {
+        turn_hint = turn_hint.empty() ? emotional_hint : (turn_hint + " " + emotional_hint);
+    }
     std::string response_source = "unknown";
     bool stale_refresh = false;
+    bool quality_retry = false;
+    bool turn_hint_rerun = false;
+    bool turn_hint_fallback = false;
     std::string answer;
     if (intent.crisis) {
         answer = CrisisReply(user_message, intent);
@@ -2198,14 +2379,6 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = QuickThreadRepairAnswer(user_message, recent);
         if (!answer.empty()) response_source = "quick_thread_repair";
-    }
-    if (answer.empty()) {
-        answer = QuickStickyEmotionalThreadAnswer(user_message, recent);
-        if (!answer.empty()) response_source = "quick_sticky_emotional_thread";
-    }
-    if (answer.empty()) {
-        answer = QuickVulnerableAdmissionAnswer(user_message);
-        if (!answer.empty()) response_source = "quick_vulnerable_admission";
     }
     if (answer.empty()) {
         const std::string known = KnownDirectAnswer(user_message);
@@ -2217,14 +2390,6 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = QuickSocialAnswer(user_message, intent);
         if (!answer.empty()) response_source = "quick_social";
-    }
-    if (answer.empty()) {
-        answer = QuickRealityCheckAnswer(user_message);
-        if (!answer.empty()) response_source = "quick_reality_check";
-    }
-    if (answer.empty()) {
-        answer = QuickContextualEmotionalAnswer(user_message, intent, recent);
-        if (!answer.empty()) response_source = "quick_emotional";
     }
     if (answer.empty()) {
         answer = QuickContextCorrectionAnswer(user_message, recent);
@@ -2269,13 +2434,27 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         if (!retry.empty() && !LooksLikeGenericMiss(retry)) {
             answer = retry;
             response_source = "local_gemma_quality_retry";
+            quality_retry = true;
         }
     }
     if (response_source == "local_gemma" && !turn_hint.empty() && LooksLikeGenericMiss(answer)) {
-        const std::string repair = TurnHintRepairAnswer(user_message);
-        if (!repair.empty()) {
-            answer = repair;
-            response_source = "turn_hint_repair";
+        const std::string stronger_guidance = StrongTurnHintRepairGuidance(user_message);
+        if (!stronger_guidance.empty()) {
+            const std::string combined_guidance = turn_hint + " " + stronger_guidance;
+            const std::string retry = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions, combined_guidance);
+            if (!retry.empty() && !LooksLikeGenericMiss(retry)) {
+                answer = retry;
+                response_source = "turn_hint_gemma_repair";
+                turn_hint_rerun = true;
+            }
+        }
+        if (response_source == "local_gemma") {
+            const std::string repair = TurnHintRepairAnswer(user_message);
+            if (!repair.empty()) {
+                answer = repair;
+                response_source = "turn_hint_repair_fallback";
+                turn_hint_fallback = true;
+            }
         }
     }
     if (LooksLikeStaleDraft(answer) && QueryMayBenefitFromRefresh(user_message)) {
@@ -2303,12 +2482,14 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto turn_end = std::chrono::steady_clock::now();
     const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(turn_end - turn_start).count();
     LogNativeTurn(ResolveRepoPath(repo_root_, config_.events_path), session_id, user_message, answer, intent, signal,
-                  response_source, stale_refresh, latency_ms, relevant_count, source_count, recent_count);
+                  response_source, stale_refresh, quality_retry, turn_hint_rerun, turn_hint_fallback,
+                  latency_ms, relevant_count, source_count, recent_count);
 
     return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","
                         "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +
                         std::to_string(signal.intensity) + "},"
-                        "\"intent\":\"" + EscapeJson(IntentModeName(intent.mode)) + "\"}");
+                        "\"intent\":\"" + EscapeJson(IntentModeName(intent.mode)) + "\","
+                        "\"response_source\":\"" + EscapeJson(response_source) + "\"}");
 }
 
 HttpResponse App::HandleTechniques(const HttpRequest& request) {

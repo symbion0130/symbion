@@ -20,7 +20,8 @@ public:
                      const std::vector<SourceChunk>& sources,
                      const std::vector<EmotionSignal>& emotions,
                      const std::string& guidance = "") const;
-    std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const override;
+    std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages,
+                                       const std::string& prior_summary) const override;
 
 private:
     Config config_;

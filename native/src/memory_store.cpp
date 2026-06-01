@@ -54,6 +54,14 @@ bool AddColumnIfMissing(sqlite3* db, const char* table, const char* column, cons
     return Exec(db, sql.c_str());
 }
 
+void DropColumnIfExistsBestEffort(sqlite3* db, const char* table, const char* column) {
+    if (!TableHasColumn(db, table, column)) return;
+    const std::string sql = "ALTER TABLE " + std::string(table) + " DROP COLUMN " + column + ";";
+    char* error = nullptr;
+    sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error);
+    if (error) sqlite3_free(error);
+}
+
 std::string StableHash(std::string_view value) {
     uint64_t hash = 1469598103934665603ULL;
     for (const unsigned char c : value) {
@@ -539,7 +547,8 @@ bool MemoryStore::EnsureSchema() {
         Exec(db_, "DROP TABLE IF EXISTS counseling_sources_fts;");
         Exec(db_, "DROP TABLE IF EXISTS counseling_sources;");
     }
-    return Exec(db_, "PRAGMA journal_mode=WAL;") &&
+    const bool ok =
+           Exec(db_, "PRAGMA journal_mode=WAL;") &&
            Exec(db_, "PRAGMA busy_timeout=5000;") &&
            Exec(db_, "CREATE TABLE IF NOT EXISTS native_messages ("
                      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -617,7 +626,6 @@ bool MemoryStore::EnsureSchema() {
                      "session TEXT,"
                      "content TEXT NOT NULL,"
                      "msg_count INTEGER DEFAULT 0,"
-                     "embedding BLOB,"
                      "user TEXT);") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_sum_session ON summaries(session);") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_sum_user ON summaries(user);") &&
@@ -633,7 +641,6 @@ bool MemoryStore::EnsureSchema() {
                      "query TEXT NOT NULL,"
                      "move TEXT NOT NULL,"
                      "evidence TEXT,"
-                     "embedding BLOB,"
                      "source TEXT DEFAULT 'local',"
                      "shared_at TEXT);") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_tech_user ON techniques(user);") &&
@@ -647,7 +654,6 @@ bool MemoryStore::EnsureSchema() {
                      "description TEXT NOT NULL,"
                      "status TEXT NOT NULL DEFAULT 'open',"
                      "updated_at TEXT NOT NULL DEFAULT (datetime('now')));") &&
-           AddColumnIfMissing(db_, "summaries", "embedding", "embedding BLOB") &&
            AddColumnIfMissing(db_, "summaries", "user", "user TEXT") &&
            AddColumnIfMissing(db_, "techniques", "timestamp", "timestamp TEXT") &&
            AddColumnIfMissing(db_, "techniques", "session", "session TEXT") &&
@@ -655,7 +661,6 @@ bool MemoryStore::EnsureSchema() {
            AddColumnIfMissing(db_, "techniques", "query", "query TEXT NOT NULL DEFAULT ''") &&
            AddColumnIfMissing(db_, "techniques", "move", "move TEXT NOT NULL DEFAULT ''") &&
            AddColumnIfMissing(db_, "techniques", "evidence", "evidence TEXT") &&
-           AddColumnIfMissing(db_, "techniques", "embedding", "embedding BLOB") &&
            AddColumnIfMissing(db_, "techniques", "source", "source TEXT DEFAULT 'local'") &&
            AddColumnIfMissing(db_, "techniques", "shared_at", "shared_at TEXT") &&
            AddColumnIfMissing(db_, "knowledge_gaps", "user", "user TEXT") &&
@@ -680,6 +685,11 @@ bool MemoryStore::EnsureSchema() {
                      "ON emotional_checkins(emotion, timestamp);") &&
            Exec(db_, "CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_session_status "
                      "ON knowledge_gaps(session, status, updated_at);");
+    if (ok) {
+        DropColumnIfExistsBestEffort(db_, "summaries", "embedding");
+        DropColumnIfExistsBestEffort(db_, "techniques", "embedding");
+    }
+    return ok;
 }
 
 bool MemoryStore::SaveMessage(const std::string& session_id,
@@ -839,6 +849,20 @@ int MemoryStore::SummarizeSessionIfNeeded(const std::string& session_id, int thr
     if (summarize_count == 0) return 0;
 
     std::vector<StoredMessage> window(unsummarized.begin(), unsummarized.begin() + summarize_count);
+    std::string prior_summary;
+    sqlite3_stmt* prior = nullptr;
+    const char* prior_sql =
+        "SELECT content FROM summaries "
+        "WHERE session=? AND content IS NOT NULL AND content!='' "
+        "ORDER BY id DESC LIMIT 1;";
+    if (sqlite3_prepare_v2(db_, prior_sql, -1, &prior, nullptr) == SQLITE_OK) {
+        BindText(prior, 1, session_id);
+        if (sqlite3_step(prior) == SQLITE_ROW) {
+            prior_summary = ClipText(ColumnText(prior, 0), 900);
+        }
+    }
+    if (prior) sqlite3_finalize(prior);
+
     std::string summary;
     if (summary_generator_) {
         std::vector<ChatMessage> summary_messages;
@@ -846,7 +870,7 @@ int MemoryStore::SummarizeSessionIfNeeded(const std::string& session_id, int thr
         for (const auto& msg : window) {
             summary_messages.push_back({msg.role, msg.content, msg.created_at});
         }
-        summary = summary_generator_->SummarizeSessionWindow(summary_messages);
+        summary = summary_generator_->SummarizeSessionWindow(summary_messages, prior_summary);
     }
     if (summary.empty()) {
         summary = BuildHeuristicSummary(window);

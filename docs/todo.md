@@ -61,7 +61,7 @@ Current open item groups: 0.
 ## Memory System
 
 - [x] Review current SQLite schema and memory flow.
-- [x] Keep raw messages, summaries, profile, interactions, tasks, gaps, contradictions, techniques, and embeddings.
+- [x] Keep raw messages, summaries, profile, interactions, tasks, gaps, contradictions, and techniques.
 - [x] Add first-class `emotional_checkins`.
 - [x] Add indexes for emotional check-ins.
 - [x] Add `search_memory(query, scope, k)`.

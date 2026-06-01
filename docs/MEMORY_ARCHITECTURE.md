@@ -17,8 +17,8 @@ The previous Python memory implementation was removed from the active runtime on
 - `/api/chat` retrieves recent and relevant memory on demand before calling Local Gemma.
 - Native Tier 1/Tier 2 tools answer exact math/date/time, local file and directory reads, URL fetch/search, weather, and text-based PDF extraction before falling through to Local Gemma.
 - Native turn telemetry is appended to `data/symbion_events.jsonl` with intent,
-  response source, latency, memory/source counts, emotion signal, and stale
-  refresh status.
+  response source, latency, memory/source counts, emotion signal, stale refresh
+  status, and retry/fallback flags for quality and turn-hint repair paths.
 - If a Local Gemma answer shows stale/no-browse language on a current-looking
   query, the backend can run a lightweight web search and retry once with the
   search result as turn-local context.
@@ -43,8 +43,9 @@ Tier 2 tools are explicit deeper lookups that may touch the network or larger fi
 ## Current SQLite Memory Surface
 
 `init_db()` creates the core memory tables additively and migrates older
-databases in place. Existing migrations add `summaries.embedding`,
-`messages.user`, and `summaries.user`; profile scoping is encoded in
+databases in place. Current migrations keep `messages.user` and
+`summaries.user`, and best-effort remove old unused embedding columns;
+profile scoping is encoded in
 `user_profile.key` as `<user>:<key>` instead of a separate profile table.
 
 Current memory-bearing tables:
@@ -52,7 +53,7 @@ Current memory-bearing tables:
 | Table | Purpose | User/session behavior |
 | --- | --- | --- |
 | `messages` | Raw turns with `role`, `content`, `emotional_state`, `summarised`, and optional `user`. | Same-session reads are shared; cross-session retrieval is user-scoped. |
-| `summaries` | Compressed long-term conversation memory with optional embedding blob. | User-scoped for cross-session retrieval. |
+| `summaries` | Compressed long-term conversation memory. | User-scoped for cross-session retrieval. |
 | `user_profile` | Profile facts, active session pointers, and location fields. | Bare keys are shared legacy base; `<user>:` keys override per user. |
 | `interactions` | Evaluation/telemetry rows, including `emotional_state_detected`. | Session-scoped; not currently part of retrieval. |
 | `self_model` | Formative events about Symbion itself. | Global. |
@@ -61,11 +62,9 @@ Current memory-bearing tables:
 | `knowledge_gaps` | Open knowledge gaps. | Session-scoped. |
 | `proactive_queue` | Deferred proactive messages. | Session-scoped. |
 | `learning_metrics` | Global adaptive metrics. | Global. |
-| `techniques` | Promoted moves worth replicating, with optional embedding and sync source. | User-scoped retrieval. |
+| `techniques` | Promoted moves worth replicating, with sync source. | User-scoped retrieval. |
 | `emotional_checkins` | First-class emotional events with emotion, intensity, valence, note, confidence, and capture source. | User-scoped and retrieved on demand. |
 | `counseling_sources` | Chunked/tagged material imported from `docs/source/MasterDocument.docx` for counsel-like retrieval. | Global source corpus; high-intensity and crisis chunks are excluded from default runtime retrieval. |
-| `embedding_meta` | Lazily created embedding model marker. | Global. |
-| `summaries_vec` | Optional sqlite-vec virtual table for summary vectors. | Mirrors `summaries.embedding`; user filtering happens after ID fetch. |
 
 `build_context()` currently injects these tiers:
 
@@ -221,8 +220,9 @@ Behavior:
 - Cap `query` length and `k`; default `k=6`, max `k=12`.
 - Return source-labeled rows: table, id, timestamp, session, score, and a short
   preview.
-- Prefer hybrid summary/technique retrieval where embeddings exist; use BM25 or
-  substring fallback for tables without embeddings.
+- Use keyword/term scoring with recency and importance signals. Embeddings are
+  intentionally not part of the runtime schema until a real local embedder is
+  wired end to end.
 - Include `checkins` only when the query is about feelings, wellbeing, mood,
   stress, relationship continuity, or explicit "check-in" language.
 

@@ -33,6 +33,9 @@
 #if __has_include(<WebView2.h>)
 #define SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS 1
 #include <WebView2.h>
+#if __has_include(<WebView2EnvironmentOptions.h>)
+#include <WebView2EnvironmentOptions.h>
+#endif
 #else
 #define SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS 0
 #endif
@@ -113,6 +116,63 @@ std::wstring Utf8ToWide(std::string_view value) {
     return out;
 }
 
+std::wstring HtmlEscape(std::wstring_view value) {
+    std::wstring out;
+    out.reserve(value.size() + 16);
+    for (wchar_t c : value) {
+        switch (c) {
+            case L'&': out += L"&amp;"; break;
+            case L'<': out += L"&lt;"; break;
+            case L'>': out += L"&gt;"; break;
+            case L'"': out += L"&quot;"; break;
+            case L'\'': out += L"&#39;"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+#if SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS
+std::wstring WebErrorStatusName(COREWEBVIEW2_WEB_ERROR_STATUS status) {
+    switch (status) {
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT:
+            return L"certificate common name is incorrect";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED:
+            return L"certificate expired";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS:
+            return L"client certificate contains errors";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED:
+            return L"certificate revoked";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID:
+            return L"certificate is invalid";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE:
+            return L"server unreachable";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT:
+            return L"timeout";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE:
+            return L"invalid server response";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED:
+            return L"connection aborted";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET:
+            return L"connection reset";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED:
+            return L"disconnected";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT:
+            return L"cannot connect";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED:
+            return L"host name not resolved";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED:
+            return L"operation canceled";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED:
+            return L"redirect failed";
+        case COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR:
+            return L"unexpected error";
+        default:
+            return L"web error " + std::to_wstring(static_cast<int>(status));
+    }
+}
+#endif
+
 std::string WideToUtf8(std::wstring_view value) {
     if (value.empty()) {
         return {};
@@ -143,6 +203,20 @@ bool WriteTextFile(const std::filesystem::path& path, const std::string& text) {
     }
     output << text;
     return static_cast<bool>(output);
+}
+
+void AppendShellLog(const std::wstring& repo_root, const std::wstring& message) {
+    if (repo_root.empty()) {
+        return;
+    }
+    std::error_code ec;
+    const auto log_dir = std::filesystem::path(repo_root) / L"logs";
+    std::filesystem::create_directories(log_dir, ec);
+    std::ofstream output(log_dir / L"symbion-shell.log", std::ios::app | std::ios::binary);
+    if (!output) {
+        return;
+    }
+    output << WideToUtf8(message) << "\n";
 }
 
 std::string JsonUnescape(std::string_view value) {
@@ -548,6 +622,7 @@ struct SymbionShell::WebViewState {
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller;
     Microsoft::WRL::ComPtr<ICoreWebView2> webview;
     EventRegistrationToken web_resource_token = {};
+    EventRegistrationToken navigation_completed_token = {};
 #endif
 };
 
@@ -919,9 +994,11 @@ void SymbionShell::BuildMenu() {
 
 void SymbionShell::InitializeWebView() {
 #if SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS
+    AppendShellLog(repo_root_, L"InitializeWebView: start url=" + url_);
     SetEnvironmentVariableW(L"WEBVIEW2_DEFAULT_BACKGROUND_COLOR", L"FF050508");
     webview_->loader = LoadLibraryW(L"WebView2Loader.dll");
     if (!webview_->loader) {
+        AppendShellLog(repo_root_, L"InitializeWebView: missing WebView2Loader.dll");
         SetStatus(L"WebView2 SDK loader was not found. Add WebView2Loader.dll beside this executable.");
         return;
     }
@@ -929,17 +1006,25 @@ void SymbionShell::InitializeWebView() {
     const auto create_environment = reinterpret_cast<WebViewState::CreateEnvironmentFn>(
         GetProcAddress(webview_->loader, "CreateCoreWebView2EnvironmentWithOptions"));
     if (!create_environment) {
+        AppendShellLog(repo_root_, L"InitializeWebView: missing CreateCoreWebView2EnvironmentWithOptions export");
         SetStatus(L"WebView2Loader.dll does not export CreateCoreWebView2EnvironmentWithOptions.");
         return;
     }
 
     SetStatus(L"Opening " + url_);
+    Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions> options =
+        Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+    if (options) {
+        options->put_AdditionalBrowserArguments(L"--disable-gpu --disable-gpu-compositing");
+    }
+
     const HRESULT result = create_environment(
         nullptr,
         nullptr,
-        nullptr,
+        options.Get(),
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT environment_result, ICoreWebView2Environment* environment) -> HRESULT {
+                AppendShellLog(repo_root_, L"WebView2 environment callback: " + FormatHresult(environment_result));
                 if (FAILED(environment_result) || !environment) {
                     SetStatus(L"WebView2 environment creation failed: " + FormatHresult(environment_result));
                     return S_OK;
@@ -949,12 +1034,14 @@ void SymbionShell::InitializeWebView() {
                     hwnd_,
                     Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
                         [this](HRESULT controller_result, ICoreWebView2Controller* controller) -> HRESULT {
+                            AppendShellLog(repo_root_, L"WebView2 controller callback: " + FormatHresult(controller_result));
                             if (FAILED(controller_result) || !controller) {
                                 SetStatus(L"WebView2 controller creation failed: " + FormatHresult(controller_result));
                                 return S_OK;
                             }
 
                             webview_->controller = controller;
+                            webview_->controller->put_IsVisible(TRUE);
                             Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
                             if (SUCCEEDED(webview_->controller.As(&controller2)) && controller2) {
                                 COREWEBVIEW2_COLOR dark = {};
@@ -964,7 +1051,8 @@ void SymbionShell::InitializeWebView() {
                                 dark.B = 8;
                                 controller2->put_DefaultBackgroundColor(dark);
                             }
-                            webview_->controller->get_CoreWebView2(&webview_->webview);
+                            const HRESULT core_result = webview_->controller->get_CoreWebView2(&webview_->webview);
+                            AppendShellLog(repo_root_, L"WebView2 get_CoreWebView2: " + FormatHresult(core_result));
                             ResizeWebView();
                             if (webview_->webview) {
                                 if (!api_key_.empty()) {
@@ -994,8 +1082,37 @@ void SymbionShell::InitializeWebView() {
                                             .Get(),
                                         &webview_->web_resource_token);
                                 }
+                                webview_->webview->add_NavigationCompleted(
+                                    Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                        [this](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                                            if (!args) {
+                                                return S_OK;
+                                            }
+                                            BOOL success = FALSE;
+                                            if (FAILED(args->get_IsSuccess(&success)) || success) {
+                                                return S_OK;
+                                            }
+                                            COREWEBVIEW2_WEB_ERROR_STATUS web_error = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                                            args->get_WebErrorStatus(&web_error);
+                                            const std::wstring detail =
+                                                L"WebView2 could not finish loading " + url_ +
+                                                L". Error: " + WebErrorStatusName(web_error) +
+                                                L". Backend: " + backend_status_ +
+                                                L". Use Runtime > Restart backend, then View > Reload. If the backend is online, open " +
+                                                url_ + L" in an external browser to compare.";
+                                            SetStatus(L"WebView2 navigation failed: " + WebErrorStatusName(web_error));
+                                            ShowWebViewDiagnostic(L"Symbion could not render the web UI", detail);
+                                            return S_OK;
+                                        })
+                                        .Get(),
+                                    &webview_->navigation_completed_token);
                                 webview_ready_ = true;
-                                webview_->webview->Navigate(url_.c_str());
+                                const HRESULT nav_result = webview_->webview->Navigate(url_.c_str());
+                                AppendShellLog(repo_root_, L"WebView2 Navigate(" + url_ + L"): " + FormatHresult(nav_result));
+                                if (FAILED(nav_result)) {
+                                    ShowWebViewDiagnostic(L"Symbion WebView navigation failed",
+                                                          L"Navigate returned " + FormatHresult(nav_result) + L" for " + url_ + L".");
+                                }
                             }
                             return S_OK;
                         })
@@ -1004,6 +1121,7 @@ void SymbionShell::InitializeWebView() {
             .Get());
 
     if (FAILED(result)) {
+        AppendShellLog(repo_root_, L"CreateCoreWebView2EnvironmentWithOptions returned: " + FormatHresult(result));
         SetStatus(L"WebView2 startup failed: " + FormatHresult(result));
     }
 #else
@@ -1018,6 +1136,44 @@ void SymbionShell::NavigateWebView(const std::wstring& url) {
     }
 #else
     (void)url;
+#endif
+}
+
+void SymbionShell::ShowWebViewDiagnostic(const std::wstring& title, const std::wstring& detail) {
+#if SYMBION_NATIVE_HAS_WEBVIEW2_HEADERS
+    if (!webview_ || !webview_->webview) {
+        return;
+    }
+
+    const std::wstring html =
+        LR"(<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{height:100%;margin:0;background:#050508;color:#f2f2f6;font-family:Segoe UI,Arial,sans-serif}
+main{box-sizing:border-box;min-height:100%;display:grid;place-items:center;padding:32px}
+section{max-width:720px;border:1px solid #2b2b35;background:#111119;padding:28px;border-radius:8px;box-shadow:0 18px 48px rgba(0,0,0,.35)}
+h1{margin:0 0 12px;font-size:24px;line-height:1.2;font-weight:650}
+p{margin:0 0 14px;font-size:15px;line-height:1.55;color:#cfd0da}
+code{display:block;white-space:pre-wrap;word-break:break-word;background:#050508;border:1px solid #282834;border-radius:6px;padding:12px;color:#e6e7ef}
+</style></head><body><main><section><h1>)" +
+        HtmlEscape(title) +
+        LR"(</h1><p>)" +
+        HtmlEscape(detail) +
+        LR"(</p><code>Target URL: )" +
+        HtmlEscape(url_) +
+        LR"(
+Backend: )" +
+        HtmlEscape(backend_status_) +
+        LR"(
+Provider: )" +
+        HtmlEscape(provider_) +
+        LR"(
+Local Gemma: )" +
+        HtmlEscape(gemma_status_) +
+        LR"(</code></section></main></body></html>)";
+
+    webview_->webview->NavigateToString(html.c_str());
+#else
+    (void)title;
+    (void)detail;
 #endif
 }
 
@@ -1094,6 +1250,7 @@ void SymbionShell::ShowMainWindow() {
     if (IsIconic(hwnd_)) {
         ShowWindow(hwnd_, SW_RESTORE);
     }
+    ResizeWebView();
     SetForegroundWindow(hwnd_);
 }
 
@@ -1182,6 +1339,9 @@ void SymbionShell::RefreshRuntimeStatus() {
         const std::wstring failures = ExtractJsonFieldForDisplay(health->body, "consecutive_failures", L"0");
         SetTrayTooltip(L"Symbion v" + build_version_ + L" | " + mood + L" | failures " + failures);
     } else {
+        if (!repo_root_.empty() && !IsProcessStillRunning(backend_process_)) {
+            StartBackend();
+        }
         backend_status_ = owns_backend_ && IsProcessStillRunning(backend_process_) ? L"starting" : L"unreachable";
         SetTrayTooltip(L"Symbion - backend " + backend_status_);
     }

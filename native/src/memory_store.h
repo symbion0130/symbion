@@ -71,7 +71,8 @@ struct SessionInfo {
 class SummaryGenerator {
 public:
     virtual ~SummaryGenerator() = default;
-    virtual std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages) const = 0;
+    virtual std::string SummarizeSessionWindow(const std::vector<ChatMessage>& messages,
+                                               const std::string& prior_summary) const = 0;
 };
 
 class MemoryStore {

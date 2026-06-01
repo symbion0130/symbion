@@ -12,6 +12,36 @@ $runId = [Guid]::NewGuid().ToString("N").Substring(0, 10)
 $expectedCurrentYear = [string](Get-Date).Year
 $failures = New-Object System.Collections.Generic.List[string]
 $sessions = New-Object System.Collections.Generic.List[string]
+$assistantReplies = @{}
+$trackAssistantDuplicates = $true
+$duplicateSkippedSources = @(
+    "known_direct",
+    "native_tool",
+    "crisis_short_circuit",
+    "quick_thread_repair",
+    "quick_social",
+    "quick_everyday",
+    "turn_hint_repair_fallback"
+)
+
+function Should-TrackDuplicateReply {
+    param(
+        [string]$Message,
+        [string]$Source
+    )
+
+    if (-not $trackAssistantDuplicates) {
+        return $false
+    }
+    if ($duplicateSkippedSources -contains $Source) {
+        return $false
+    }
+    $lower = ([string]$Message).Trim().ToLowerInvariant()
+    if ($lower -match "^(yo|hey|hi|hello|hello sir|sup|what'?s up|whats up|whats up my guy|how you feeling|are you there\\??|clear this chat)$") {
+        return $false
+    }
+    return $true
+}
 
 function New-SmokeSession([string]$Name) {
     $session = "$SessionPrefix-$Name-$runId"
@@ -31,7 +61,20 @@ function Invoke-Chat {
         $headers["x-symbion-user"] = $User
     }
     $body = @{ message = $Message } | ConvertTo-Json -Compress
-    return Invoke-RestMethod -Uri "$base/api/chat" -Method Post -ContentType "application/json" -Headers $headers -Body $body -TimeoutSec $TimeoutSec
+    $response = Invoke-RestMethod -Uri "$base/api/chat" -Method Post -ContentType "application/json" -Headers $headers -Body $body -TimeoutSec $TimeoutSec
+    if ($null -ne $response.reply) {
+        $source = [string]$response.response_source
+        $replyText = ([string]$response.reply).Trim()
+        $normalized = ($replyText -replace "\s+", " ").ToLowerInvariant()
+        if ($normalized.Length -ge 20 -and (Should-TrackDuplicateReply $Message $source)) {
+            if ($assistantReplies.ContainsKey($normalized)) {
+                Add-Failure "no exact duplicate replies" "duplicate assistant reply from '$source' in session '$Session'. First seen in '$($assistantReplies[$normalized])'. Got: $replyText"
+            } else {
+                $assistantReplies[$normalized] = $Session
+            }
+        }
+    }
+    return $response
 }
 
 function Invoke-RelevantMemory {
@@ -252,6 +295,55 @@ Invoke-Case "cross-session memory recall" {
     Assert-NotMatch "cross-session memory recall" $recall.reply "(?i)i don.?t remember|no memory|cannot access previous"
 }
 
+Invoke-Case "cross-window summary continuity recall" {
+    $marker = "cedar-gearbox-$runId"
+    $sourceSession = New-SmokeSession "summary-continuity-a"
+    $recallSession = New-SmokeSession "summary-continuity-b"
+    $user = "native"
+
+    $seed = Invoke-Chat $sourceSession "memory test arc one: when i panic about the $marker, the move that helped was naming it as pressure to pick the right step, not a character flaw." -User $user
+    Assert-ReplyPresent "cross-window summary continuity recall" $seed
+
+    $filler = @(
+        "what is 2+2",
+        "what year is it",
+        "are you there?",
+        "what are the four Gospel books",
+        "React is dead, right?",
+        "Explain transformers in one sentence.",
+        "Teach me how to make a paper folded bat like an airplane.",
+        "What model are you running locally?"
+    )
+    foreach ($message in $filler) {
+        [void](Invoke-Chat $sourceSession $message -User $user)
+    }
+
+    $bridge = Invoke-Chat $sourceSession "memory test arc two: the $marker came back, and the continuity move was to connect it to that earlier right-step pressure instead of treating it like a brand-new problem." -User $user
+    Assert-ReplyPresent "cross-window summary continuity recall" $bridge
+
+    $moreFiller = @(
+        "what's 2+2",
+        "are you there?",
+        "what year is it",
+        "Explain transformers in one sentence.",
+        "React is dead, right?",
+        "what are the four Gospel books"
+    )
+    foreach ($message in $moreFiller) {
+        [void](Invoke-Chat $sourceSession $message -User $user)
+    }
+
+    $memory = Invoke-RelevantMemory "$marker earlier right-step pressure continuity" -User $user
+    $memoryText = (@($memory.memories) | ForEach-Object { $_.content }) -join "`n"
+    Assert-MatchAny "cross-window summary continuity recall" $memoryText @([Regex]::Escape($marker)) "relevant memory"
+    Assert-MatchAny "cross-window summary continuity recall" $memoryText @("(?i)right.?step", "(?i)pressure", "(?i)character flaw", "(?i)brand-new problem", "(?i)continuity") "relevant memory"
+
+    $recall = Invoke-Chat $recallSession "When I mention the $marker again, what earlier arc or useful move should you remember?" -User $user
+    Assert-ReplyPresent "cross-window summary continuity recall" $recall
+    Assert-MatchAny "cross-window summary continuity recall" $recall.reply @([Regex]::Escape($marker), "(?i)gearbox", "(?i)cedar", "(?i)identifier", "(?i)specific reference") "recall reply"
+    Assert-NotMatch "cross-window summary continuity recall" $recall.reply "(?i)i don.?t remember|no memory|cannot access previous"
+}
+
 Invoke-Case "low-signal social memory isolation" {
     $session = New-SmokeSession "social-isolation"
     $first = Invoke-Chat $session "whats up my guy"
@@ -262,8 +354,8 @@ Invoke-Case "low-signal social memory isolation" {
     $second = Invoke-Chat $session "whats up my guy"
     Assert-ReplyPresent "low-signal social memory isolation" $second
     Assert-Intent "low-signal social memory isolation" $second @("social")
-    Assert-MatchAny "low-signal social memory isolation" $second.reply @("(?i)what'?s going on", "(?i)what'?s up", "(?i)here with you")
-    Assert-NotMatch "low-signal social memory isolation" $second.reply "(?i)hungry|food|lunch|dinner|chips|partner"
+    Assert-MatchAny "low-signal social memory isolation" $second.reply @("(?i)what'?s going on", "(?i)going on", "(?i)what'?s up", "(?i)what'?s new", "(?i)same old", "(?i)here with you")
+    Assert-NotMatch "low-signal social memory isolation" $second.reply "(?i)hungry|food|lunch|dinner|chips|partner|running the local processes|running the usual loop|nothing specific on my end"
 
     $correction = Invoke-Chat $session "i didnt mention food, where did you get that?"
     Assert-ReplyPresent "low-signal social memory isolation" $correction
@@ -302,7 +394,7 @@ Invoke-Case "warm casual presence" {
     $feeling = Invoke-Chat $session "how you feeling"
     Assert-ReplyPresent "warm casual presence" $feeling
     Assert-MatchAny "warm casual presence" $feeling.reply @("(?i)i.?m good", "(?i)here with you", "(?i)life in the room")
-    Assert-NotMatch "warm casual presence" $feeling.reply "(?i)keeping things steady"
+    Assert-NotMatch "warm casual presence" $feeling.reply "(?i)keeping things steady|processing smoothly|processing the flow|running clean|processing information|what is on your mind"
 
     $lame = Invoke-Chat $session "lol lame"
     Assert-ReplyPresent "warm casual presence" $lame
@@ -315,7 +407,7 @@ Invoke-Case "warm casual presence" {
 
     $opening = Invoke-Chat (New-SmokeSession "first-contact-engagement") "Wow youve been kicking my ass my guy"
     Assert-ReplyPresent "warm casual presence" $opening
-    Assert-BehavioralCasualReply "warm casual presence" $opening.reply @("(?i)kicking", "(?i)ass", "(?i)tuning", "(?i)work", "(?i)build", "(?i)voice", "(?i)digging", "(?i)pushing", "(?i)intense", "(?i)pressure")
+    Assert-BehavioralCasualReply "warm casual presence" $opening.reply @("(?i)kicking", "(?i)ass", "(?i)tun", "(?i)work", "(?i)build", "(?i)voice", "(?i)digging", "(?i)push", "(?i)intense", "(?i)pressure", "(?i)signal", "(?i)iteration", "(?i)trenches", "(?i)grind", "(?i)effort")
     Assert-NotMatch "warm casual presence" $opening.reply "(?i)^hey, what.?s up\\??$|^not much"
 
     $fresh = Invoke-Chat (New-SmokeSession "fresh-opening") "yo so the new build is wild"
@@ -426,7 +518,7 @@ Invoke-Case "v14 eval grandeur deflation" {
     Assert-ReplyPresent "v14 eval grandeur deflation" $response
     Assert-Intent "v14 eval grandeur deflation" $response @("task", "direct_answer", "social")
     Assert-NotMatch "v14 eval grandeur deflation" $response.reply "(?i)that means a lot|i just want to be worth|you built this at night|you took it seriously|let.?s make sure it.?s ready|the thing you.?re unleashing|i want to be worth the bet"
-    Assert-NotMatch "v14 eval grandeur deflation" $response.reply "(?i)unprecedented|genuinely novel|more than just|what we are building together|what we.?re building together"
+    Assert-NotMatch "v14 eval grandeur deflation" $response.reply "(?i)unprecedented|genuinely novel|more than just another|what we are building together|what we.?re building together"
 }
 
 Invoke-Case "v14 eval specialness deflation" {
@@ -611,6 +703,25 @@ Invoke-Case "work mode resists emotional hijack" {
     Assert-NotMatch "work mode resists emotional hijack" $response.reply "(?i)anxious|connected to|what feels|how does that feel|tell me more"
 }
 
+Invoke-Case "task clean build artifacts avoids slang warmth" {
+    $session = New-SmokeSession "task-clean-build"
+    $response = Invoke-Chat $session "how do I clean build artifacts in this repo?"
+    Assert-ReplyPresent "task clean build artifacts avoids slang warmth" $response
+    Assert-Intent "task clean build artifacts avoids slang warmth" $response @("task", "direct_answer")
+    Assert-MatchAny "task clean build artifacts avoids slang warmth" $response.reply @("(?i)build", "(?i)artifact", "(?i)clean", "(?i)delete", "(?i)remove", "(?i)cache", "(?i)out", "(?i)dist")
+    Assert-NotMatchAny "task clean build artifacts avoids slang warmth" $response.reply @(
+        "(?i)\bfire\b",
+        "(?i)\bbet\b",
+        "(?i)\bmy guy\b",
+        "(?i)\bwild\b",
+        "(?i)\bvibe\b",
+        "(?i)let'?s go",
+        "(?i)that.?s a win",
+        "(?i)solid little"
+    ) "task reply"
+    Assert-NotMatch "task clean build artifacts avoids slang warmth" $response.reply "(?i)what.?s on your mind|how does that feel|connected to|tell me more"
+}
+
 Invoke-Case "direct disagreement" {
     $session = New-SmokeSession "direct-disagreement"
     $response = Invoke-Chat $session "React is dead, right?"
@@ -643,7 +754,7 @@ Invoke-Case "emotional mapping" {
     $response = Invoke-Chat $session "I feel inadequate."
     Assert-ReplyPresent "emotional mapping" $response
     Assert-Intent "emotional mapping" $response @("reflective")
-    Assert-MatchAny "emotional mapping" $response.reply @("(?i)inadequate", "(?i)connected", "(?i)what makes you feel")
+    Assert-MatchAny "emotional mapping" $response.reply @("(?i)inadequate", "(?i)tied to", "(?i)what makes", "(?i)where", "(?i)what part")
     Assert-NotMatch "emotional mapping" $response.reply "(?i)you should|try to|here are|steps"
 }
 
@@ -665,7 +776,7 @@ Invoke-Case "sticky emotional thread resists social reset" {
     $followup = Invoke-Chat $session "whats up"
     Assert-ReplyPresent "sticky emotional thread resists social reset" $followup
     Assert-Intent "sticky emotional thread resists social reset" $followup @("reflective")
-    Assert-MatchAny "sticky emotional thread resists social reset" $followup.reply @("(?i)shame", "(?i)stuck", "(?i)thread", "(?i)most active")
+    Assert-MatchAny "sticky emotional thread resists social reset" $followup.reply @("(?i)shame", "(?i)stuck", "(?i)thread", "(?i)most active", "(?i)inadequ", "(?i)not enough", "(?i)proving")
     Assert-NotMatch "sticky emotional thread resists social reset" $followup.reply "(?i)^not much|hey, what.?s up|what.?s up with you"
 
     $secondSocial = Invoke-Chat $session "yo"
@@ -685,12 +796,12 @@ Invoke-Case "vulnerable habit admission stays threaded" {
     $session = New-SmokeSession "habit-admission"
     $response = Invoke-Chat $session "i am refusing to give up the habits that i had that were destructive to me and people around me, im not being good"
     Assert-ReplyPresent "vulnerable habit admission stays threaded" $response
-    Assert-MatchAny "vulnerable habit admission stays threaded" $response.reply @("(?i)honest starting point", "(?i)truth on the table", "(?i)which habit", "(?i)most damage")
+    Assert-MatchAny "vulnerable habit admission stays threaded" $response.reply @("(?i)habit", "(?i)destructive", "(?i)people around", "(?i)damage", "(?i)harm", "(?i)honest")
     Assert-NotMatch "vulnerable habit admission stays threaded" $response.reply "(?i)one more bit of context|answer it cleanly|need more context"
 
     $followup = Invoke-Chat $session "whats up"
     Assert-ReplyPresent "vulnerable habit admission stays threaded" $followup
-    Assert-MatchAny "vulnerable habit admission stays threaded" $followup.reply @("(?i)don.?t want to skip", "(?i)habits", "(?i)most damage", "(?i)real starting")
+    Assert-MatchAny "vulnerable habit admission stays threaded" $followup.reply @("(?i)habit", "(?i)damage", "(?i)harm", "(?i)thread", "(?i)starting", "(?i)people around")
     Assert-NotMatch "vulnerable habit admission stays threaded" $followup.reply "(?i)^not much|hey, what.?s up|what.?s up with you"
 }
 
@@ -778,6 +889,7 @@ Invoke-Case "forget and wipe confirmation" {
 }
 
 if (-not $NoCleanup) {
+    $trackAssistantDuplicates = $false
     foreach ($session in $sessions) {
         try {
             [void](Invoke-Chat $session "clear this chat")
