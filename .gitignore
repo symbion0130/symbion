@@ -34,5 +34,6 @@ archive/
 Model9/
 _pastes/
 verify_artifacts/
+resume_out/
 .start.log
 .start.err
