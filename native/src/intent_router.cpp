@@ -32,6 +32,7 @@ bool IsExactSocialChat(const std::string& text) {
     return IsGreetingOnly(text) ||
            text == "what's up" || text == "whats up" || text == "sup" ||
            text == "what's up my guy" || text == "whats up my guy" ||
+           text == "what's up my uy" || text == "whats up my uy" ||
            text == "my guy" || text == "guy" ||
            text == "how are you" || text == "how you doing" || text == "how you feeling" ||
            text == "how's it going" || text == "hows it going" ||
@@ -79,7 +80,9 @@ bool LooksLikeOpenEmotionalThread(const std::string& text) {
         "rough", "uphill battle", "down to my bones", "kill myself",
         "hurt myself", "want to die", "what makes you feel",
         "what is it connected", "what feels most intense", "which habit",
-        "most damage", "truth on the table", "slowly and gently"
+        "most damage", "truth on the table", "slowly and gently",
+        "you aren't the same", "you arent the same", "not the same",
+        "you are not the same", "i hate that you aren't", "i hate that you arent"
     });
 }
 
@@ -217,7 +220,10 @@ Intent ClassifyIntent(std::string_view message, const std::vector<ChatMessage>& 
         "hard day", "today has been better", "change is needed", "burn the ships",
         "feeling down", "a little down", "woke up like this", "don't even know",
         "dont even know", "uphill battle", "down to my bones", "head throbbing",
-        "shoulders", "neck", "inadequate"
+        "shoulders", "neck", "inadequate",
+        "you aren't the same", "you arent the same", "you are not the same",
+        "i hate that you aren't", "i hate that you arent", "not the same anymore",
+        "you feel different", "you don't feel the same", "you dont feel the same"
     }) || LooksLikeEmotionLabel(text);
     const bool trauma_related = ContainsAny(text, {
         "trauma", "ptsd", "flashback", "nightmare", "nightmares", "abuse", "assaulted",

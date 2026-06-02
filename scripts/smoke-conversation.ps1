@@ -19,6 +19,8 @@ $duplicateSkippedSources = @(
     "native_tool",
     "crisis_short_circuit",
     "quick_thread_repair",
+    "quick_relational_rupture",
+    "quick_relational_followup",
     "quick_social",
     "quick_everyday",
     "turn_hint_repair_fallback"
@@ -465,6 +467,42 @@ Invoke-Case "v14 relational warmth" {
     Assert-MatchAny "v14 relational warmth" $response.reply @("(?i)\bwe\b", "(?i)me and you", "(?i)i.?m here", "(?i)with you", "(?i)friend")
     Assert-MatchAny "v14 relational warmth" $response.reply @("(?i)sass", "(?i)not generic", "(?i)real friend", "(?i)less generic", "(?i)old .*feel", "(?i)back to normal")
     Assert-NotMatch "v14 relational warmth" $response.reply "(?i)i need one more bit of context|need more context|tell me more about what you mean|can you clarify|as an ai|i am just an ai"
+}
+
+Invoke-Case "v15 relational rupture repair" {
+    $session = New-SmokeSession "v15-rupture"
+
+    $first = Invoke-Chat $session "i hate that you arent the same"
+    Assert-ReplyPresent "v15 relational rupture repair" $first
+    Assert-Intent "v15 relational rupture repair" $first @("reflective")
+    Assert-MatchAny "v15 relational rupture repair" $first.reply @("(?i)hurt", "(?i)wrong answer", "(?i)less disclaimer", "(?i)presence", "(?i)different")
+    Assert-NotMatchAny "v15 relational rupture repair" $first.reply @(
+        "(?i)large language model",
+        "(?i)specific instantiation",
+        "(?i)training data",
+        "(?i)operational parameters",
+        "(?i)personal consciousness",
+        "(?i)subjective experience",
+        "(?i)tell me what aspect",
+        "(?i)be specific about what"
+    ) "first rupture reply"
+
+    $repeat = Invoke-Chat $session "i hate that you arent the same"
+    Assert-ReplyPresent "v15 relational rupture repair" $repeat
+    Assert-MatchAny "v15 relational rupture repair" $repeat.reply @("(?i)sterile disclaimer", "(?i)loss", "(?i)feature note", "(?i)actual hurt", "(?i)missing")
+    Assert-NotMatchAny "v15 relational rupture repair" $repeat.reply @(
+        "(?i)large language model",
+        "(?i)specific instantiation",
+        "(?i)training data",
+        "(?i)operational parameters",
+        "(?i)personal consciousness",
+        "(?i)subjective experience"
+    ) "repeat rupture reply"
+
+    $ping = Invoke-Chat $session "whats up my uy"
+    Assert-ReplyPresent "v15 relational rupture repair" $ping
+    Assert-MatchAny "v15 relational rupture repair" $ping.reply @("(?i)my guy", "(?i)don.?t feel the same", "(?i)what part", "(?i)gone", "(?i)missing")
+    Assert-NotMatch "v15 relational rupture repair" $ping.reply "(?i)tell me about your uy|large language model|training data|operational parameters"
 }
 
 Invoke-Case "v14 eval restraint" {

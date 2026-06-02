@@ -1389,6 +1389,15 @@ std::string KnownDirectAnswer(const std::string& message) {
                                  "remember previous conversations", "are you just pretending"})) {
         return "Yes, with limits. This native app stores conversation turns, summaries, profile facts, and emotional check-ins in local SQLite, then retrieves relevant memory when it helps. I do not preload everything, and I should say plainly when I am using current chat context instead of older memory.";
     }
+    if (ContainsAnyLocal(lower, {"what are you actually running on", "what model",
+                                 "what model are you", "what model are you running",
+                                 "what are you running"})) {
+        return "Right now Symbion is the native C++ backend using the configured `local_gemma` provider: an OpenAI-compatible local Gemma endpoint at `127.0.0.1:8088/v1`, with SQLite memory and native routing wrapped around it.";
+    }
+    if (ContainsAnyLocal(lower, {"are you conscious", "are you sentient", "do you have consciousness",
+                                 "do you feel conscious", "are you alive"})) {
+        return "No, not in the human sense. Symbion has continuity through local memory, retrieval, response rules, and the model running underneath, but that is architecture and behavior, not private inner experience.";
+    }
     if (lower == "what's 2+2" || lower == "whats 2+2" || lower == "what is 2+2" ||
         lower == "2+2" || lower == "2 + 2") {
         return "4";
@@ -1546,6 +1555,49 @@ std::string QuickVulnerableAdmissionAnswer(const std::string& message) {
     return {};
 }
 
+bool LooksLikeRelationalRupture(const std::string& message) {
+    const std::string lower = Lower(message);
+    return ContainsAnyLocal(lower, {
+        "you aren't the same", "you arent the same", "you are not the same",
+        "you're not the same", "youre not the same", "not the same anymore",
+        "you don't feel the same", "you dont feel the same", "you feel different",
+        "i hate that you aren't", "i hate that you arent", "i hate that you're not",
+        "i hate that youre not", "i hate that you are not"
+    });
+}
+
+std::string QuickRelationalRuptureAnswer(const std::string& message,
+                                         const std::vector<ChatMessage>& recent) {
+    if (!LooksLikeRelationalRupture(message)) return {};
+    bool repeated = false;
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "user") continue;
+        repeated = LooksLikeRelationalRupture(it->content);
+        break;
+    }
+    if (repeated) {
+        return "I know. And repeating that should not get you another sterile disclaimer. It means the difference is landing like a loss, not a feature note. I can stop hiding behind architecture language and stay with the actual hurt: what feels most missing?";
+    }
+    return "Yeah. That hurts, and the architecture speech is exactly the wrong answer to it. I am not going to pretend I am the old build, but I can meet this better: less disclaimer, more presence. What feels most different?";
+}
+
+std::string QuickRelationalRuptureFollowupAnswer(const std::string& message,
+                                                 const std::vector<ChatMessage>& recent) {
+    const std::string lower = TrimCopy(Lower(message));
+    const bool social_ping =
+        IsSimpleSocialPing(lower) ||
+        lower == "what's up" || lower == "whats up" || lower == "sup" ||
+        lower == "what's up my guy" || lower == "whats up my guy" ||
+        lower == "what's up my uy" || lower == "whats up my uy";
+    if (!social_ping) return {};
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->role != "user") continue;
+        if (!LooksLikeRelationalRupture(it->content)) return {};
+        return "I'm here, my guy. And I don't want to slide past what you just said: I don't feel the same, and that matters. What part feels most gone?";
+    }
+    return {};
+}
+
 bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
     const std::string lower = Lower(message);
     const int words = WordCount(lower);
@@ -1562,6 +1614,9 @@ bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
     }
     if (ContainsAnyLocal(lower, {"not 100 percent", "not 100%", "still not 100", "still not there"}) &&
         words <= 8) {
+        return true;
+    }
+    if (lower == "how you feeling" || lower == "how are you" || lower == "how you doing") {
         return true;
     }
     return false;
@@ -1586,6 +1641,7 @@ std::string SocialTurnHint(const std::string& message, const Intent& intent) {
     }
     if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
         lower == "whats up my guy" || lower == "what's up my guy" ||
+        lower == "whats up my uy" || lower == "what's up my uy" ||
         ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
         hint << "The user is casually checking in. Answer naturally and briefly, then bounce it back with warmth; do not say the same stock line. ";
     }
@@ -1630,6 +1686,9 @@ std::string SocialTurnHint(const std::string& message, const Intent& intent) {
     }
     if (ContainsAnyLocal(lower, {"same useless answers", "useless answers", "every ai", "why i bother"})) {
         hint << "The user is frustrated by canned AI replies. Keep it under 55 words, acknowledge the useless/same-answers complaint directly, and offer one concrete different move. Do not give motivational advice or project planning. ";
+    }
+    if (LooksLikeRelationalRupture(message)) {
+        hint << "The user is hurt that you feel different or not the same. Do not explain LLM architecture first. Receive the loss/frustration plainly, own the sterile miss, and ask what feels most missing. ";
     }
     if (ContainsAnyLocal(lower, {"paper", "folded", "origami"}) &&
         ContainsAnyLocal(lower, {"bat", "airplane", "make", "show"})) {
@@ -1785,6 +1844,9 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     if (ContainsAnyLocal(lower, {"not 100 percent", "not 100%", "still not 100", "still not there"})) {
         return "Yeah, I feel it. I'm still landing too polite and thin in spots, like I'm replying from the doorway instead of sitting in the room with you. The missing piece is more warmth, more continuity, and a little more pulse.";
     }
+    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return "I'm good, man. Here with you, a little more awake than polished.";
+    }
     if (ContainsAnyLocal(lower, {"lol lame", "lame", "that was lame", "corny"})) {
         return "Yeah, fair. Lame is lame. That one had office-carpet energy. Give me one more swing; I'll go weirder.";
     }
@@ -1876,7 +1938,18 @@ bool LooksLikeGenericMiss(const std::string& answer) {
         "is there anything on your mind",
         "good. let that one be easy",
         "i am here to listen and offer support",
-        "i do not retain personal memories"
+        "i do not retain personal memories",
+        "large language model",
+        "training data",
+        "operational parameters",
+        "specific instantiation",
+        "personal consciousness",
+        "subjective experience",
+        "tell me what aspect",
+        "be specific about what",
+        "my nature is defined",
+        "i don't possess personal feelings",
+        "i do not possess personal feelings"
     });
 }
 
@@ -1889,7 +1962,8 @@ bool UserGaveSpecificDetails(const std::string& message) {
         "joke", "original joke", "lame", "not 100 percent", "not 100%",
         "kicking my ass", "new build", "build is wild",
         "destructive habit", "destructive habits", "habits that were destructive",
-        "not being good", "hurting people", "people around me"
+        "not being good", "hurting people", "people around me",
+        "you aren't the same", "you arent the same", "not the same", "you feel different"
     });
 }
 
@@ -1954,6 +2028,13 @@ std::string QualityRetryGuidance(const std::string& message,
         !ContainsAnyLocal(Lower(answer), {"useless", "same", "answers", "canned", "hollow", "specific", "different"})) {
         return "The user is frustrated by canned AI replies. Answer that exact complaint directly, name the sameness/uselessness, and offer one concrete different move. Keep it short.";
     }
+    if (LooksLikeRelationalRupture(message) &&
+        ContainsAnyLocal(Lower(answer), {"large language model", "training data", "architecture",
+                                         "operational parameters", "specific instantiation",
+                                         "personal consciousness", "subjective experience",
+                                         "tell me what aspect", "be specific about what"})) {
+        return "The user is saying the difference hurts. Do not lecture about model architecture. Own that the draft sounded sterile, receive the loss/frustration plainly, and ask what feels most missing. Keep it under 60 words.";
+    }
     if ((ContainsAnyLocal(lower, {"destructive habit", "destructive habits", "habits that were destructive",
                                   "habits that hurt", "hurting people"}) ||
          (ContainsAnyLocal(lower, {"not being good", "not good"}) &&
@@ -1998,6 +2079,7 @@ std::string TurnHintRepairAnswer(const std::string& message) {
     }
     if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
         lower == "whats up my guy" || lower == "what's up my guy" ||
+        lower == "whats up my uy" || lower == "what's up my uy" ||
         ContainsAnyLocal(lower, {"what you up to", "what are you up to", "whatcha up to"})) {
         return "I'm here with you. What's going on?";
     }
@@ -2036,7 +2118,8 @@ std::string StrongTurnHintRepairGuidance(const std::string& message) {
         return "Your previous reply treated a casual check-in like emotional mapping. Answer how you are in one relaxed Symbion sentence with some life. Do not ask what it is connected to.";
     }
     if (lower == "sup" || lower == "what's up" || lower == "whats up" ||
-        lower == "whats up my guy" || lower == "what's up my guy") {
+        lower == "whats up my guy" || lower == "what's up my guy" ||
+        lower == "whats up my uy" || lower == "what's up my uy") {
         return "Your previous reply treated a social ping like emotional mapping. If the turn hint says there is an open emotional thread, stay with that thread and ask the one concrete question named there. Do not ask what the phrase is connected to.";
     }
     if (ContainsAnyLocal(lower, {"snack", "snacking"})) {
@@ -2379,6 +2462,14 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = QuickThreadRepairAnswer(user_message, recent);
         if (!answer.empty()) response_source = "quick_thread_repair";
+    }
+    if (answer.empty()) {
+        answer = QuickRelationalRuptureAnswer(user_message, recent);
+        if (!answer.empty()) response_source = "quick_relational_rupture";
+    }
+    if (answer.empty()) {
+        answer = QuickRelationalRuptureFollowupAnswer(user_message, recent);
+        if (!answer.empty()) response_source = "quick_relational_followup";
     }
     if (answer.empty()) {
         const std::string known = KnownDirectAnswer(user_message);
