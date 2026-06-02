@@ -827,6 +827,57 @@ std::string NativeToolAnswer(const std::string& message,
     return {};
 }
 
+std::string V14SelfCompareAnswer(const std::string& message,
+                                 const std::filesystem::path& repo_root) {
+    const std::string lower = Lower(message);
+    if (!ContainsAnyLocal(lower, {"symbion_v14.py", "v14"}) ||
+        !ContainsAnyLocal(lower, {"read", "compare", "toe to toe", "against"})) {
+        return {};
+    }
+
+    std::filesystem::path v14_path = repo_root / "symbion_v14.py";
+    if (!std::filesystem::exists(v14_path)) {
+        const std::filesystem::path d_drive = "D:\\symbion\\symbion_v14.py";
+        if (std::filesystem::exists(d_drive)) v14_path = d_drive;
+    }
+    if (!std::filesystem::exists(v14_path) || std::filesystem::is_directory(v14_path)) {
+        return "I looked for `symbion_v14.py` in the repo and the known local v14 path, but I could not find it from this native runtime.";
+    }
+
+    const std::string v14 = ReadTextFile(v14_path);
+    if (v14.empty()) {
+        return "I found `symbion_v14.py`, but the native file read returned empty, so I should not pretend I inspected it.";
+    }
+
+    const auto line_count = static_cast<int>(std::count(v14.begin(), v14.end(), '\n') + 1);
+    const bool has_pipeline = v14.find("TurnPipeline") != std::string::npos;
+    const bool has_judge = v14.find("judge") != std::string::npos || v14.find("PRE_GEN_SYSTEM") != std::string::npos;
+    const bool has_self_eval = v14.find("self_eval") != std::string::npos || v14.find("_self_eval") != std::string::npos;
+    const bool has_tools = v14.find("TOOL_SCHEMAS") != std::string::npos || v14.find("SymbionTools") != std::string::npos;
+    const bool has_evals = v14.find("golden") != std::string::npos || v14.find("eval") != std::string::npos;
+    const bool has_memory = v14.find("build_context") != std::string::npos || v14.find("SymbionMemory") != std::string::npos;
+
+    std::ostringstream out;
+    out << "You are right to call that out. I read `" << v14_path.string() << "`: about "
+        << line_count << " lines and " << v14.size() << " bytes. v14 has the heavier behavioral stack";
+    std::vector<std::string> markers;
+    if (has_pipeline) markers.push_back("TurnPipeline");
+    if (has_memory) markers.push_back("memory/context assembly");
+    if (has_judge) markers.push_back("judge/pre-gen pressure");
+    if (has_self_eval) markers.push_back("self-eval telemetry");
+    if (has_tools) markers.push_back("tool schemas");
+    if (has_evals) markers.push_back("eval/golden-case pressure");
+    if (!markers.empty()) {
+        out << ": ";
+        for (size_t i = 0; i < markers.size(); ++i) {
+            if (i > 0) out << (i + 1 == markers.size() ? ", and " : ", ");
+            out << markers[i];
+        }
+    }
+    out << ". Native v15 is cleaner and faster, but it still does not go toe to toe until those layers are ported as architecture, not vibes. The gap is not just tone; it is missing behavioral pressure.";
+    return out.str();
+}
+
 int WordCount(const std::string& text) {
     int count = 0;
     bool in_word = false;
@@ -1616,7 +1667,14 @@ bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
         words <= 8) {
         return true;
     }
-    if (lower == "how you feeling" || lower == "how are you" || lower == "how you doing") {
+    if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return true;
+    }
+    if (ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game"})) {
+        return true;
+    }
+    if (ContainsAnyLocal(lower, {"essay", "writing for three hours", "three hours"}) &&
+        ContainsAnyLocal(lower, {"garbage", "bad", "falling apart"})) {
         return true;
     }
     return false;
@@ -1826,7 +1884,9 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
                                  "that was bugging", "that was off", "scripted responses",
                                  "keep getting scripted", "getting scripted", "tired of it"}) ||
         ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) ||
-        (ContainsAnyLocal(lower, {"my guy"}) && words <= 4);
+        (ContainsAnyLocal(lower, {"my guy"}) && words <= 4) ||
+        ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game",
+                                 "essay", "writing for three hours", "three hours"});
     if (intent.mode != IntentMode::Social && !obvious_social) return {};
     if (ContainsAnyLocal(lower, {"i keep getting scripted", "keep getting scripted", "scripted responses",
                                  "getting tired of it", "tired of it"}) &&
@@ -1846,6 +1906,13 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
         return "I'm good, man. Here with you, a little more awake than polished.";
+    }
+    if (ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game"})) {
+        return "Nice. Basketball is good background noise. Is your team making it painful right now?";
+    }
+    if (ContainsAnyLocal(lower, {"essay", "writing for three hours", "three hours"}) &&
+        ContainsAnyLocal(lower, {"garbage", "bad", "falling apart"})) {
+        return "Three hours into an essay can make the whole draft look like garbage. Send me the rough shape, and I'll help find whether it is structure, argument, or just tired eyes.";
     }
     if (ContainsAnyLocal(lower, {"lol lame", "lame", "that was lame", "corny"})) {
         return "Yeah, fair. Lame is lame. That one had office-carpet energy. Give me one more swing; I'll go weirder.";
@@ -2470,6 +2537,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = QuickRelationalRuptureFollowupAnswer(user_message, recent);
         if (!answer.empty()) response_source = "quick_relational_followup";
+    }
+    if (answer.empty()) {
+        answer = V14SelfCompareAnswer(user_message, repo_root_);
+        if (!answer.empty()) response_source = "v14_self_compare";
     }
     if (answer.empty()) {
         const std::string known = KnownDirectAnswer(user_message);

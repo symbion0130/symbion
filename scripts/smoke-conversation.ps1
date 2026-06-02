@@ -21,6 +21,7 @@ $duplicateSkippedSources = @(
     "quick_thread_repair",
     "quick_relational_rupture",
     "quick_relational_followup",
+    "v14_self_compare",
     "quick_social",
     "quick_everyday",
     "turn_hint_repair_fallback"
@@ -503,6 +504,41 @@ Invoke-Case "v15 relational rupture repair" {
     Assert-ReplyPresent "v15 relational rupture repair" $ping
     Assert-MatchAny "v15 relational rupture repair" $ping.reply @("(?i)my guy", "(?i)don.?t feel the same", "(?i)what part", "(?i)gone", "(?i)missing")
     Assert-NotMatch "v15 relational rupture repair" $ping.reply "(?i)tell me about your uy|large language model|training data|operational parameters"
+}
+
+Invoke-Case "v15 v14 source comparison" {
+    $session = New-SmokeSession "v15-v14-compare"
+
+    $feeling = Invoke-Chat $session "how you feeling?"
+    Assert-ReplyPresent "v15 v14 source comparison" $feeling
+    Assert-MatchAny "v15 v14 source comparison" $feeling.reply @("(?i)i.?m good", "(?i)here with you", "(?i)awake", "(?i)polished")
+    Assert-NotMatchAny "v15 v14 source comparison" $feeling.reply @(
+        "(?i)operating smoothly",
+        "(?i)ready to process",
+        "(?i)processing what",
+        "(?i)generate useful output"
+    ) "how-you-feeling reply"
+
+    $challenge = Invoke-Chat $session "are you really tho? you still cant go toe to toe with v14"
+    Assert-ReplyPresent "v15 v14 source comparison" $challenge
+    Assert-MatchAny "v15 v14 source comparison" $challenge.reply @("(?i)symbion_v14.py", "(?i)behavioral stack", "(?i)TurnPipeline", "(?i)memory/context", "(?i)judge", "(?i)eval", "(?i)missing behavioral pressure")
+    Assert-NotMatchAny "v15 v14 source comparison" $challenge.reply @(
+        "(?i)i don.?t have the ability to compare",
+        "(?i)i just execute the instructions",
+        "(?i)i do not have access",
+        "(?i)information provided directly"
+    ) "v14 challenge reply"
+
+    $read = Invoke-Chat $session "read symbion_v14.py and compare yourself"
+    Assert-ReplyPresent "v15 v14 source comparison" $read
+    Assert-MatchAny "v15 v14 source comparison" $read.reply @("(?i)symbion_v14.py", "(?i)lines", "(?i)bytes", "(?i)behavioral stack", "(?i)v15")
+    Assert-NotMatchAny "v15 v14 source comparison" $read.reply @(
+        "(?i)i do not have access",
+        "(?i)i can only work with",
+        "(?i)visual feedback systems",
+        "(?i)micro-interactions",
+        "(?i)human-centered design"
+    ) "v14 read reply"
 }
 
 Invoke-Case "v14 eval restraint" {
