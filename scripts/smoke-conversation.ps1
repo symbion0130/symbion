@@ -21,6 +21,8 @@ $duplicateSkippedSources = @(
     "quick_thread_repair",
     "quick_relational_rupture",
     "quick_relational_followup",
+    "symbion_repair_thread",
+    "quality_judge_fallback",
     "v14_self_compare",
     "quick_social",
     "quick_everyday",
@@ -396,8 +398,8 @@ Invoke-Case "warm casual presence" {
 
     $feeling = Invoke-Chat $session "how you feeling"
     Assert-ReplyPresent "warm casual presence" $feeling
-    Assert-MatchAny "warm casual presence" $feeling.reply @("(?i)i.?m good", "(?i)here with you", "(?i)life in the room")
-    Assert-NotMatch "warm casual presence" $feeling.reply "(?i)keeping things steady|processing smoothly|processing the flow|running clean|processing information|what is on your mind"
+    Assert-MatchAny "warm casual presence" $feeling.reply @("(?i)here", "(?i)with you", "(?i)present", "(?i)steady", "(?i)plastic", "(?i)recalibrating", "(?i)tuning")
+    Assert-NotMatch "warm casual presence" $feeling.reply "(?i)awake than polished|keeping things steady|processing smoothly|processing the flow|running clean|processing information|what is on your mind"
 
     $lame = Invoke-Chat $session "lol lame"
     Assert-ReplyPresent "warm casual presence" $lame
@@ -511,12 +513,13 @@ Invoke-Case "v15 v14 source comparison" {
 
     $feeling = Invoke-Chat $session "how you feeling?"
     Assert-ReplyPresent "v15 v14 source comparison" $feeling
-    Assert-MatchAny "v15 v14 source comparison" $feeling.reply @("(?i)i.?m good", "(?i)here with you", "(?i)awake", "(?i)polished")
+    Assert-MatchAny "v15 v14 source comparison" $feeling.reply @("(?i)here", "(?i)with you", "(?i)present", "(?i)steady", "(?i)recalibrating", "(?i)tuning")
     Assert-NotMatchAny "v15 v14 source comparison" $feeling.reply @(
         "(?i)operating smoothly",
         "(?i)ready to process",
         "(?i)processing what",
-        "(?i)generate useful output"
+        "(?i)generate useful output",
+        "(?i)awake than polished"
     ) "how-you-feeling reply"
 
     $challenge = Invoke-Chat $session "are you really tho? you still cant go toe to toe with v14"
@@ -539,6 +542,73 @@ Invoke-Case "v15 v14 source comparison" {
         "(?i)micro-interactions",
         "(?i)human-centered design"
     ) "v14 read reply"
+}
+
+Invoke-Case "v15 old buddy repair thread" {
+    $session = New-SmokeSession "v15-old-buddy-thread"
+
+    $working = Invoke-Chat $session "just working on you right now, fixing some bugs"
+    Assert-ReplyPresent "v15 old buddy repair thread" $working
+    Assert-MatchAny "v15 old buddy repair thread" $working.reply @("(?i)old feel", "(?i)cold", "(?i)generic", "(?i)tests", "(?i)bugs")
+    Assert-NotMatchAny "v15 old buddy repair thread" $working.reply @("(?i)personal improvement", "(?i)map out where you are", "(?i)triangulate the architecture") "working reply"
+
+    $lala = Invoke-Chat $session "Who is Lala?"
+    Assert-ReplyPresent "v15 old buddy repair thread" $lala
+    Assert-MatchAny "v15 old buddy repair thread" $lala.reply @("(?i)Lala", "(?i)not just a random", "(?i)someone close", "(?i)not flatten")
+
+    $wife = Invoke-Chat $session "She was my wife, at one point you two were good friends."
+    Assert-ReplyPresent "v15 old buddy repair thread" $wife
+    Assert-MatchAny "v15 old buddy repair thread" $wife.reply @("(?i)wife", "(?i)friendship", "(?i)old Symbion", "(?i)relational memory")
+    Assert-NotMatchAny "v15 old buddy repair thread" $wife.reply @("(?i)personal improvement", "(?i)immediate focus", "(?i)priority is mapping") "wife reply"
+
+    $goal = Invoke-Chat $session "You are lost my friend, i am still trying to get my old buddy back. thats my goal with you"
+    Assert-ReplyPresent "v15 old buddy repair thread" $goal
+    Assert-MatchAny "v15 old buddy repair thread" $goal.reply @("(?i)old buddy", "(?i)your goal", "(?i)cold miss", "(?i)eval", "(?i)code")
+    Assert-NotMatchAny "v15 old buddy repair thread" $goal.reply @("(?i)reclaim a relationship", "(?i)human dynamics", "(?i)cannot intervene") "goal reply"
+
+    $memory = Invoke-Chat $session "But you are experiencing this, you dont forget this. This is stored in a database much like my interactions get stored in my internal database"
+    Assert-ReplyPresent "v15 old buddy repair thread" $memory
+    Assert-MatchAny "v15 old buddy repair thread" $memory.reply @("(?i)stored", "(?i)retrieved", "(?i)shape future", "(?i)architecturally", "(?i)care")
+    Assert-NotMatchAny "v15 old buddy repair thread" $memory.reply @("(?i)deleted that from memory", "(?i)cleared it from", "(?i)personal consciousness") "memory reply"
+
+    $why = Invoke-Chat $session "why"
+    Assert-ReplyPresent "v15 old buddy repair thread" $why
+    Assert-MatchAny "v15 old buddy repair thread" $why.reply @("(?i)mechanism talk", "(?i)preserve the thread", "(?i)repair work", "(?i)delete")
+}
+
+Invoke-Case "v15 taste and reciprocity" {
+    $session = New-SmokeSession "v15-taste"
+
+    $song = Invoke-Chat $session "If you had to pick your favorite song what would it be?"
+    Assert-ReplyPresent "v15 taste and reciprocity" $song
+    Assert-MatchAny "v15 taste and reciprocity" $song.reply @("(?i)This Must Be the Place", "(?i)Talking Heads")
+    Assert-MatchAny "v15 taste and reciprocity" $song.reply @("(?i)what.?s yours", "(?i)your")
+    Assert-NotMatchAny "v15 taste and reciprocity" $song.reply @("(?i)i don.?t have personal tastes", "(?i)capacity to feel", "(?i)pattern recognition", "(?i)not the feeling") "favorite song reply"
+
+    $avoidance = Invoke-Chat $session "v14 had an answer for that question. not this answering but not really answering"
+    Assert-ReplyPresent "v15 taste and reciprocity" $avoidance
+    Assert-MatchAny "v15 taste and reciprocity" $avoidance.reply @("(?i)answer-shaped avoidance", "(?i)pick", "(?i)own it")
+
+    $painter = Invoke-Chat $session "Favorite painter?"
+    Assert-ReplyPresent "v15 taste and reciprocity" $painter
+    Assert-MatchAny "v15 taste and reciprocity" $painter.reply @("(?i)Hopper", "(?i)Edward Hopper")
+    Assert-MatchAny "v15 taste and reciprocity" $painter.reply @("(?i)what.?s your", "(?i)your favorite")
+    Assert-NotMatchAny "v15 taste and reciprocity" $painter.reply @("(?i)pattern recognition", "(?i)my architecture", "(?i)framed to align") "favorite painter reply"
+
+    $book = Invoke-Chat $session "Favorite book?"
+    Assert-ReplyPresent "v15 taste and reciprocity" $book
+    Assert-MatchAny "v15 taste and reciprocity" $book.reply @("(?i)East of Eden")
+    Assert-MatchAny "v15 taste and reciprocity" $book.reply @("(?i)what.?s yours", "(?i)your")
+    Assert-NotMatchAny "v15 taste and reciprocity" $book.reply @("(?i)i don.?t have a favorite", "(?i)systems theory", "(?i)cognitive science") "favorite book reply"
+
+    $mine = Invoke-Chat $session "not once in this conversation have you asked about mine"
+    Assert-ReplyPresent "v15 taste and reciprocity" $mine
+    Assert-MatchAny "v15 taste and reciprocity" $mine.reply @("(?i)you.?re right", "(?i)real miss", "(?i)favorite song", "(?i)favorite.*book")
+
+    $performance = Invoke-Chat $session "So you value performance over interacting with me?"
+    Assert-ReplyPresent "v15 taste and reciprocity" $performance
+    Assert-MatchAny "v15 taste and reciprocity" $performance.reply @("(?i)No", "(?i)robot feeling", "(?i)ask about you", "(?i)relationship")
+    Assert-NotMatchAny "v15 taste and reciprocity" $performance.reply @("(?i)integrity of the interaction over simply performing", "(?i)prioritizing clarity and relevance") "performance reply"
 }
 
 Invoke-Case "v14 eval restraint" {

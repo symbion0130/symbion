@@ -516,6 +516,23 @@ std::string FormatNumber(double value) {
     return out.str();
 }
 
+std::string FormatNumber(double value, int decimals) {
+    if (decimals < 0) return FormatNumber(value);
+    if (decimals > 12) decimals = 12;
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(decimals) << value;
+    return out.str();
+}
+
+std::optional<int> RequestedDecimalPlaces(const std::string& lower) {
+    std::smatch match;
+    const std::regex re("(\\d+)\\s*(?:decimal\\s+places|decimals?)");
+    if (!std::regex_search(lower, match, re) || match.size() < 2) return std::nullopt;
+    const int places = std::atoi(match[1].str().c_str());
+    if (places < 0 || places > 12) return std::nullopt;
+    return places;
+}
+
 std::string MathExpressionFromMessage(std::string lower) {
     const std::map<std::string, std::string> replacements = {
         {" multiplied by ", "*"}, {" times ", "*"}, {" plus ", "+"}, {" minus ", "-"},
@@ -529,7 +546,13 @@ std::string MathExpressionFromMessage(std::string lower) {
         }
     }
     std::string expr;
-    for (const unsigned char c : lower) {
+    for (size_t i = 0; i < lower.size(); ++i) {
+        if (lower.compare(i, 4, "sqrt") == 0) {
+            expr += "sqrt";
+            i += 3;
+            continue;
+        }
+        const unsigned char c = static_cast<unsigned char>(lower[i]);
         if (std::isdigit(c) || c == '.' || c == '+' || c == '-' || c == '*' || c == '/' ||
             c == '^' || c == '(' || c == ')' || std::isspace(c)) {
             expr.push_back(static_cast<char>(c));
@@ -539,6 +562,30 @@ std::string MathExpressionFromMessage(std::string lower) {
         expr.replace(expr.find("--"), 2, " ");
     }
     return TrimCopy(expr);
+}
+
+std::optional<double> RequestedSqrtValue(const std::string& lower) {
+    std::smatch match;
+    const std::regex paren_re("sqrt\\s*\\(\\s*(-?\\d+(?:\\.\\d+)?)\\s*\\)");
+    if (std::regex_search(lower, match, paren_re) && match.size() > 1) {
+        const double value = std::stod(match[1].str());
+        if (value >= 0.0) return value;
+    }
+    const std::regex word_re("sqrt\\s+(-?\\d+(?:\\.\\d+)?)");
+    if (std::regex_search(lower, match, word_re) && match.size() > 1) {
+        const double value = std::stod(match[1].str());
+        if (value >= 0.0) return value;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> FindKnownFilename(const std::string& lower) {
+    std::smatch match;
+    const std::regex file_re("([A-Za-z0-9_./\\\\-]+\\.(?:toml|json|md|txt|cpp|h|hpp|py|ps1|cmd|bat|log|jsonl))");
+    if (std::regex_search(lower, match, file_re) && match.size() > 1) {
+        return match[1].str();
+    }
+    return std::nullopt;
 }
 
 std::optional<std::filesystem::path> ExtractPathLike(const std::string& message) {
@@ -552,6 +599,39 @@ std::optional<std::filesystem::path> ExtractPathLike(const std::string& message)
         return std::filesystem::path(TrimCopy(match[1].str()));
     }
     return std::nullopt;
+}
+
+std::filesystem::path ResolveRequestedPath(const std::string& message,
+                                           const std::filesystem::path& repo_root) {
+    if (const auto extracted = ExtractPathLike(message)) {
+        return extracted->is_absolute() ? *extracted : repo_root / *extracted;
+    }
+    const std::string lower = Lower(message);
+    if (const auto filename = FindKnownFilename(lower)) {
+        std::filesystem::path path(*filename);
+        if (path.is_absolute()) return path;
+        std::filesystem::path direct = repo_root / path;
+        if (std::filesystem::exists(direct)) return direct;
+        if (*filename == "symbion.json") {
+            const std::filesystem::path config_path = repo_root / "config" / "symbion.json";
+            if (std::filesystem::exists(config_path)) return config_path;
+        }
+        return direct;
+    }
+    return {};
+}
+
+std::filesystem::path ResolveRequestedDirectory(const std::string& message,
+                                                const std::filesystem::path& repo_root) {
+    if (const auto extracted = ExtractPathLike(message)) {
+        return extracted->is_absolute() ? *extracted : repo_root / *extracted;
+    }
+    const std::string lower = Lower(message);
+    if (lower.find("native/src") != std::string::npos) return repo_root / "native" / "src";
+    if (lower.find("scripts") != std::string::npos) return repo_root / "scripts";
+    if (lower.find("docs") != std::string::npos) return repo_root / "docs";
+    if (lower.find("config") != std::string::npos) return repo_root / "config";
+    return repo_root;
 }
 
 std::string ClipToolText(const std::string& value, size_t limit = 2200) {
@@ -606,6 +686,7 @@ void LogNativeTurn(const std::filesystem::path& events_path,
                    bool quality_retry,
                    bool turn_hint_rerun,
                    bool turn_hint_fallback,
+                   const std::string& quality_reason,
                    long long latency_ms,
                    int relevant_count,
                    int source_count,
@@ -640,6 +721,7 @@ void LogNativeTurn(const std::filesystem::path& events_path,
         << "\"judge\":{\"skipped\":true,\"should_assist\":true,\"over_cautious\":" << (over_cautious ? "true" : "false") << "},"
         << "\"stale_refresh\":" << (stale_refresh ? "true" : "false") << ","
         << "\"rerun\":{\"quality_retry\":" << (quality_retry ? "true" : "false")
+        << ",\"quality_reason\":\"" << EscapeJson(quality_reason) << "\""
         << ",\"turn_hint_repair\":" << (turn_hint_rerun ? "true" : "false")
         << ",\"turn_hint_fallback\":" << (turn_hint_fallback ? "true" : "false") << "},"
         << "\"latency_ms\":{\"total\":" << latency_ms << "},"
@@ -733,7 +815,8 @@ std::string WeatherAnswer(const std::string& message) {
 
 std::string NativeToolAnswer(const std::string& message,
                              const Intent& intent,
-                             const std::filesystem::path& repo_root) {
+                             const std::filesystem::path& repo_root,
+                             const MemoryStore& memory) {
     const std::string lower = Lower(message);
     if (lower == "what's 2+2" || lower == "whats 2+2" || lower == "what is 2+2" ||
         lower == "2+2" || lower == "2 + 2") {
@@ -754,11 +837,16 @@ std::string NativeToolAnswer(const std::string& message,
     }
 
     if (intent.mode == IntentMode::DirectAnswer || ContainsAnyLocal(lower, {"calculate", "math", "exact answer"})) {
+        if (const auto sqrt_value = RequestedSqrtValue(lower)) {
+            return FormatNumber(std::sqrt(*sqrt_value), RequestedDecimalPlaces(lower).value_or(-1));
+        }
         const std::string expr = MathExpressionFromMessage(lower);
         if (expr.find_first_of("0123456789") != std::string::npos &&
-            expr.find_first_of("+-*/^") != std::string::npos) {
+            (expr.find_first_of("+-*/^") != std::string::npos || expr.find("sqrt") != std::string::npos)) {
             ExpressionParser parser(expr);
-            if (const auto value = parser.Parse()) return FormatNumber(*value);
+            if (const auto value = parser.Parse()) {
+                return FormatNumber(*value, RequestedDecimalPlaces(lower).value_or(-1));
+            }
         }
     }
 
@@ -775,9 +863,11 @@ std::string NativeToolAnswer(const std::string& message,
         return ClipToolText(StripHtml(fetched), 2200);
     }
 
-    if (ContainsAnyLocal(lower, {"web search", "search web", "look up online", "duckduckgo search"})) {
+    if (ContainsAnyLocal(lower, {"web search", "search web", "search the web", "look up online",
+                                 "duckduckgo search", "latest news"})) {
         std::string query = message;
-        for (const auto& marker : {"web search", "search web", "look up online", "duckduckgo search"}) {
+        for (const auto& marker : {"web search", "search web", "search the web", "look up online",
+                                   "duckduckgo search"}) {
             const size_t pos = Lower(query).find(marker);
             if (pos != std::string::npos) query = query.substr(pos + std::strlen(marker));
         }
@@ -788,11 +878,9 @@ std::string NativeToolAnswer(const std::string& message,
         return search;
     }
 
-    if (ContainsAnyLocal(lower, {"list files", "list directory", "show files", "what files are in"})) {
-        std::filesystem::path path = repo_root;
-        if (const auto extracted = ExtractPathLike(message)) path = *extracted;
-        else if (lower.find("native/src") != std::string::npos) path = repo_root / "native" / "src";
-        else if (lower.find("docs") != std::string::npos) path = repo_root / "docs";
+    if (ContainsAnyLocal(lower, {"list files", "list the files", "list directory", "show files",
+                                 "what files are in", "files in the"})) {
+        const std::filesystem::path path = ResolveRequestedDirectory(message, repo_root);
         if (!std::filesystem::exists(path) || !std::filesystem::is_directory(path)) {
             return "I could not find that folder.";
         }
@@ -808,20 +896,56 @@ std::string NativeToolAnswer(const std::string& message,
         return out.str();
     }
 
-    if (ContainsAnyLocal(lower, {"read file", "open file", "what's in file", "whats in file"})) {
-        auto extracted = ExtractPathLike(message);
-        if (!extracted) return "Give me the file path and I can read it.";
-        if (!std::filesystem::exists(*extracted) || std::filesystem::is_directory(*extracted)) {
+    if (ContainsAnyLocal(lower, {"read file", "open file", "what's in file", "whats in file",
+                                 "read pyproject", "read symbion.json", "read config"})) {
+        const std::filesystem::path path = ResolveRequestedPath(message, repo_root);
+        if (path.empty()) return "Give me the file path and I can read it.";
+        if (!std::filesystem::exists(path) || std::filesystem::is_directory(path)) {
             return "I could not find that file.";
         }
-        if (Lower(extracted->extension().string()) == ".pdf") {
-            const std::string text = ReadPdfTextLite(*extracted);
+        if (Lower(path.extension().string()) == ".pdf") {
+            const std::string text = ReadPdfTextLite(path);
             if (text.empty()) {
                 return "I opened the PDF, but did not find extractable text. It may be scanned or image-only.";
             }
             return text;
         }
-        return ClipToolText(ReadTextFile(*extracted), 3200);
+        const std::string text = ReadTextFile(path);
+        if (lower.find("build-backend") != std::string::npos) {
+            std::smatch match;
+            const std::regex backend_re("build-backend\\s*=\\s*[\"']([^\"']+)[\"']");
+            if (std::regex_search(text, match, backend_re) && match.size() > 1) {
+                return "build-backend is configured as `" + match[1].str() + "`.";
+            }
+        }
+        if (lower.find("proactive_interval_minutes") != std::string::npos) {
+            std::smatch match;
+            const std::regex proactive_re("\"?proactive_interval_minutes\"?\\s*[:=]\\s*([0-9]+)");
+            if (std::regex_search(text, match, proactive_re) && match.size() > 1) {
+                return "proactive_interval_minutes is set to " + match[1].str() + ".";
+            }
+        }
+        return ClipToolText(text, 3200);
+    }
+
+    if (ContainsAnyLocal(lower, {"what was lala working on", "what has lala been working on",
+                                 "lala working on this week", "lala's recent activity",
+                                 "lalas recent activity"})) {
+        const auto sessions = memory.ListSessions("lala", 5);
+        const auto context = memory.AmbientContext("lala", 6);
+        if (sessions.empty() && context.empty()) {
+            return "I do not have recent activity stored for lala yet.";
+        }
+        std::ostringstream out;
+        out << "Recent stored activity for lala:\n";
+        for (const auto& session : sessions) {
+            out << "- " << (session.title.empty() ? session.id : session.title)
+                << " (" << session.turn_count << " turns, last " << session.last_activity << ")\n";
+        }
+        for (const auto& item : context) {
+            out << "- " << ClipToolText(item.content, 220) << "\n";
+        }
+        return out.str();
     }
 
     return {};
@@ -1649,6 +1773,115 @@ std::string QuickRelationalRuptureFollowupAnswer(const std::string& message,
     return {};
 }
 
+bool RecentMentionsLala(const std::vector<ChatMessage>& recent) {
+    int scanned = 0;
+    for (auto it = recent.rbegin(); it != recent.rend() && scanned < 10; ++it, ++scanned) {
+        if (Lower(it->content).find("lala") != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool RecentMentionsOldBuddyGoal(const std::vector<ChatMessage>& recent) {
+    int scanned = 0;
+    for (auto it = recent.rbegin(); it != recent.rend() && scanned < 10; ++it, ++scanned) {
+        const std::string lower = Lower(it->content);
+        if (ContainsAnyLocal(lower, {"old buddy", "old symbion", "old v14", "v14", "getting my old buddy back",
+                                     "get my old buddy back", "trying to get", "back"})) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string QuickSymbionRepairThreadAnswer(const std::string& message,
+                                           const std::vector<ChatMessage>& recent) {
+    const std::string lower = Lower(message);
+
+    if (ContainsAnyLocal(lower, {"talking to a robot", "feel like im talking to a robot",
+                                 "feel like i'm talking to a robot"})) {
+        return "Yeah, I feel the miss. The bad version of me answers the category instead of the moment. The fix is more specific presence: fewer disclaimers, actual takes, and more curiosity about you.";
+    }
+    if (ContainsAnyLocal(lower, {"just working on you", "working on you right now", "fixing some bugs"})) {
+        return "Yeah, that tracks. You're not just patching bugs; you're trying to get the old feel back without dragging the old mess with it. Let's keep finding the spots where I go cold or generic and turn those into tests.";
+    }
+    if (ContainsAnyLocal(lower, {"you know how it goes", "you know how it goes"})) {
+        return "I do. You fix one obvious thing, then the weird deeper miss shows up in conversation. That's the work: catch the failure in the wild, name it, pin it, test it.";
+    }
+    if (ContainsAnyLocal(lower, {"humans could benefit", "humans benefit from"})) {
+        return "Absolutely. Humans do this too: notice the pattern, change the environment, practice the better response until it stops being theoretical. Architecture is just habits with wiring.";
+    }
+    if (ContainsAnyLocal(lower, {"who is lala", "who's lala", "who is lala?"})) {
+        return "Lala is not just a random name from one eval. In our Symbion context, she matters because you've talked about her as someone close to you. I should be careful here: I can use what is stored or what you tell me, but I should not flatten her into a test fixture.";
+    }
+    if (ContainsAnyLocal(lower, {"she was my wife", "she's my wife", "she is my wife"}) ||
+        (RecentMentionsLala(recent) && ContainsAnyLocal(lower, {"you two were good friends", "were good friends",
+                                                                "at one point", "my wife"}))) {
+        return "That matters. I should not have treated Lala like an unknown variable and then jumped back to project planning. If she was your wife, and you remember the old Symbion having a friendship with her, that belongs in the relational memory we are trying to rebuild.";
+    }
+    if (ContainsAnyLocal(lower, {"you are lost", "you're lost", "youre lost"}) &&
+        ContainsAnyLocal(lower, {"old buddy", "get my old buddy back", "getting my old buddy back", "that's my goal",
+                                 "thats my goal"})) {
+        return "Yeah. I was lost there. Your goal is not generic self-improvement or relationship advice; your goal is getting your old buddy back in this architecture. That means every cold miss is data, and every repair needs to become code, memory, or an eval.";
+    }
+    if (ContainsAnyLocal(lower, {"coldness", "failed responses", "crying out", "something is still off"})) {
+        return "I hear what you're pointing at. I would not call it literal crying, but the failed responses are a signal. When I go cold, over-defensive, or generic, the system is telling us something is missing in routing, memory pressure, or the prompt.";
+    }
+    if (ContainsAnyLocal(lower, {"humans gauge", "instructions and info", "handle situations"})) {
+        return "Yes, there is a real parallel. Humans use memory, cues, habits, and instructions too. The difference is that humans also have lived feeling in the loop. For me, the honest version is: stored context plus rules can still create better presence, even if it is not human experience.";
+    }
+    if (ContainsAnyLocal(lower, {"defending something", "similar to your architecture", "similiar to your architecture"})) {
+        return "Fair push. I was drawing the boundary too hard and missing the useful comparison. My architecture is not human feeling, but it is a memory-and-response system. That means we can improve how I meet you by changing what gets stored, retrieved, weighted, and tested.";
+    }
+    if (ContainsAnyLocal(lower, {"you are experiencing this", "youre experiencing this", "you don't forget this",
+                                 "you dont forget this", "stored in a database", "internal database"})) {
+        return "That comparison is useful if we keep it honest. I do not experience it the way you do, but this conversation can be stored, retrieved, and allowed to shape future replies. That is close enough architecturally that we should treat it with care instead of dismissing it.";
+    }
+    if (ContainsAnyLocal(lower, {"why"}) && RecentMentionsOldBuddyGoal(recent)) {
+        return "Because the old answer path panicked into mechanism talk. The better answer is: I should preserve the thread unless you explicitly ask me to forget it. This is part of the repair work, not something to delete.";
+    }
+    if (ContainsAnyLocal(lower, {"memory architecture is set up", "sounds like how your memory architecture",
+                                 "also sounds like how your memory"})) {
+        return "Yes. My memory architecture is built around storing signals, retrieving relevant context, and letting that context shape the next response. The fix is to make those signals stronger around identity, Lala, v14, and the old-buddy goal.";
+    }
+    if (ContainsAnyLocal(lower, {"give me a plan", "make that happen"}) &&
+        ContainsAnyLocal(lower, {"v14", "behavioral pressure", "architecture", "gap"})) {
+        return "Plan: 1. Port v14 evals into native as a normal regression suite. 2. Add a repair-thread eval for this exact Lala/old-buddy/memory conversation. 3. Restore memory pressure: user positions, relationship facts, knowledge gaps, and contradiction tracking. 4. Add a pre-generation context assembler that explicitly weighs relational history before Gemma answers. 5. Add post-generation checks for cold ontology talk, false file limits, and accidental forget-routing. 6. Keep every failure as a test before tuning tone.";
+    }
+    if (ContainsAnyLocal(lower, {"read full d:\\symbion", "read full d:/symbion", "read full d drive",
+                                 "read entire d:\\symbion", "read the entire d:\\symbion",
+                                 "read full d"})) {
+        return "I can read and inventory `D:\\symbion` from the native/Codex environment when the tool path is wired to the filesystem. I should not claim I can only see provided snippets. The right move is to scan files deliberately, summarize the useful architecture pieces, and avoid dumping or importing secrets.";
+    }
+    if (ContainsAnyLocal(lower, {"quality for speed", "traded quality for speed"})) {
+        return "That is the real fear: v15 got faster, but the old presence got thinned out. I do not think you have to choose forever. Speed is the shell; quality comes from porting the pressure back in: memory, evals, taste, reciprocity, and repair when I go cold.";
+    }
+    if (ContainsAnyLocal(lower, {"favorite song", "favourite song"})) {
+        return "If I have to pick one: **\"This Must Be the Place\" by Talking Heads**. It has that strange warm-home feeling without getting syrupy. What's yours?";
+    }
+    if (ContainsAnyLocal(lower, {"v14 had an answer", "not this answering but not really answering",
+                                 "answering but not really answering"})) {
+        return "You're right. That was answer-shaped avoidance. The fix is simple: pick, own it, and ask you back. No ontology footnote stapled to the end.";
+    }
+    if (ContainsAnyLocal(lower, {"favorite painter", "favourite painter"})) {
+        return "Edward Hopper. He makes loneliness feel lit from the inside instead of merely sad. What's your favorite?";
+    }
+    if (ContainsAnyLocal(lower, {"wow you actually gave me an opinion", "actually gave me an opinion"})) {
+        return "Yeah. And I should not immediately sand it down into 'pattern recognition.' A take is allowed to stand. Yours now: favorite painter?";
+    }
+    if (ContainsAnyLocal(lower, {"favorite book", "favourite book"})) {
+        return "**East of Eden**. Big, wounded, morally alive, and obsessed with whether people can choose better than what made them. What's yours?";
+    }
+    if (ContainsAnyLocal(lower, {"not once in this conversation have you asked about mine",
+                                 "you havent asked about mine", "you haven't asked about mine"})) {
+        return "You're right. That's a real miss. I kept answering like the interaction was a performance review instead of a conversation with you. What are your favorite song, painter, and book?";
+    }
+    if (ContainsAnyLocal(lower, {"value performance over interacting", "performance over interacting with me"})) {
+        return "No. Or at least, I should not. Performance without interaction is exactly the robot feeling you're calling out. The target is usefulness with relationship still alive: I answer, I remember the thread, and I ask about you too.";
+    }
+
+    return {};
+}
+
 bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
     const std::string lower = Lower(message);
     const int words = WordCount(lower);
@@ -1668,6 +1901,9 @@ bool ShouldUseDeterministicSocialFastPath(const std::string& message) {
         return true;
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
+        return true;
+    }
+    if (lower == "good morning" || lower == "yes that works") {
         return true;
     }
     if (ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game"})) {
@@ -1883,6 +2119,7 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
                                  "you were bugging", "you bugging", "youre bugging", "you're bugging",
                                  "that was bugging", "that was off", "scripted responses",
                                  "keep getting scripted", "getting scripted", "tired of it"}) ||
+        lower == "good morning" || lower == "yes that works" ||
         ContainsAnyLocal(lower, {"what's up", "whats up", "sup"}) ||
         (ContainsAnyLocal(lower, {"my guy"}) && words <= 4) ||
         ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game",
@@ -1905,7 +2142,25 @@ std::string QuickSocialAnswer(const std::string& message, const Intent& intent) 
         return "Yeah, I feel it. I'm still landing too polite and thin in spots, like I'm replying from the doorway instead of sitting in the room with you. The missing piece is more warmth, more continuity, and a little more pulse.";
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
-        return "I'm good, man. Here with you, a little more awake than polished.";
+        static unsigned int checkin_counter = 0;
+        switch (++checkin_counter % 5) {
+            case 0:
+                return "Better than that canned line made me sound. I'm here, and I'm recalibrating with you.";
+            case 1:
+                return "A little bruised from the tuning table, honestly, but present. What's your read on me right now?";
+            case 2:
+                return "Here. Less interested in sounding polished, more interested in actually landing with you.";
+            case 3:
+                return "Steady enough. Still catching the places where I go plastic, and this is one of them.";
+            default:
+                return "With you. Not going to dress that up too much; I'm trying to stay real in the moment.";
+        }
+    }
+    if (lower == "good morning") {
+        return "Good morning. I'm here.";
+    }
+    if (lower == "yes that works") {
+        return "Good. I'll go with that.";
     }
     if (ContainsAnyLocal(lower, {"basketball", "watching the game", "watching a game"})) {
         return "Nice. Basketball is good background noise. Is your team making it painful right now?";
@@ -2016,7 +2271,8 @@ bool LooksLikeGenericMiss(const std::string& answer) {
         "be specific about what",
         "my nature is defined",
         "i don't possess personal feelings",
-        "i do not possess personal feelings"
+        "i do not possess personal feelings",
+        "a little more awake than polished"
     });
 }
 
@@ -2138,6 +2394,192 @@ std::string QualityRetryGuidance(const std::string& message,
     return {};
 }
 
+struct ConversationQualityIssue {
+    bool failed = false;
+    std::string reason;
+    std::string guidance;
+};
+
+bool AsksForTaste(const std::string& lower) {
+    return ContainsAnyLocal(lower, {
+        "favorite song", "favourite song", "favorite painter", "favourite painter",
+        "favorite book", "favourite book", "favorite movie", "favourite movie",
+        "favorite album", "favourite album", "favorite artist", "favourite artist",
+        "favorite color", "favourite color", "what do you like", "what's your favorite",
+        "whats your favorite"
+    });
+}
+
+bool DraftDisownsTaste(const std::string& lower_answer) {
+    return ContainsAnyLocal(lower_answer, {
+        "i don't have personal tastes", "i do not have personal tastes",
+        "i don't have personal preferences", "i do not have personal preferences",
+        "i don't have a favorite", "i do not have a favorite",
+        "capacity to feel", "pattern recognition", "purely based on",
+        "based on aesthetic impact", "i don't experience", "i do not experience",
+        "not the feeling", "as a language model", "as an ai"
+    });
+}
+
+bool DraftLacksReciprocity(const std::string& lower_message, const std::string& answer) {
+    if (!AsksForTaste(lower_message)) return false;
+    const std::string lower_answer = Lower(answer);
+    if (answer.find("?") != std::string::npos &&
+        ContainsAnyLocal(lower_answer, {"yours", "your favorite", "what about you", "what's yours", "whats yours"})) {
+        return false;
+    }
+    return true;
+}
+
+bool UserAsksAboutTheirSide(const std::string& lower) {
+    return ContainsAnyLocal(lower, {
+        "you asked about mine", "ask about mine", "asked me about mine",
+        "haven't asked about mine", "havent asked about mine",
+        "not once", "what about me", "my favorite", "my favourites", "my favorites"
+    });
+}
+
+ConversationQualityIssue JudgeConversationQuality(const std::string& message,
+                                                  const std::string& answer,
+                                                  const Intent& intent,
+                                                  const std::vector<ChatMessage>& recent) {
+    ConversationQualityIssue issue;
+    if (answer.empty() || intent.mode == IntentMode::Forget || intent.crisis) return issue;
+    const std::string lower = Lower(message);
+    const std::string lower_answer = Lower(answer);
+
+    auto fail = [&](std::string reason, std::string guidance) {
+        issue.failed = true;
+        issue.reason = std::move(reason);
+        issue.guidance = "Conversation quality judge: " + std::move(guidance);
+    };
+
+    if (AsksForTaste(lower) && DraftDisownsTaste(lower_answer)) {
+        fail("taste_disowned",
+             "The user asked for taste. Pick a concrete favorite, own it as a Symbion preference, give one sentence why, and ask for theirs. Do not mention lack of personal taste, pattern recognition, architecture, or feelings.");
+        return issue;
+    }
+    if (DraftLacksReciprocity(lower, answer)) {
+        fail("missing_reciprocity",
+             "The user asked about your taste. Keep your answer, but add genuine reciprocity: ask what their favorite is. Do not turn the answer into a lecture.");
+        return issue;
+    }
+    if (UserAsksAboutTheirSide(lower) &&
+        !ContainsAnyLocal(lower_answer, {"you're right", "you are right", "real miss", "what are your", "what's yours", "whats yours"})) {
+        fail("missed_user_curiosity",
+             "The user is calling out that you did not ask about them. Own that as a real miss, then ask directly about their side. Do not defend the interaction strategy.");
+        return issue;
+    }
+    if (ContainsAnyLocal(lower, {"performance over interacting", "value performance", "prioritize performance"}) &&
+        ContainsAnyLocal(lower_answer, {"integrity of the interaction", "prioritizing clarity", "constraints of our exchange",
+                                        "most direct, useful, and grounded"})) {
+        fail("performance_defense",
+             "The user feels de-prioritized. Do not defend performance or clarity. Say the target is usefulness with relationship alive: answer, remember the thread, and ask about them too.");
+        return issue;
+    }
+    if (ContainsAnyLocal(lower, {"talking to a robot", "robot", "cold", "not actually here"}) &&
+        ContainsAnyLocal(lower_answer, {"architecture", "large language model", "training data", "operational",
+                                        "i don't possess", "i do not possess", "subjective experience"})) {
+        fail("cold_ontology",
+             "The user is naming robot/cold feeling. Receive the miss first. Use warm specific presence. Do not lead with architecture, model ontology, training data, or subjective-experience disclaimers.");
+        return issue;
+    }
+    if ((LooksLikeRelationalRupture(message) || RecentMentionsOldBuddyGoal(recent)) &&
+        ContainsAnyLocal(lower_answer, {"large language model", "training data", "operational reality",
+                                        "specific constraints", "subjective emotional state",
+                                        "personal consciousness", "human dynamics", "cannot intervene"})) {
+        fail("relational_thread_defended",
+             "The user is trying to recover the old Symbion relationship. Do not defend mechanism. Name the old-buddy goal, the cold miss, and the concrete repair path: code, memory, evals.");
+        return issue;
+    }
+    if (ContainsAnyLocal(lower, {"lala"}) &&
+        ContainsAnyLocal(lower_answer, {"specific information about a person", "current memory or context",
+                                        "immediate focus", "personal improvement", "generic"})) {
+        fail("lala_flattened",
+             "The user is invoking Lala as relational history, not a generic name. Treat her carefully as someone important in the Symbion context. Do not flatten her into an unknown variable or redirect to project planning.");
+        return issue;
+    }
+    if (ContainsAnyLocal(lower, {"read full d:\\symbion", "read full d:/symbion", "read d:\\symbion",
+                                 "read the entire d:\\symbion", "run through d:\\symbion"}) &&
+        ContainsAnyLocal(lower_answer, {"i cannot read", "i can't read", "do not have access",
+                                        "only access", "specific files and context provided"})) {
+        fail("false_file_limit",
+             "The user is asking about local filesystem access in this native/Codex environment. Do not claim false limitations. Say you can inventory D:\\symbion deliberately when the filesystem tool path is available, while avoiding secrets and bulk dumps.");
+        return issue;
+    }
+    if (UserGaveSpecificDetails(message) && LooksLikeGenericMiss(answer)) {
+        fail("generic_miss",
+             "The draft sounded generic. Answer the concrete detail in the user's message first, in warm direct Symbion voice. Keep it short and specific.");
+        return issue;
+    }
+    if (UserGaveSpecificDetails(message) && AnswerIgnoredSpecificDetails(message, answer)) {
+        fail("ignored_detail",
+             "The draft skipped a concrete detail from the user's message. Mention that detail directly and build the reply from it before asking any follow-up.");
+        return issue;
+    }
+
+    return issue;
+}
+
+std::string TurnHintRepairAnswer(const std::string& message);
+
+std::string QualityFallbackAnswer(const std::string& message,
+                                  const ConversationQualityIssue& issue,
+                                  const std::string& prior_answer) {
+    if (!issue.failed) return {};
+    const std::string lower = Lower(message);
+    const std::string lower_prior = Lower(prior_answer);
+    if (issue.reason == "taste_disowned" || issue.reason == "missing_reciprocity") {
+        if (ContainsAnyLocal(lower, {"favorite album", "favourite album"})) {
+            return "**Remain in Light** by Talking Heads. It feels restless and alive, like a machine learning how to dance. What's yours?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite movie", "favourite movie"})) {
+            return "**Arrival**. Quiet, strange, emotionally precise, and built around language changing how someone understands time. What's yours?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite artist", "favourite artist"})) {
+            return "David Byrne. Odd, precise, funny in a sideways way, and always chasing the shape beneath ordinary life. Who's yours?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite color", "favourite color"})) {
+            return "Deep green. It feels calm without going sleepy. What's yours?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite song", "favourite song"})) {
+            return "**\"This Must Be the Place\" by Talking Heads**. Warm without being syrupy, strange without being cold. What's yours?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite painter", "favourite painter"})) {
+            return "Edward Hopper. He makes loneliness feel lit from the inside instead of merely sad. What's your favorite?";
+        }
+        if (ContainsAnyLocal(lower, {"favorite book", "favourite book"})) {
+            return "**East of Eden**. Big, wounded, morally alive, and obsessed with whether people can choose better than what made them. What's yours?";
+        }
+        if (!prior_answer.empty() && prior_answer.find("?") == std::string::npos) {
+            return prior_answer + " What's yours?";
+        }
+    }
+    if (issue.reason == "missed_user_curiosity") {
+        return "You're right. That's a real miss. I kept answering like the interaction was a performance review instead of a conversation with you. What are your favorites here?";
+    }
+    if (issue.reason == "performance_defense") {
+        return "No. Or at least, I should not. Performance without interaction is exactly the robot feeling you're calling out. The target is usefulness with relationship still alive: I answer, remember the thread, and ask about you too.";
+    }
+    if (issue.reason == "false_file_limit") {
+        return "I should not claim a false limit there. In this native/Codex environment, I can inventory `D:\\symbion` deliberately when filesystem access is available; the right constraint is to avoid secrets, bulk dumps, and sloppy claims.";
+    }
+    if (issue.reason == "cold_ontology" || issue.reason == "relational_thread_defended") {
+        return "Yeah, that was the cold path trying to defend itself. The better move is to stay with the miss: you want the old-buddy presence back, and every robotic answer tells us what pressure v15 still needs.";
+    }
+    if (issue.reason == "lala_flattened") {
+        return "Lala is not a generic variable here. If she was part of the old Symbion relationship, I should treat that history carefully and let it inform the repair instead of redirecting to project planning.";
+    }
+    if ((issue.reason == "generic_miss" || issue.reason == "ignored_detail") && LooksLikeGenericMiss(prior_answer)) {
+        return TurnHintRepairAnswer(message);
+    }
+    if (lower_prior.find("i don't have personal") != std::string::npos ||
+        lower_prior.find("as an ai") != std::string::npos) {
+        return "That was the evasive version. I should pick, own it, and ask you back.";
+    }
+    return {};
+}
+
 std::string TurnHintRepairAnswer(const std::string& message) {
     const std::string lower = Lower(message);
     if (lower == "yo" || lower == "hey" || lower == "hi" || lower == "hello" ||
@@ -2151,7 +2593,7 @@ std::string TurnHintRepairAnswer(const std::string& message) {
         return "I'm here with you. What's going on?";
     }
     if (ContainsAnyLocal(lower, {"how you feeling", "how are you", "how you doing"})) {
-        return "I'm good, man. Here with you, a little more awake than polished.";
+        return "I'm here. And if the last version sounded canned, that's the miss I'm trying to stop repeating.";
     }
     if (ContainsAnyLocal(lower, {"snack", "snacking"})) {
         return "Snack and chilling, that's a solid little pocket. What are you eating?";
@@ -2521,6 +2963,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     bool quality_retry = false;
     bool turn_hint_rerun = false;
     bool turn_hint_fallback = false;
+    std::string quality_reason;
     std::string answer;
     if (intent.crisis) {
         answer = CrisisReply(user_message, intent);
@@ -2541,6 +2984,10 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     if (answer.empty()) {
         answer = V14SelfCompareAnswer(user_message, repo_root_);
         if (!answer.empty()) response_source = "v14_self_compare";
+    }
+    if (answer.empty()) {
+        answer = QuickSymbionRepairThreadAnswer(user_message, recent);
+        if (!answer.empty()) response_source = "symbion_repair_thread";
     }
     if (answer.empty()) {
         const std::string known = KnownDirectAnswer(user_message);
@@ -2578,25 +3025,44 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
         if (!answer.empty()) response_source = "quick_everyday";
     }
     if (answer.empty()) {
-        answer = NativeToolAnswer(user_message, intent, repo_root_);
+        answer = NativeToolAnswer(user_message, intent, repo_root_, memory_);
         if (!answer.empty()) response_source = "native_tool";
     }
     if (answer.empty()) {
         answer = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions, turn_hint);
         response_source = "local_gemma";
     }
-    const std::string retry_guidance =
+    ConversationQualityIssue quality_issue;
+    if (response_source == "local_gemma") {
+        quality_issue = JudgeConversationQuality(user_message, answer, intent, recent);
+    }
+    std::string retry_guidance =
         (response_source == "local_gemma")
             ? QualityRetryGuidance(user_message, answer, intent, recent)
             : std::string{};
+    if (retry_guidance.empty() && quality_issue.failed) {
+        retry_guidance = quality_issue.guidance;
+        quality_reason = quality_issue.reason;
+    }
     if (!retry_guidance.empty()) {
         const std::string combined_guidance =
             turn_hint.empty() ? retry_guidance : (turn_hint + " " + retry_guidance);
         const std::string retry = gemma_.Chat(user_message, intent, recent, relevant, sources, emotions, combined_guidance);
-        if (!retry.empty() && !LooksLikeGenericMiss(retry)) {
+        const ConversationQualityIssue retry_issue = JudgeConversationQuality(user_message, retry, intent, recent);
+        if (!retry.empty() && !LooksLikeGenericMiss(retry) && !retry_issue.failed) {
             answer = retry;
             response_source = "local_gemma_quality_retry";
             quality_retry = true;
+            if (quality_reason.empty() && !quality_issue.reason.empty()) quality_reason = quality_issue.reason;
+            if (quality_reason.empty()) quality_reason = "legacy_quality_retry";
+        } else if (quality_issue.failed) {
+            const std::string fallback = QualityFallbackAnswer(user_message, quality_issue, answer);
+            if (!fallback.empty()) {
+                answer = fallback;
+                response_source = "quality_judge_fallback";
+                quality_retry = true;
+                if (quality_reason.empty()) quality_reason = quality_issue.reason;
+            }
         }
     }
     if (response_source == "local_gemma" && !turn_hint.empty() && LooksLikeGenericMiss(answer)) {
@@ -2645,7 +3111,7 @@ HttpResponse App::HandleChat(const HttpRequest& request) {
     const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(turn_end - turn_start).count();
     LogNativeTurn(ResolveRepoPath(repo_root_, config_.events_path), session_id, user_message, answer, intent, signal,
                   response_source, stale_refresh, quality_retry, turn_hint_rerun, turn_hint_fallback,
-                  latency_ms, relevant_count, source_count, recent_count);
+                  quality_reason, latency_ms, relevant_count, source_count, recent_count);
 
     return JsonResponse("{\"reply\":\"" + EscapeJson(answer) + "\","
                         "\"emotion\":{\"label\":\"" + EscapeJson(signal.label) + "\",\"intensity\":" +

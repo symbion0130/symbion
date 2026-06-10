@@ -154,6 +154,13 @@ bool LooksLikePhysicalIllness(const std::string& text) {
 }
 
 bool LooksLikeForget(const std::string& text) {
+    if (ContainsAny(text, {
+        "you don't forget", "you dont forget", "you do not forget",
+        "you won't forget", "you wont forget", "you remember this",
+        "stored in a database", "memory architecture"
+    })) {
+        return false;
+    }
     return ContainsAny(text, {
         "forget", "delete memory", "delete that memory", "delete this memory",
         "remove memory", "erase memory", "clear memory", "clear this chat",
