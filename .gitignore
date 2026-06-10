@@ -5,6 +5,7 @@
 # Local data
 data/
 logs/
+models/
 *.db
 *.db.bak
 *.db.bak.*
